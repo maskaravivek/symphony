@@ -1,0 +1,22 @@
+import { Liquid } from 'liquidjs';
+
+import type { Issue } from '../domain/issue.js';
+
+const engine = new Liquid({
+  strictVariables: false,
+  strictFilters: false,
+});
+
+engine.registerFilter('join', (input: unknown, sep: unknown) => {
+  if (!Array.isArray(input)) return '';
+  const separator = typeof sep === 'string' ? sep : ',';
+  return input.join(separator);
+});
+
+export async function renderPrompt(template: string, issue: Issue): Promise<string> {
+  return renderTemplate(template, { issue });
+}
+
+export async function renderTemplate(template: string, context: Record<string, unknown>): Promise<string> {
+  return engine.parseAndRender(template, context);
+}

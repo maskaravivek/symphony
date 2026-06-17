@@ -1,0 +1,15 @@
+polling:
+  interval_ms: 30000
+
+agent:
+  max_concurrent_agents: 4
+
+repos:
+  - id: mdedit
+    workflow: ../mdedit/WORKFLOW.md
+    max_concurrent_agents: 2
+    enabled: true
+  - id: myaarti
+    workflow: ../myaarti/WORKFLOW.md
+    max_concurrent_agents: 1
+    enabled: true

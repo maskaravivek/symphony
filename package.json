@@ -1,0 +1,42 @@
+{
+  "name": "symphony",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Symphony: GitHub-issues-driven coding-agent orchestrator service.",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/mangoappstudio/symphony.git"
+  },
+  "packageManager": "yarn@1.22.22",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "symphony": "bin/symphony.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "symphony.config.example.yml"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "bash -lc 'export NVM_DIR=\"${NVM_DIR:-$HOME/.nvm}\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" && nvm use 22 && hash -r; exec tsx src/index.ts \"$@\"' bash",
+    "start": "node bin/symphony.js",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "liquidjs": "^10.19.1",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "tsup": "^8.0.2",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
