@@ -25,6 +25,8 @@ tracker:
     "priority: high": 2
     "priority: medium": 3
     "priority: low": 4
+  # Produces flat branches like symphony-123-short-title.
+  # Avoid "/" here unless you intentionally want nested Git refs.
   branch_prefix: symphony
 
 polling:

@@ -104,7 +104,8 @@ function slugify(value: string): string {
 function deriveBranchName(branchPrefix: string, issueNumber: number | null, title: string): string | null {
   if (!issueNumber) return null;
   const slug = slugify(title).slice(0, 48) || 'issue';
-  return `${branchPrefix}/${issueNumber}-${slug}`;
+  const prefix = slugify(branchPrefix);
+  return [prefix, `${issueNumber}-${slug}`].filter(Boolean).join('-');
 }
 
 function ownerRepoFromRepositoryUrl(repositoryUrl: string | undefined): { owner: string; repo: string } | null {

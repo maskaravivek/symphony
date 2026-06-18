@@ -40,6 +40,59 @@ function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   });
 }
 
+test('derives flat branch names from issues', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    jsonResponse({
+      id: 42,
+      node_id: 'I_issue',
+      number: 42,
+      title: 'Build a shared AST analysis core in Markdown parser',
+      state: 'open',
+      labels: [{ name: 'ready-for-agent' }],
+      html_url: 'https://github.test/mangoappstudio/mdedit/issues/42',
+      repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+    });
+
+  let issue;
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    issue = await client.fetchIssueByNumber(42);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(issue?.branch_name, 'codex-42-build-a-shared-ast-analysis-core-in-markdown-par');
+  assert.equal(issue?.branch_name?.includes('/'), false);
+});
+
+test('derives flat branch names with empty or nested prefixes', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    jsonResponse({
+      id: 43,
+      node_id: 'I_issue_nested',
+      number: 43,
+      title: 'Fix push refs',
+      state: 'open',
+      labels: [{ name: 'ready-for-agent' }],
+      html_url: 'https://github.test/mangoappstudio/mdedit/issues/43',
+      repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+    });
+
+  try {
+    const nestedClient = new GithubIssueTrackerClient({ ...trackerConfig(), branch_prefix: 'symphony/agent' });
+    const nestedIssue = await nestedClient.fetchIssueByNumber(43);
+    assert.equal(nestedIssue?.branch_name, 'symphony-agent-43-fix-push-refs');
+
+    const unprefixedClient = new GithubIssueTrackerClient({ ...trackerConfig(), branch_prefix: '' });
+    const unprefixedIssue = await unprefixedClient.fetchIssueByNumber(43);
+    assert.equal(unprefixedIssue?.branch_name, '43-fix-push-refs');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('writes GitHub labels through REST endpoints', async () => {
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;

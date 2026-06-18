@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "cli": "bash -lc 'export NVM_DIR=\"${NVM_DIR:-$HOME/.nvm}\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" && nvm use 22 && hash -r; exec tsx src/index.ts \"$@\"' bash",
+    "cli": "bash -lc 'export NVM_DIR=\"${NVM_DIR:-$HOME/.nvm}\"; [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" && nvm use 24 && hash -r; exec tsx src/index.ts \"$@\"' bash",
     "dev": "yarn cli -- run --config ./symphony.config.yml",
     "start": "node bin/symphony.js",
     "test": "tsx --test \"src/**/*.test.ts\"",
