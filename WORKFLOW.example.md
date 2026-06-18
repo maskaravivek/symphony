@@ -14,6 +14,12 @@ tracker:
     - blocked
     - ready-for-human
     - wontfix
+  epics:
+    enabled: true
+    relationship_source: native_subissues
+    auto_label_children: true
+    parent_mode: coordinator_only
+    max_depth: 8
   priority_labels:
     "priority: urgent": 1
     "priority: high": 2

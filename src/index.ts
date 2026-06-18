@@ -11,6 +11,7 @@ import { log } from './utils/log.js';
 import { resolveWorkflowPath } from './workflow/resolveWorkflowPath.js';
 import { loadWorkflowFromFile } from './workflow/loadWorkflow.js';
 import { scanRunStates } from './status/scanRunStates.js';
+import { readEpicStates, type EpicState } from './status/epicState.js';
 import { loadServerConfigFromFile } from './server/loadServerConfig.js';
 import { selectRunState } from './status/selectRunState.js';
 import type { RunState } from './status/runState.js';
@@ -50,6 +51,31 @@ async function scanStates(options: { config?: string; workflow?: string }): Prom
   const workflowPath = await resolveWorkflowPath(options.workflow ?? 'WORKFLOW.md');
   const config = await loadConfigFromWorkflowPath(workflowPath);
   return scanRunStates(config.workspace.root);
+}
+
+async function scanEpicsFromServerConfig(configPath: string): Promise<EpicState[]> {
+  const serverConfig = await loadServerConfigFromFile(configPath);
+  const states: EpicState[] = [];
+  for (const repo of serverConfig.repos.filter((r) => r.enabled)) {
+    const workflowConfig = await loadConfigFromWorkflowPath(repo.workflow);
+    const repoStates = await readEpicStates(workflowConfig.workspace.root);
+    states.push(
+      ...repoStates.map((state) => ({
+        ...state,
+        repo_id: state.repo_id ?? repo.id,
+        owner: state.owner ?? workflowConfig.tracker.owner,
+        repo: state.repo ?? workflowConfig.tracker.repo,
+      })),
+    );
+  }
+  return states;
+}
+
+async function scanEpics(options: { config?: string; workflow?: string }): Promise<EpicState[]> {
+  if (options.config) return scanEpicsFromServerConfig(resolveConfigPath(options.config));
+  const workflowPath = await resolveWorkflowPath(options.workflow ?? 'WORKFLOW.md');
+  const config = await loadConfigFromWorkflowPath(workflowPath);
+  return readEpicStates(config.workspace.root);
 }
 
 async function commandExists(command: string): Promise<boolean> {
@@ -198,18 +224,15 @@ async function main(): Promise<void> {
 
   program
     .command('status')
-    .description('Show per-issue workspace status (reads .symphony/run.json)')
+    .description('Show issue workspace and epic coordinator status')
     .option('-c, --config <path>', 'Path to symphony.config.yml')
     .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
     .action(async (options: { config?: string; workflow: string }) => {
       const states = await scanStates({ config: options.config, workflow: options.workflow });
-      const rows = states
-        .sort((a, b) => {
-          const repoCompare = (a.repo_id ?? '').localeCompare(b.repo_id ?? '');
-          if (repoCompare !== 0) return repoCompare;
-          return (a.issue_number ?? Number.POSITIVE_INFINITY) - (b.issue_number ?? Number.POSITIVE_INFINITY);
-        })
-        .map((s) => ({
+      const epics = await scanEpics({ config: options.config, workflow: options.workflow });
+      const rows = [
+        ...states.map((s) => ({
+          issueNumber: s.issue_number ?? Number.POSITIVE_INFINITY,
           repo: s.repo_id ?? '',
           issue: s.issue_number ? `#${s.issue_number}` : s.issue_identifier,
           status: s.status,
@@ -219,6 +242,35 @@ async function main(): Promise<void> {
           thread: shortThreadId(s.codex_thread_id),
           updated: s.updated_at,
           workspace: s.workspace_path,
+        })),
+        ...epics.map((s) => ({
+          issueNumber: s.issue_number ?? Number.POSITIVE_INFINITY,
+          repo: s.repo_id ?? '',
+          issue: s.issue_number ? `#${s.issue_number}` : s.issue_identifier,
+          status: `epic:${s.status}`,
+          lifecycle: `${s.terminal_children}/${s.total_children} terminal`,
+          labels: s.labels.join(','),
+          pause: '',
+          thread: '',
+          updated: s.updated_at,
+          workspace: '(epic coordinator)',
+        })),
+      ]
+        .sort((a, b) => {
+          const repoCompare = a.repo.localeCompare(b.repo);
+          if (repoCompare !== 0) return repoCompare;
+          return a.issueNumber - b.issueNumber;
+        })
+        .map((s) => ({
+          repo: s.repo,
+          issue: s.issue,
+          status: s.status,
+          lifecycle: s.lifecycle,
+          labels: s.labels,
+          pause: s.pause,
+          thread: s.thread,
+          updated: s.updated,
+          workspace: s.workspace,
         }));
 
       if (rows.length === 0) {

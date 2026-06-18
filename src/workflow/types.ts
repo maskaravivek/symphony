@@ -1,3 +1,11 @@
+export interface EpicTrackerConfig {
+  enabled: boolean;
+  relationship_source: 'native_subissues';
+  auto_label_children: boolean;
+  parent_mode: 'coordinator_only';
+  max_depth: number;
+}
+
 export interface GithubTrackerConfig {
   kind: 'github';
   owner: string;
@@ -13,6 +21,7 @@ export interface GithubTrackerConfig {
   priority_labels: Record<string, number> | null;
   branch_prefix: string;
   include_pull_requests: boolean;
+  epics: EpicTrackerConfig;
   page_size: number;
   request_timeout_ms: number;
 }

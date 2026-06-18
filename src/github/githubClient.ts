@@ -1,4 +1,5 @@
 import type { Issue } from '../domain/issue.js';
+import type { EpicTreeNode } from '../domain/epic.js';
 import type { GithubTrackerConfig } from '../workflow/types.js';
 import { SymphonyRuntimeError } from '../utils/errors.js';
 
@@ -25,6 +26,7 @@ type GithubIssuePayload = {
   assignees?: GithubUser[];
   milestone?: GithubMilestone | null;
   html_url?: string;
+  repository_url?: string;
   created_at?: string;
   updated_at?: string;
   pull_request?: unknown;
@@ -35,6 +37,8 @@ export interface IssueTrackerClient {
   fetchIssuesByStates(stateNames: string[]): Promise<Issue[]>;
   fetchIssueStatesByIds(issueIds: string[]): Promise<Map<string, string>>;
   fetchIssueByNumber(number: number): Promise<Issue | null>;
+  listSubIssues(number: number): Promise<Issue[]>;
+  getParentIssue(number: number): Promise<Issue | null>;
 }
 
 export interface IssueComment {
@@ -103,6 +107,13 @@ function deriveBranchName(branchPrefix: string, issueNumber: number | null, titl
   return `${branchPrefix}/${issueNumber}-${slug}`;
 }
 
+function ownerRepoFromRepositoryUrl(repositoryUrl: string | undefined): { owner: string; repo: string } | null {
+  if (!repositoryUrl) return null;
+  const match = /\/repos\/([^/]+)\/([^/]+)$/.exec(repositoryUrl);
+  if (!match) return null;
+  return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]) };
+}
+
 function parseBlockers(body: string | null): { owner: string | null; repo: string | null; number: number }[] {
   if (!body) return [];
   const results: { owner: string | null; repo: string | null; number: number }[] = [];
@@ -130,6 +141,9 @@ function parseBlockers(body: string | null): { owner: string | null; repo: strin
 }
 
 function normalizeGithubIssuePayload(owner: string, repo: string, tracker: GithubTrackerConfig, payload: GithubIssuePayload): Issue {
+  const payloadRepo = ownerRepoFromRepositoryUrl(payload.repository_url);
+  const issueOwner = payloadRepo?.owner ?? owner;
+  const issueRepo = payloadRepo?.repo ?? repo;
   const issueId = payload.node_id ?? (payload.id !== undefined ? String(payload.id) : null);
   const number = typeof payload.number === 'number' ? payload.number : null;
   const title = typeof payload.title === 'string' ? payload.title : '';
@@ -138,24 +152,24 @@ function normalizeGithubIssuePayload(owner: string, repo: string, tracker: Githu
 
   if (!issueId) throw new SymphonyRuntimeError('GitHub issue payload missing id');
   if (!number) throw new SymphonyRuntimeError(`GitHub issue payload missing number for id ${issueId}`);
-  if (!title) throw new SymphonyRuntimeError(`GitHub issue payload missing title for ${owner}/${repo}#${number}`);
+  if (!title) throw new SymphonyRuntimeError(`GitHub issue payload missing title for ${issueOwner}/${issueRepo}#${number}`);
 
   const blockers = parseBlockers(payload.body ?? null).map((b) => ({
     id: null,
-    identifier: b.owner && b.repo ? `${b.owner}/${b.repo}#${b.number}` : `${owner}/${repo}#${b.number}`,
+    identifier: b.owner && b.repo ? `${b.owner}/${b.repo}#${b.number}` : `${issueOwner}/${issueRepo}#${b.number}`,
     state: null,
   }));
 
   return {
     id: issueId,
-    identifier: `${owner}/${repo}#${number}`,
+    identifier: `${issueOwner}/${issueRepo}#${number}`,
     number,
     title,
     description: payload.body ?? null,
     priority: derivePriority(labels, tracker.priority_labels),
     state,
     workflow_state: deriveWorkflowState(labels),
-    branch_name: deriveBranchName(tracker.branch_prefix, number, title),
+    branch_name: issueOwner === tracker.owner && issueRepo === tracker.repo ? deriveBranchName(tracker.branch_prefix, number, title) : null,
     url: payload.html_url ?? null,
     labels,
     assignees: (payload.assignees ?? []).map((a) => a.login).filter((v): v is string => typeof v === 'string'),
@@ -236,6 +250,40 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     if (!payload) return null;
     if (!this.tracker.include_pull_requests && payload.pull_request !== undefined) return null;
     return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+  }
+
+  async listSubIssues(number: number): Promise<Issue[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/sub_issues`, this.tracker.api_base_url);
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages(url.toString());
+    return raw
+      .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
+      .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
+  }
+
+  async getParentIssue(number: number): Promise<Issue | null> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/parent`, this.tracker.api_base_url);
+    const { data } = await this.fetchJson(url.toString(), { allowNotFound: true });
+    if (data === null) return null;
+    if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub parent issue response to be an object');
+    const payload = data as GithubIssuePayload;
+    if (!this.tracker.include_pull_requests && payload.pull_request !== undefined) return null;
+    return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+  }
+
+  async buildEpicTree(issue: Issue, maxDepth: number): Promise<EpicTreeNode> {
+    const visit = async (nodeIssue: Issue, depth: number, seen: Set<string>): Promise<EpicTreeNode> => {
+      if (depth >= maxDepth || !nodeIssue.number) return { issue: nodeIssue, children: [] };
+      if (seen.has(nodeIssue.identifier)) return { issue: nodeIssue, children: [] };
+      const nextSeen = new Set(seen);
+      nextSeen.add(nodeIssue.identifier);
+
+      const children = await this.listSubIssues(nodeIssue.number);
+      const childNodes = await Promise.all(children.map((child) => visit(child, depth + 1, nextSeen)));
+      return { issue: nodeIssue, children: childNodes };
+    };
+
+    return visit(issue, 0, new Set());
   }
 
   async listIssueComments(number: number): Promise<IssueComment[]> {

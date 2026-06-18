@@ -1,4 +1,5 @@
 import type { Issue } from '../domain/issue.js';
+import type { EpicTreeNode } from '../domain/epic.js';
 import { GithubIssueTrackerClient } from '../github/githubClient.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
@@ -11,9 +12,11 @@ import { WorkspaceManager } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { LoadedWorkflow, WorkflowConfig } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type CodexMode, type PauseReason, type RunState } from '../status/runState.js';
+import { readEpicStates, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
 import { buildRunContext } from './runContext.js';
 import { formatPauseComment, parsePauseRequest } from './pauseProtocol.js';
 import { formatStatusComment, statusMarker } from './statusComment.js';
+import { epicStatusMarker, formatEpicStatusComment } from './epicStatusComment.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 
@@ -89,6 +92,31 @@ function getIssueLogFields(config: WorkflowConfig, issue: Issue, repoId: string 
     issue_identifier: issue.identifier,
     issue_url: issue.url,
   };
+}
+
+function issueRepoParts(issue: Issue): { owner: string; repo: string; number: number } | null {
+  const match = /^([^/]+)\/([^#]+)#(\d+)$/.exec(issue.identifier);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2], number: Number(match[3]) };
+}
+
+function isSameTrackerRepo(config: WorkflowConfig, issue: Issue): boolean {
+  const parts = issueRepoParts(issue);
+  return Boolean(parts && parts.owner === config.tracker.owner && parts.repo === config.tracker.repo);
+}
+
+function isTerminalIssue(config: WorkflowConfig, issue: Issue): boolean {
+  return config.tracker.terminal_states.includes(issue.state);
+}
+
+function collectEpicChildren(root: EpicTreeNode): Array<{ node: EpicTreeNode; depth: number }> {
+  const out: Array<{ node: EpicTreeNode; depth: number }> = [];
+  const visit = (node: EpicTreeNode, depth: number) => {
+    if (depth > 0) out.push({ node, depth });
+    for (const child of node.children) visit(child, depth + 1);
+  };
+  visit(root, 0);
+  return out;
 }
 
 export class Orchestrator {
@@ -170,7 +198,8 @@ export class Orchestrator {
       return;
     }
 
-    const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id));
+    const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
+    const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
     const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
 
     await this.dispatchReadyRetries(config, eligibleCandidates, workspaceManager, capacity);
@@ -304,6 +333,138 @@ export class Orchestrator {
         continue;
       }
     }
+  }
+
+  private async processEpicCandidates(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    candidates: Issue[],
+  ): Promise<Set<string>> {
+    const epicParentIds = new Set<string>();
+    for (const issue of candidates) {
+      if (!issue.number) continue;
+      try {
+        const tree = await tracker.buildEpicTree(issue, config.tracker.epics.max_depth);
+        if (tree.children.length === 0) continue;
+
+        epicParentIds.add(issue.id);
+        await this.coordinateEpic(config, tracker, tree);
+      } catch (err) {
+        log('error', 'epic_coordination_failed', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'epic_coordination_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return epicParentIds;
+  }
+
+  private async coordinateEpic(config: WorkflowConfig, tracker: GithubIssueTrackerClient, tree: EpicTreeNode): Promise<void> {
+    const issue = tree.issue;
+    if (!issue.number) return;
+
+    const descendants = collectEpicChildren(tree);
+    const existingEpic = (await readEpicStates(config.workspace.root)).find(
+      (state) => state.issue_id === issue.id || state.issue_identifier === issue.identifier,
+    );
+    const children: EpicChildState[] = [];
+
+    for (const entry of descendants) {
+      children.push(await this.buildEpicChildState(config, entry.node, entry.depth));
+    }
+
+    const terminalChildren = descendants.filter((entry) => isTerminalIssue(config, entry.node.issue)).length;
+    const totalChildren = descendants.length;
+    const openChildren = totalChildren - terminalChildren;
+    const isComplete = totalChildren > 0 && openChildren === 0;
+    const now = new Date().toISOString();
+    const labels = isComplete
+      ? issue.labels.filter((label) => label !== LABEL_READY && label !== LABEL_RUNNING).concat(issue.labels.includes(LABEL_READY_FOR_HUMAN) ? [] : [LABEL_READY_FOR_HUMAN])
+      : issue.labels;
+
+    const state: EpicState = {
+      repo_id: this.repoId,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      issue_id: issue.id,
+      issue_number: issue.number ?? null,
+      issue_identifier: issue.identifier,
+      issue_url: issue.url ?? null,
+      title: issue.title,
+      labels: [...new Set(labels)].sort(),
+      status: isComplete ? 'completed' : 'coordinating',
+      open_children: openChildren,
+      terminal_children: terminalChildren,
+      total_children: totalChildren,
+      children,
+      status_comment_id: existingEpic?.status_comment_id ?? null,
+      updated_at: now,
+    };
+
+    if (isComplete) {
+      await this.applyLabels(config, issue.number, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+    }
+
+    const message = isComplete
+      ? 'All native sub-issues are terminal. Epic is ready for human review.'
+      : 'Epic coordination is active. Symphony queued eligible leaf sub-issues and will keep this parent out of implementation runs.';
+    const result = await tracker.upsertStatusComment(issue.number, epicStatusMarker(issue), formatEpicStatusComment({ issue, config, repoId: this.repoId, state, message }), state.status_comment_id);
+
+    await upsertEpicState(config.workspace.root, { ...state, status_comment_id: result.id, updated_at: new Date().toISOString() });
+  }
+
+  private async buildEpicChildState(config: WorkflowConfig, node: EpicTreeNode, depth: number): Promise<EpicChildState> {
+    const issue = node.issue;
+    const leaf = node.children.length === 0;
+    const labels = issue.labels;
+    let queued = false;
+    let skippedReason: string | null = null;
+
+    if (!leaf) {
+      skippedReason = 'nested_epic';
+    } else if (!issue.number) {
+      skippedReason = 'missing_issue_number';
+    } else if (!isSameTrackerRepo(config, issue)) {
+      skippedReason = 'cross_repo';
+    } else if (isTerminalIssue(config, issue)) {
+      skippedReason = 'terminal_state';
+    } else if (!config.tracker.active_states.includes(issue.state)) {
+      skippedReason = 'inactive_state';
+    } else if (hasAnyLabel(labels, config.tracker.ignored_labels)) {
+      skippedReason = 'ignored_label';
+    } else if (labels.includes(LABEL_READY) || labels.includes(LABEL_RUNNING)) {
+      queued = true;
+    } else if (!config.tracker.epics.auto_label_children) {
+      skippedReason = 'auto_label_disabled';
+    } else {
+      try {
+        await this.applyLabels(config, issue.number, { add: [LABEL_READY] });
+        queued = true;
+        labels.push(LABEL_READY);
+      } catch (err) {
+        skippedReason = 'label_failed';
+        log('error', 'epic_child_label_failed', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'epic_child_label_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    return {
+      issue_id: issue.id,
+      issue_number: issue.number,
+      issue_identifier: issue.identifier,
+      issue_url: issue.url,
+      title: issue.title,
+      state: issue.state,
+      labels: [...new Set(labels)].sort(),
+      depth,
+      leaf,
+      queued,
+      skipped_reason: skippedReason,
+    };
   }
 
   private async dispatchReadyRetries(

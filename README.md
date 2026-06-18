@@ -66,6 +66,22 @@ yarn dev -- tail mdedit#264 --config ./symphony.config.yml
 - Use Symphony for well-scoped, reviewable work you want to run unattended (implementation, refactors, tests, docs).
 - Use the Codex app for ambiguous work that benefits from interactive steering (debugging, architecture, product judgment).
 
+## Native GitHub epics
+
+Symphony can coordinate GitHub native sub-issues when enabled in `WORKFLOW.md`:
+
+```yaml
+tracker:
+  epics:
+    enabled: true
+    relationship_source: native_subissues
+    auto_label_children: true
+    parent_mode: coordinator_only
+    max_depth: 8
+```
+
+When a `ready-for-agent` issue has native sub-issues, Symphony treats it as a coordinator epic instead of an implementation issue. It does not create a parent workspace or run Codex on the parent. It adds `ready-for-agent` to eligible open leaf sub-issues, updates a parent epic status comment, and marks the parent `ready-for-human` once all descendants are terminal.
+
 ## Notes
 
 - `WORKFLOW.md` contains YAML front matter for config + a Markdown prompt template body.

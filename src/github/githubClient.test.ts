@@ -20,6 +20,13 @@ function trackerConfig(): GithubTrackerConfig {
     priority_labels: null,
     branch_prefix: 'codex',
     include_pull_requests: false,
+    epics: {
+      enabled: false,
+      relationship_source: 'native_subissues',
+      auto_label_children: true,
+      parent_mode: 'coordinator_only',
+      max_depth: 8,
+    },
     page_size: 50,
     request_timeout_ms: 5_000,
   };
@@ -121,4 +128,82 @@ test('updates sticky status comment when marker exists', async () => {
   assert.equal(calls[1]?.url, 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/11');
   assert.equal(calls[1]?.method, 'PATCH');
   assert.deepEqual(calls[1]?.body, { body: 'new body' });
+});
+
+test('lists native sub-issues through paginated REST endpoint', async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    calls.push(String(input));
+    if (calls.length === 1) {
+      return jsonResponse(
+        [
+          {
+            id: 100,
+            node_id: 'I_child_1',
+            number: 43,
+            title: 'Child one',
+            state: 'open',
+            labels: [{ name: 'enhancement' }],
+            html_url: 'https://github.test/mangoappstudio/mdedit/issues/43',
+          },
+        ],
+        { headers: { link: '<https://api.github.test/page2>; rel="next"', 'content-type': 'application/json' } },
+      );
+    }
+    return jsonResponse([
+      {
+        id: 101,
+        node_id: 'I_child_2',
+        number: 44,
+        title: 'Child two',
+        state: 'closed',
+        labels: [],
+        html_url: 'https://github.test/mangoappstudio/mdedit/issues/44',
+      },
+    ]);
+  };
+
+  let issues;
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    issues = await client.listSubIssues(42);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls[0], 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/sub_issues?per_page=50');
+  assert.equal(calls[1], 'https://api.github.test/page2');
+  assert.deepEqual(
+    issues.map((issue) => ({ identifier: issue.identifier, state: issue.state, labels: issue.labels })),
+    [
+      { identifier: 'mangoappstudio/mdedit#43', state: 'open', labels: ['enhancement'] },
+      { identifier: 'mangoappstudio/mdedit#44', state: 'closed', labels: [] },
+    ],
+  );
+});
+
+test('gets parent issue through REST endpoint', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    jsonResponse({
+      id: 99,
+      node_id: 'I_parent',
+      number: 42,
+      title: 'Parent epic',
+      state: 'open',
+      labels: [{ name: 'ready-for-agent' }],
+      html_url: 'https://github.test/mangoappstudio/mdedit/issues/42',
+    });
+
+  let parent;
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    parent = await client.getParentIssue(43);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(parent?.identifier, 'mangoappstudio/mdedit#42');
+  assert.deepEqual(parent?.labels, ['ready-for-agent']);
 });

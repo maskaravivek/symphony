@@ -79,6 +79,32 @@ function normalizePriorityLabels(value: unknown): Record<string, number> | null 
   return out;
 }
 
+function normalizeEpicConfig(value: unknown): WorkflowConfig['tracker']['epics'] {
+  const raw = isRecord(value) ? value : {};
+  const enabled = asBoolean(raw.enabled, 'tracker.epics.enabled') ?? false;
+  const relationshipSource = asString(raw.relationship_source, 'tracker.epics.relationship_source') ?? 'native_subissues';
+  if (relationshipSource !== 'native_subissues') {
+    throw new SymphonyConfigError('tracker.epics.relationship_source must be native_subissues');
+  }
+  const autoLabelChildren = asBoolean(raw.auto_label_children, 'tracker.epics.auto_label_children') ?? true;
+  const parentMode = asString(raw.parent_mode, 'tracker.epics.parent_mode') ?? 'coordinator_only';
+  if (parentMode !== 'coordinator_only') {
+    throw new SymphonyConfigError('tracker.epics.parent_mode must be coordinator_only');
+  }
+  const maxDepth = asNumber(raw.max_depth, 'tracker.epics.max_depth') ?? 8;
+  if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 8) {
+    throw new SymphonyConfigError('tracker.epics.max_depth must be an integer between 1 and 8');
+  }
+
+  return {
+    enabled,
+    relationship_source: relationshipSource,
+    auto_label_children: autoLabelChildren,
+    parent_mode: parentMode,
+    max_depth: maxDepth,
+  };
+}
+
 function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   if (!isRecord(raw)) throw new SymphonyConfigError('WORKFLOW.md front matter must be a YAML object');
 
@@ -112,6 +138,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   const requestTimeoutMs = asNumber(trackerRaw.request_timeout_ms, 'tracker.request_timeout_ms') ?? 30000;
   const apiBaseUrl = asString(trackerRaw.api_base_url, 'tracker.api_base_url') ?? 'https://api.github.com';
   const graphqlUrl = asString(trackerRaw.graphql_url, 'tracker.graphql_url') ?? 'https://api.github.com/graphql';
+  const epics = normalizeEpicConfig(trackerRaw.epics);
 
   const pollingRaw = isRecord(raw.polling) ? raw.polling : {};
   const pollingInterval = asNumber(pollingRaw.interval_ms, 'polling.interval_ms') ?? 30000;
@@ -174,6 +201,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       priority_labels: priorityLabels,
       branch_prefix: branchPrefix,
       include_pull_requests: includePullRequests,
+      epics,
       page_size: pageSize,
       request_timeout_ms: requestTimeoutMs,
     },
