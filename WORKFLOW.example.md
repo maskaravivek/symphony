@@ -39,7 +39,28 @@ workspace:
 hooks:
   after_create: |
     set -euo pipefail
-    git clone git@github.com:maskaravivek/mdedit.git .
+
+    cache_root="${SYMPHONY_CACHE_ROOT:-$HOME/.symphony/cache/mdedit}"
+    mirror="$cache_root/repo.git"
+    mirror_lock="$cache_root/repo.git.lock"
+    mkdir -p "$cache_root"
+
+    until mkdir "$mirror_lock" 2>/dev/null; do
+      echo "Waiting for shared Git cache lock: $mirror_lock"
+      sleep 2
+    done
+    trap 'rmdir "$mirror_lock" 2>/dev/null || true' EXIT
+
+    if [ -d "$mirror" ]; then
+      git -C "$mirror" remote update --prune
+    else
+      git clone --mirror git@github.com:maskaravivek/mdedit.git "$mirror"
+    fi
+
+    rmdir "$mirror_lock"
+    trap - EXIT
+
+    git clone --reference-if-able "$mirror" git@github.com:maskaravivek/mdedit.git .
     mkdir -p .git/info
     touch .git/info/exclude
     grep -qxF '.symphony/' .git/info/exclude || echo '.symphony/' >> .git/info/exclude
@@ -49,7 +70,7 @@ hooks:
     git fetch origin
     git checkout main
     git reset --hard origin/main
-    git clean -fdx -e .symphony/
+    git clean -fdx -e .symphony/ -e node_modules/
 
     mkdir -p .git/info
     touch .git/info/exclude
@@ -62,7 +83,41 @@ hooks:
 
     git checkout -B "{{ issue.branch_name }}"
 
-    yarn install
+    cache_root="${SYMPHONY_CACHE_ROOT:-$HOME/.symphony/cache/mdedit}"
+    yarn_cache="$cache_root/yarn"
+    mkdir -p "$yarn_cache" .symphony
+
+    lock_hash="$(shasum -a 256 yarn.lock | awk '{print $1}')"
+    install_stamp=".symphony/yarn-install-$lock_hash.stamp"
+    node_modules_cache="$cache_root/node_modules/$lock_hash"
+
+    if [ ! -d node_modules ] && [ -d "$node_modules_cache/node_modules" ]; then
+      echo "Seeding node_modules from $node_modules_cache"
+      cp -R "$node_modules_cache/node_modules" node_modules
+    fi
+
+    if [ -d node_modules ] && [ -f "$install_stamp" ]; then
+      echo "Skipping yarn install; yarn.lock hash is unchanged ($lock_hash)."
+    else
+      YARN_CACHE_FOLDER="$yarn_cache" yarn install --frozen-lockfile --non-interactive --prefer-offline
+      rm -f .symphony/yarn-install-*.stamp
+      touch "$install_stamp"
+    fi
+
+    if [ -d node_modules ] && [ ! -d "$node_modules_cache/node_modules" ]; then
+      mkdir -p "$(dirname "$node_modules_cache")"
+      node_modules_lock="$node_modules_cache.lock"
+      if mkdir "$node_modules_lock" 2>/dev/null; then
+        if [ ! -d "$node_modules_cache/node_modules" ]; then
+          tmp_cache="$node_modules_cache.tmp.$$"
+          rm -rf "$tmp_cache"
+          mkdir -p "$tmp_cache"
+          cp -R node_modules "$tmp_cache/node_modules"
+          mv "$tmp_cache" "$node_modules_cache"
+        fi
+        rmdir "$node_modules_lock"
+      fi
+    fi
   after_run: |
     set -euo pipefail
 
