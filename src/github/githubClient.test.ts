@@ -183,6 +183,48 @@ test('updates sticky status comment when marker exists', async () => {
   assert.deepEqual(calls[1]?.body, { body: 'new body' });
 });
 
+test('lists open pull requests with merge state fields', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50');
+    return jsonResponse([
+      {
+        number: 353,
+        title: 'Migrate frontend',
+        body: 'Fixes #339',
+        state: 'open',
+        draft: false,
+        html_url: 'https://github.test/pr/353',
+        head: { ref: 'codex-339-migrate-frontend' },
+        base: { ref: 'main' },
+        mergeable_state: 'dirty',
+      },
+    ]);
+  };
+
+  let prs;
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    prs = await client.listOpenPullRequests();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(prs, [
+    {
+      number: 353,
+      title: 'Migrate frontend',
+      body: 'Fixes #339',
+      state: 'open',
+      is_draft: false,
+      url: 'https://github.test/pr/353',
+      head_ref: 'codex-339-migrate-frontend',
+      base_ref: 'main',
+      merge_state_status: 'dirty',
+    },
+  ]);
+});
+
 test('lists native sub-issues through paginated REST endpoint', async () => {
   const calls: string[] = [];
   const originalFetch = globalThis.fetch;

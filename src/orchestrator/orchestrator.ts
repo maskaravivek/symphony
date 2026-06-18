@@ -1,6 +1,6 @@
 import type { Issue } from '../domain/issue.js';
 import type { EpicTreeNode } from '../domain/epic.js';
-import { GithubIssueTrackerClient } from '../github/githubClient.js';
+import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubClient.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
@@ -19,6 +19,7 @@ import { formatStatusComment, statusMarker } from './statusComment.js';
 import { epicStatusMarker, formatEpicStatusComment } from './epicStatusComment.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 
 interface DispatchCapacity {
   remaining: number | null;
@@ -37,6 +38,22 @@ interface RetryEntry {
   issue_id: string;
 }
 
+interface ConflictEntry {
+  pr_number: number;
+  issue_number: number;
+  head_ref: string;
+  base_ref: string;
+  url: string | null;
+  next_run_at_ms: number;
+}
+
+interface ConflictDispatchOptions {
+  pr_number: number;
+  pr_url: string | null;
+  head_ref: string;
+  base_ref: string;
+}
+
 interface RunningSession {
   issue_id: string;
   issue_number: number;
@@ -48,6 +65,7 @@ interface RunningSession {
   started_at_ms: number;
   cancelled_reason: string | null;
   cancel: (reason: string) => Promise<void>;
+  done: Promise<void> | null;
 }
 
 const LABEL_READY = 'ready-for-agent';
@@ -79,6 +97,45 @@ function hasAnyOf(labels: string[], requiredAny: string[] | null): boolean {
 function computeBackoffMs(attempt: number, maxBackoffMs: number): number {
   const delay = 10_000 * Math.pow(2, attempt - 1);
   return Math.min(delay, maxBackoffMs);
+}
+
+function shouldRetryCancelledRun(reason: string): boolean {
+  return reason === 'shutdown' || reason.startsWith('signal:');
+}
+
+function normalizeBranchPrefix(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-+/g, '-');
+}
+
+function issueNumberFromPullRequestBody(body: string | null): number | null {
+  if (!body) return null;
+  const match = /(?:^|[^A-Za-z])Fixes\s+#(\d+)(?:[^0-9]|$)/i.exec(body);
+  return match ? Number(match[1]) : null;
+}
+
+function isDirtyMergeState(value: string | null): boolean {
+  return value?.toLowerCase() === 'dirty';
+}
+
+function shouldWaitForMergeState(value: string | null): boolean {
+  const normalized = value?.toLowerCase();
+  return !normalized || normalized === 'unknown' || normalized === 'unstable' || normalized === 'blocked';
+}
+
+function runGit(workspacePath: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile('git', args, { cwd: workspacePath }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`${stderr || stdout || error.message}`.trim()));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
 }
 
 function getIssueLogFields(config: WorkflowConfig, issue: Issue, repoId: string | null = null): LogFields {
@@ -127,6 +184,8 @@ export class Orchestrator {
 
   private running = new Map<string, RunningSession>();
   private retries = new Map<string, RetryEntry>();
+  private conflictQueue = new Map<number, ConflictEntry>();
+  private lastConflictScanAtMs = 0;
 
   private stopped = false;
 
@@ -157,10 +216,11 @@ export class Orchestrator {
     const sessions = [...this.running.values()];
     await Promise.allSettled(
       sessions.map(async (s) => {
+        s.cancelled_reason = reason;
         await s.cancel(reason);
+        await s.done;
       }),
     );
-    this.running.clear();
   }
 
   async runForever(): Promise<void> {
@@ -182,6 +242,10 @@ export class Orchestrator {
     const workspaceManager = new WorkspaceManager(config.workspace);
 
     await this.reconcileRunning(config, trackerClient, workspaceManager);
+    await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
+    const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
+    await this.scanOpenPullRequestsForConflicts(config, trackerClient);
+    await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
 
     let candidates: Issue[];
     try {
@@ -200,7 +264,6 @@ export class Orchestrator {
 
     const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
     const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
-    const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
 
     await this.dispatchReadyRetries(config, eligibleCandidates, workspaceManager, capacity);
     await this.dispatchNewIssues(config, eligibleCandidates, workspaceManager, capacity);
@@ -333,6 +396,190 @@ export class Orchestrator {
         continue;
       }
     }
+  }
+
+  private async reconcileOrphanedClaims(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    workspaceManager: WorkspaceManager,
+  ): Promise<void> {
+    let issues: Issue[];
+    try {
+      issues = await tracker.fetchIssuesByStates(config.tracker.active_states);
+    } catch (err) {
+      log('error', 'orphaned_claim_reconcile_failed', {
+        repo_id: this.repoId ?? undefined,
+        tracker_kind: config.tracker.kind,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'orphaned_claim_reconcile_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    for (const issue of issues) {
+      if (!issue.labels.includes(LABEL_RUNNING)) continue;
+      if (this.running.has(issue.id)) continue;
+
+      const { workspace_path: workspacePath } = await workspaceManager.ensureWorkspace(issue);
+      const state = await readRunState(workspacePath);
+      if (state && state.status !== 'running') continue;
+
+      const ignored = hasAnyLabel(issue.labels, config.tracker.ignored_labels);
+      const nextLabels = ignored ? { remove: [LABEL_RUNNING] } : { add: [LABEL_READY], remove: [LABEL_RUNNING] };
+      const nextWorkflowState = ignored ? null : LABEL_READY;
+
+      log('warn', 'orphaned_claim_recovered', {
+        ...getIssueLogFields(config, issue, this.repoId),
+        workspace_path: workspacePath,
+        event: 'orphaned_claim_recovered',
+        status: 'cancelled',
+        reason: 'agent_running_without_local_worker',
+      });
+
+      await this.applyLabels(config, issue.number!, nextLabels);
+      await updateRunState(workspacePath, (cur) =>
+        cur
+          ? {
+              ...cur,
+              status: 'cancelled',
+              labels: ignored
+                ? (cur.labels ?? issue.labels).filter((label) => label !== LABEL_RUNNING)
+                : [...new Set([...(cur.labels ?? issue.labels).filter((label) => label !== LABEL_RUNNING), LABEL_READY])],
+              workflow_state: nextWorkflowState,
+              finished_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }
+          : null,
+      );
+    }
+  }
+
+  private async scanOpenPullRequestsForConflicts(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
+    const now = nowMs();
+    const intervalMs = 30 * 60 * 1000;
+    if (this.lastConflictScanAtMs && now - this.lastConflictScanAtMs < intervalMs) return;
+    this.lastConflictScanAtMs = now;
+
+    let prs: PullRequestRef[];
+    try {
+      prs = await tracker.listOpenPullRequests();
+    } catch (err) {
+      log('error', 'pr_conflict_scan_failed', {
+        repo_id: this.repoId ?? undefined,
+        tracker_kind: config.tracker.kind,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'pr_conflict_scan_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    for (const pr of prs) {
+      if (!this.isSymphonyPullRequest(config, pr)) continue;
+      if (pr.is_draft) continue;
+      const detailed = await tracker.fetchPullRequest(pr.number).catch(() => pr);
+      if (!detailed || shouldWaitForMergeState(detailed.merge_state_status)) continue;
+      if (!isDirtyMergeState(detailed.merge_state_status)) continue;
+
+      const issueNumber = issueNumberFromPullRequestBody(detailed.body);
+      if (!issueNumber) continue;
+      if (this.conflictQueue.has(detailed.number)) continue;
+
+      this.conflictQueue.set(detailed.number, {
+        pr_number: detailed.number,
+        issue_number: issueNumber,
+        head_ref: detailed.head_ref,
+        base_ref: detailed.base_ref || 'main',
+        url: detailed.url,
+        next_run_at_ms: now,
+      });
+
+      log('warn', 'pr_conflict_queued', {
+        repo_id: this.repoId ?? undefined,
+        tracker_kind: config.tracker.kind,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'pr_conflict_queued',
+        pr_number: detailed.number,
+        issue_number: issueNumber,
+        head_ref: detailed.head_ref,
+        merge_state_status: detailed.merge_state_status ?? 'unknown',
+      });
+    }
+  }
+
+  private isSymphonyPullRequest(config: WorkflowConfig, pr: PullRequestRef): boolean {
+    const prefix = normalizeBranchPrefix(config.tracker.branch_prefix);
+    const hasPrefix = prefix ? pr.head_ref.startsWith(`${prefix}-`) : false;
+    return hasPrefix && issueNumberFromPullRequestBody(pr.body) !== null;
+  }
+
+  private hasConflictResolverRunning(): boolean {
+    return [...this.running.values()].some((session) => session.issue_state === 'conflict-resolution');
+  }
+
+  private async dispatchConflictResolutions(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    workspaceManager: WorkspaceManager,
+    capacity: DispatchCapacity,
+  ): Promise<void> {
+    if (this.hasConflictResolverRunning()) return;
+    if (capacity.remaining !== null && capacity.remaining <= 0) return;
+    const maxConcurrentAgents = this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents;
+    if (this.running.size >= maxConcurrentAgents) return;
+
+    const now = nowMs();
+    const entry = [...this.conflictQueue.values()]
+      .filter((candidate) => candidate.next_run_at_ms <= now)
+      .sort((a, b) => a.pr_number - b.pr_number)[0];
+    if (!entry) return;
+
+    const latestPr = await tracker.fetchPullRequest(entry.pr_number).catch(() => null);
+    if (!latestPr || !isDirtyMergeState(latestPr.merge_state_status)) {
+      this.conflictQueue.delete(entry.pr_number);
+      return;
+    }
+
+    const issue = await tracker.fetchIssueByNumber(entry.issue_number);
+    if (!issue || !issue.number) {
+      this.conflictQueue.delete(entry.pr_number);
+      return;
+    }
+    if (this.shouldSkipConflictResolution(issue)) {
+      this.conflictQueue.delete(entry.pr_number);
+      return;
+    }
+
+    try {
+      await this.dispatchIssue(config, issue, workspaceManager, {
+        attempt: 1,
+        mode: 'resolve-conflicts',
+        conflict: {
+          pr_number: entry.pr_number,
+          pr_url: entry.url,
+          head_ref: entry.head_ref,
+          base_ref: entry.base_ref,
+        },
+      });
+      this.conflictQueue.delete(entry.pr_number);
+      if (capacity.remaining !== null) capacity.remaining -= 1;
+    } catch (err) {
+      entry.next_run_at_ms = nowMs() + 5 * 60 * 1000;
+      log('error', 'conflict_resolution_dispatch_failed', {
+        ...getIssueLogFields(config, issue, this.repoId),
+        event: 'conflict_resolution_dispatch_failed',
+        pr_number: entry.pr_number,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private shouldSkipConflictResolution(issue: Issue): boolean {
+    return issue.labels.includes(LABEL_NEEDS_INFO) || issue.labels.includes('blocked') || issue.labels.includes('wontfix') || issue.labels.includes(LABEL_INTERACTIVE);
   }
 
   private async processEpicCandidates(
@@ -535,7 +782,7 @@ export class Orchestrator {
     config: WorkflowConfig,
     issue: Issue,
     workspaceManager: WorkspaceManager,
-    opts: { attempt: number },
+    opts: { attempt: number; mode?: CodexMode; conflict?: ConflictDispatchOptions },
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
     const issueFields = getIssueLogFields(config, issue, this.repoId);
@@ -584,6 +831,11 @@ export class Orchestrator {
       });
     }
 
+    let conflictBriefPath: string | null = null;
+    if (opts.mode === 'resolve-conflicts' && opts.conflict) {
+      conflictBriefPath = await this.prepareConflictResolutionWorkspace(workspacePath, opts.conflict);
+    }
+
     const comments = await new GithubIssueTrackerClient(config.tracker).listIssueComments(issue.number);
     const lastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
     const runContext = await buildRunContext({
@@ -593,16 +845,24 @@ export class Orchestrator {
       lastMessagePath: existingState?.last_message_path ?? lastMessagePath,
     });
 
-    const isInteractiveHandoff = issue.labels.includes(LABEL_INTERACTIVE);
+    const isConflictResolution = opts.mode === 'resolve-conflicts';
+    const isInteractiveHandoff = !isConflictResolution && issue.labels.includes(LABEL_INTERACTIVE);
     const handoffInstructions = isInteractiveHandoff
       ? '\n\n---\n\n## Interactive Handoff Instructions\n\nCreate a concise orientation summary for the user to continue this issue interactively. Do not edit files, run write commands, commit, push, or open a PR in this handoff pass.\n'
       : '';
-    const prompt = `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}`;
+    const prompt = isConflictResolution && opts.conflict
+      ? this.formatConflictResolutionPrompt(
+          issue,
+          opts.conflict,
+          conflictBriefPath ?? path.join(workspacePath, '.symphony', 'merge-conflict.md'),
+          runContext.text,
+        )
+      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}`;
     const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
     const codexJsonlPath = path.join(workspacePath, '.symphony', 'codex.jsonl');
 
     let codexThreadId = existingState?.codex_thread_id ?? null;
-    const codexMode: CodexMode = isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
+    const codexMode: CodexMode = isConflictResolution ? 'resolve-conflicts' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
     const commandTemplate = isInteractiveHandoff
       ? config.codex.handoff_command
@@ -668,6 +928,10 @@ export class Orchestrator {
         await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] });
         await this.updateLifecycleState(workspacePath, { remove: [LABEL_READY, LABEL_RUNNING], workflowState: 'interactive' });
         await this.upsertStatus(config, issue, initialState, 'Interactive handoff requested. Preparing a Codex thread and pausing autonomous work.');
+      } else if (isConflictResolution) {
+        await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
+        await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
+        await this.upsertStatus(config, issue, initialState, `Merge conflicts detected for PR #${opts.conflict?.pr_number}. Symphony is starting conflict-resolution mode.`);
       } else {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
         await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
@@ -724,17 +988,18 @@ export class Orchestrator {
       issue_number: issue.number ?? -1,
       issue_identifier: issue.identifier,
       issue_url: issue.url ?? null,
-      issue_state: issue.state,
+      issue_state: isConflictResolution ? 'conflict-resolution' : issue.state,
       workspace_path: workspacePath,
       session_id: agent.session_id,
       started_at_ms: nowMs(),
       cancelled_reason: null,
       cancel: agent.cancel,
+      done: null,
     };
 
     this.running.set(issue.id, session);
 
-    void agent.exit
+    const done = agent.exit
       .then(async ({ code, signal }) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
         this.running.delete(issue.id);
@@ -759,6 +1024,12 @@ export class Orchestrator {
             reason: cancelledReason,
             signal,
           });
+          if (shouldRetryCancelledRun(cancelledReason)) {
+            await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
+            await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
+            await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Autonomous run was interrupted. Symphony will retry.');
+            await this.scheduleRetry(config, issue, opts.attempt, 'cancelled', workspacePath);
+          }
           return;
         }
 
@@ -831,6 +1102,24 @@ export class Orchestrator {
             return;
           }
 
+          if (!isConflictResolution) {
+            const dirtyPr = await this.findDirtyPullRequestForIssue(config, issue);
+            if (dirtyPr) {
+              this.conflictQueue.set(dirtyPr.number, {
+                pr_number: dirtyPr.number,
+                issue_number: issue.number!,
+                head_ref: dirtyPr.head_ref,
+                base_ref: dirtyPr.base_ref || 'main',
+                url: dirtyPr.url,
+                next_run_at_ms: nowMs(),
+              });
+              await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
+              await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
+              await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `PR #${dirtyPr.number} has merge conflicts. Symphony queued conflict-resolution mode.`);
+              return;
+            }
+          }
+
           await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
           await this.updateLifecycleState(workspacePath, {
             add: [LABEL_READY_FOR_HUMAN],
@@ -847,10 +1136,10 @@ export class Orchestrator {
         await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
         await this.scheduleRetry(config, issue, opts.attempt, 'nonzero_exit', workspacePath);
       })
-      .catch((err) => {
+      .catch(async (err) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
         this.running.delete(issue.id);
-        void updateRunState(workspacePath, (cur) => {
+        await updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
           return {
             ...cur,
@@ -869,12 +1158,97 @@ export class Orchestrator {
           error: err instanceof Error ? err.message : String(err),
         });
         if (issue.number) {
-          void this.applyLabels(config, issue.number, { add: [LABEL_READY], remove: [LABEL_RUNNING] })
+          await this.applyLabels(config, issue.number, { add: [LABEL_READY], remove: [LABEL_RUNNING] })
             .then(() => this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY }))
             .catch(() => {});
         }
-        void this.scheduleRetry(config, issue, opts.attempt, 'runner_error', workspacePath);
+        await this.scheduleRetry(config, issue, opts.attempt, 'runner_error', workspacePath);
       });
+
+    session.done = done;
+  }
+
+  private async prepareConflictResolutionWorkspace(workspacePath: string, conflict: ConflictDispatchOptions): Promise<string> {
+    const symphonyDir = path.join(workspacePath, '.symphony');
+    await fs.mkdir(symphonyDir, { recursive: true });
+    const briefPath = path.join(symphonyDir, 'merge-conflict.md');
+
+    await runGit(workspacePath, ['fetch', 'origin']);
+    await runGit(workspacePath, ['checkout', '-B', conflict.head_ref, `origin/${conflict.head_ref}`]);
+
+    let mergeError: string | null = null;
+    try {
+      await runGit(workspacePath, ['merge', '--no-edit', `origin/${conflict.base_ref}`]);
+      await runGit(workspacePath, ['push', 'origin', `HEAD:${conflict.head_ref}`]);
+    } catch (err) {
+      mergeError = err instanceof Error ? err.message : String(err);
+    }
+
+    const conflictedFiles = await runGit(workspacePath, ['diff', '--name-only', '--diff-filter=U']).catch(() => '');
+    const status = await runGit(workspacePath, ['status', '--short']).catch((err) => (err instanceof Error ? err.message : String(err)));
+    const currentBranch = await runGit(workspacePath, ['branch', '--show-current']).catch(() => conflict.head_ref);
+    const brief = [
+      `# Symphony Merge Conflict`,
+      ``,
+      `PR: #${conflict.pr_number}${conflict.pr_url ? ` (${conflict.pr_url})` : ''}`,
+      `Branch: ${conflict.head_ref}`,
+      `Base: ${conflict.base_ref}`,
+      `Current branch: ${currentBranch || '(unknown)'}`,
+      ``,
+      mergeError ? `Merge command failed while merging origin/${conflict.base_ref}:` : `origin/${conflict.base_ref} merged cleanly and the branch was pushed.`,
+      mergeError ? `\n\`\`\`text\n${mergeError}\n\`\`\`` : '',
+      ``,
+      `## Conflicted Files`,
+      conflictedFiles || '(none)',
+      ``,
+      `## Git Status`,
+      `\`\`\`text`,
+      status || '(clean)',
+      `\`\`\``,
+      ``,
+    ].join('\n');
+    await fs.writeFile(briefPath, brief, 'utf8');
+    return briefPath;
+  }
+
+  private formatConflictResolutionPrompt(issue: Issue, conflict: ConflictDispatchOptions, briefPath: string, runContext: string): string {
+    return `You are resolving merge conflicts for ${issue.identifier}.
+
+The pull request branch has conflicts with its base branch.
+
+PR: #${conflict.pr_number}${conflict.pr_url ? ` (${conflict.pr_url})` : ''}
+Branch: ${conflict.head_ref}
+Base branch: ${conflict.base_ref}
+Conflict brief: ${briefPath}
+
+Goal:
+Resolve the conflicts from merging origin/${conflict.base_ref} into ${conflict.head_ref}.
+
+Rules:
+- Treat this as conflict-resolution work, not a fresh implementation pass.
+- Preserve the intent of both ${conflict.head_ref} and origin/${conflict.base_ref}.
+- Read .symphony/merge-conflict.md before editing.
+- Resolve all conflicted files.
+- Run targeted checks for the affected files when practical.
+- Commit the merge resolution.
+- Push ${conflict.head_ref}.
+- Verify PR #${conflict.pr_number} is no longer dirty if GitHub reports mergeability.
+- If a product or code-ownership decision is needed, use SYMPHONY_PAUSE and list the conflicted files.
+
+${runContext}`;
+  }
+
+  private async findDirtyPullRequestForIssue(config: WorkflowConfig, issue: Issue): Promise<PullRequestRef | null> {
+    if (!issue.number) return null;
+    const client = new GithubIssueTrackerClient(config.tracker);
+    const prs = await client.listOpenPullRequests().catch(() => []);
+    for (const pr of prs) {
+      if (!this.isSymphonyPullRequest(config, pr)) continue;
+      if (issueNumberFromPullRequestBody(pr.body) !== issue.number) continue;
+      const detailed = await client.fetchPullRequest(pr.number).catch(() => pr);
+      if (detailed && isDirtyMergeState(detailed.merge_state_status)) return detailed;
+    }
+    return null;
   }
 
   private async applyLabels(config: WorkflowConfig, issueNumber: number, opts: { add?: string[]; remove?: string[] }): Promise<void> {

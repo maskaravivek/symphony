@@ -94,6 +94,7 @@ hooks:
     if [ ! -d node_modules ] && [ -d "$node_modules_cache/node_modules" ]; then
       echo "Seeding node_modules from $node_modules_cache"
       cp -R "$node_modules_cache/node_modules" node_modules
+      touch "$install_stamp"
     fi
 
     if [ -d node_modules ] && [ -f "$install_stamp" ]; then

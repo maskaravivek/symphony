@@ -78,6 +78,9 @@ test('coordinates native sub-issue parent without dispatching parent workspace',
     if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues?')) {
       return jsonResponse([issuePayload(42, 'Epic parent', 'open', ['ready-for-agent'])]);
     }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/sub_issues?per_page=50') {
       return jsonResponse([issuePayload(43, 'Leaf child', 'open')]);
     }
@@ -132,6 +135,9 @@ test('marks native sub-issue epic complete when all descendants are terminal', a
 
     if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues?')) {
       return jsonResponse([issuePayload(42, 'Epic parent', 'open', ['ready-for-agent'])]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
     }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/sub_issues?per_page=50') {
       return jsonResponse([issuePayload(43, 'Closed child', 'closed')]);

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
 
-export type CodexMode = 'autonomous' | 'interactive-handoff';
+export type CodexMode = 'autonomous' | 'interactive-handoff' | 'resolve-conflicts';
 
 export type PauseReason = 'interactive' | 'needs-info' | null;
 

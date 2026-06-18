@@ -32,6 +32,18 @@ type GithubIssuePayload = {
   pull_request?: unknown;
 };
 
+type GithubPullRequestPayload = {
+  number?: number;
+  title?: string;
+  body?: string | null;
+  state?: string;
+  draft?: boolean;
+  html_url?: string;
+  head?: { ref?: string; repo?: { full_name?: string } | null } | null;
+  base?: { ref?: string; repo?: { full_name?: string } | null } | null;
+  mergeable_state?: string | null;
+};
+
 export interface IssueTrackerClient {
   fetchCandidateIssues(): Promise<Issue[]>;
   fetchIssuesByStates(stateNames: string[]): Promise<Issue[]>;
@@ -57,6 +69,18 @@ export interface RepositoryLabel {
 export interface StatusCommentResult {
   id: number;
   created: boolean;
+}
+
+export interface PullRequestRef {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  is_draft: boolean;
+  url: string | null;
+  head_ref: string;
+  base_ref: string;
+  merge_state_status: string | null;
 }
 
 function normalizeLabelName(label: GithubLabel): string | null {
@@ -182,6 +206,21 @@ function normalizeGithubIssuePayload(owner: string, repo: string, tracker: Githu
   };
 }
 
+function normalizePullRequestPayload(payload: GithubPullRequestPayload): PullRequestRef | null {
+  if (typeof payload.number !== 'number') return null;
+  return {
+    number: payload.number,
+    title: typeof payload.title === 'string' ? payload.title : '',
+    body: typeof payload.body === 'string' ? payload.body : null,
+    state: typeof payload.state === 'string' ? payload.state : 'unknown',
+    is_draft: Boolean(payload.draft),
+    url: typeof payload.html_url === 'string' ? payload.html_url : null,
+    head_ref: typeof payload.head?.ref === 'string' ? payload.head.ref : '',
+    base_ref: typeof payload.base?.ref === 'string' ? payload.base.ref : 'main',
+    merge_state_status: typeof payload.mergeable_state === 'string' ? payload.mergeable_state : null,
+  };
+}
+
 function parseLinkHeader(linkHeader: string | null): Map<string, string> {
   const map = new Map<string, string>();
   if (!linkHeader) return map;
@@ -292,6 +331,22 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     url.searchParams.set('per_page', String(this.tracker.page_size));
     const raw = await this.fetchAllPages(url.toString());
     return raw.map((p) => normalizeGithubCommentPayload(p as GithubCommentPayload));
+  }
+
+  async listOpenPullRequests(): Promise<PullRequestRef[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls`, this.tracker.api_base_url);
+    url.searchParams.set('state', 'open');
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages(url.toString());
+    return raw.map((p) => normalizePullRequestPayload(p as GithubPullRequestPayload)).filter((p): p is PullRequestRef => p !== null);
+  }
+
+  async fetchPullRequest(number: number): Promise<PullRequestRef | null> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}`, this.tracker.api_base_url);
+    const { data } = await this.fetchJson(url.toString(), { allowNotFound: true });
+    if (data === null) return null;
+    if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub pull request response to be an object');
+    return normalizePullRequestPayload(data as GithubPullRequestPayload);
   }
 
   async listLabels(): Promise<RepositoryLabel[]> {
