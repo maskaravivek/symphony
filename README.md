@@ -7,7 +7,7 @@ Symphony is a long-running service that polls GitHub Issues (by label), creates 
 From repo root (or any directory that contains `WORKFLOW.md`):
 
 ```bash
-yarn dev -- run --workflow ./WORKFLOW.md
+yarn dev
 ```
 
 Start by copying `WORKFLOW.example.md` to the target app repo as `WORKFLOW.md` and adjusting hooks/token.
@@ -33,7 +33,7 @@ repos:
 Then run:
 
 ```bash
-yarn dev -- run --config ./symphony.config.yml
+yarn dev
 ```
 
 ## Visibility
@@ -48,17 +48,17 @@ Symphony writes per-issue artifacts under each workspace:
 Helper commands:
 
 ```bash
-yarn dev -- status --workflow ../mdedit/WORKFLOW.md
-yarn dev -- open 264 --workflow ../mdedit/WORKFLOW.md
-yarn dev -- tail 264 --workflow ../mdedit/WORKFLOW.md
+yarn cli -- status --workflow ../mdedit/WORKFLOW.md
+yarn cli -- open 264 --workflow ../mdedit/WORKFLOW.md
+yarn cli -- tail 264 --workflow ../mdedit/WORKFLOW.md
 ```
 
 With a multi-repo config, use repo-qualified issue refs when issue numbers are ambiguous:
 
 ```bash
-yarn dev -- status --config ./symphony.config.yml
-yarn dev -- open mdedit#264 --config ./symphony.config.yml
-yarn dev -- tail mdedit#264 --config ./symphony.config.yml
+yarn cli -- status --config ./symphony.config.yml
+yarn cli -- open mdedit#264 --config ./symphony.config.yml
+yarn cli -- tail mdedit#264 --config ./symphony.config.yml
 ```
 
 ## When to use Symphony vs Codex app
