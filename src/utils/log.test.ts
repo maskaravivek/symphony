@@ -53,3 +53,23 @@ test('formats arrays and errors in preferred order', () => {
     /ERROR conflict resolution dispatch failed pr=#357 error=Hook exited with code 1 unmerged=packages\/a.ts,packages\/b.ts$/,
   );
 });
+
+test('omits owner and repo when repo id is already displayed', () => {
+  const line = formatPrettyLogLine(
+    'warn',
+    'pr_conflict_queued',
+    {
+      repo_id: 'mdedit',
+      owner: 'mangoappstudio',
+      repo: 'mdedit',
+      issue_number: 347,
+      pr_number: 358,
+    },
+    false,
+  );
+
+  assert.match(line, /repo=mdedit/);
+  assert.match(line, /issue_number=347/);
+  assert.doesNotMatch(line, /owner=mangoappstudio/);
+  assert.doesNotMatch(line, / repo=mdedit .* repo=mdedit/);
+});

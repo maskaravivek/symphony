@@ -97,7 +97,7 @@ function shouldOmitField(key: string, fields: LogFields): boolean {
   if (key === 'tracker_kind') return true;
   if (key === 'issue_id') return true;
   if (key === 'issue_url') return true;
-  if ((key === 'owner' || key === 'repo') && fields.issue_identifier) return true;
+  if ((key === 'owner' || key === 'repo') && (fields.issue_identifier || fields.repo_id)) return true;
   return false;
 }
 

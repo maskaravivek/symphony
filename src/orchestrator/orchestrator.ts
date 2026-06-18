@@ -964,8 +964,12 @@ export class Orchestrator {
         await this.updateLifecycleState(workspacePath, { remove: [LABEL_READY, LABEL_RUNNING], workflowState: 'interactive' });
         await this.upsertStatus(config, issue, initialState, 'Interactive handoff requested. Preparing a Codex thread and pausing autonomous work.');
       } else if (isConflictResolution) {
-        await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
-        await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
+        await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO] });
+        await this.updateLifecycleState(workspacePath, {
+          add: [LABEL_RUNNING],
+          remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO],
+          workflowState: LABEL_RUNNING,
+        });
         await this.upsertStatus(config, issue, initialState, `Merge conflicts detected for PR #${opts.conflict?.pr_number}. Symphony is starting conflict-resolution mode.`);
       } else {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
