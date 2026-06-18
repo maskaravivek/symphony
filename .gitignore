@@ -1,8 +1,11 @@
 node_modules/
 dist/
 .turbo/
+.symphony/
 .DS_Store
 *.log
 coverage/
 .env
 .env.*
+symphony.config.yml
+symphony.config.local.yml

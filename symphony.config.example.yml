@@ -5,11 +5,11 @@ agent:
   max_concurrent_agents: 4
 
 repos:
-  - id: mdedit
-    workflow: ../mdedit/WORKFLOW.md
+  - id: atlas-api
+    workflow: ../atlas-api/WORKFLOW.md
     max_concurrent_agents: 2
     enabled: true
-  - id: myaarti
-    workflow: ../myaarti/WORKFLOW.md
+  - id: nebula-web
+    workflow: ../nebula-web/WORKFLOW.md
     max_concurrent_agents: 1
     enabled: true
