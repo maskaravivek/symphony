@@ -138,6 +138,17 @@ function runGit(workspacePath: string, args: string[]): Promise<string> {
   });
 }
 
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'EPERM';
+  }
+}
+
 function getIssueLogFields(config: WorkflowConfig, issue: Issue, repoId: string | null = null): LogFields {
   return {
     repo_id: repoId ?? undefined,
@@ -424,18 +435,28 @@ export class Orchestrator {
 
       const { workspace_path: workspacePath } = await workspaceManager.ensureWorkspace(issue);
       const state = await readRunState(workspacePath);
-      if (state && state.status !== 'running') continue;
+      if (state?.status === 'running' && isProcessAlive(state.worker_pid)) {
+        log('info', 'orphaned_claim_still_running', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          workspace_path: workspacePath,
+          event: 'orphaned_claim_still_running',
+          worker_pid: state.worker_pid ?? undefined,
+        });
+        continue;
+      }
 
       const ignored = hasAnyLabel(issue.labels, config.tracker.ignored_labels);
       const nextLabels = ignored ? { remove: [LABEL_RUNNING] } : { add: [LABEL_READY], remove: [LABEL_RUNNING] };
       const nextWorkflowState = ignored ? null : LABEL_READY;
+      const reason = state?.status === 'running' ? 'worker_pid_not_alive' : 'agent_running_without_running_state';
 
       log('warn', 'orphaned_claim_recovered', {
         ...getIssueLogFields(config, issue, this.repoId),
         workspace_path: workspacePath,
         event: 'orphaned_claim_recovered',
         status: 'cancelled',
-        reason: 'agent_running_without_local_worker',
+        reason,
+        worker_pid: state?.worker_pid ?? undefined,
       });
 
       await this.applyLabels(config, issue.number!, nextLabels);
