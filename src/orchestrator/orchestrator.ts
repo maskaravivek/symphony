@@ -7,6 +7,7 @@ import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
 import { SymphonyConfigError } from '../utils/errors.js';
 import { log, type LogFields } from '../utils/log.js';
 import { sleep } from '../utils/sleep.js';
+import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { runHookScript } from '../workspace/hooks.js';
 import { WorkspaceManager } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
@@ -838,6 +839,19 @@ export class Orchestrator {
 
     const existingState = await readRunState(workspacePath);
     const isPausedResume = existingState?.status === 'paused';
+
+    const hasGitRepoBeforeRun = await workspaceManager.hasGitRepo(workspacePath);
+    if (hasGitRepoBeforeRun && !isPausedResume) {
+      const recovery = await recoverFreshRunGitState(workspacePath);
+      if (recovery.recovered) {
+        log('warn', 'workspace_git_state_recovered', {
+          ...workspaceFields,
+          event: 'workspace_git_state_recovered',
+          reason: 'unresolved_index',
+          unmerged_files: recovery.unmerged_files,
+        });
+      }
+    }
 
     if (config.hooks.before_run && !isPausedResume) {
       log('info', 'workspace_before_run_hook_started', { ...workspaceFields, event: 'workspace_before_run_hook_started' });
