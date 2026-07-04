@@ -60,6 +60,22 @@ function config(): WorkflowConfig {
     hooks: { after_create: null, before_run: null, after_run: null, timeout_ms: 120000 },
     agent: { max_concurrent_agents: 1, max_retry_backoff_ms: 300000, max_attempts: null, max_concurrent_agents_by_state: null },
     codex: { command: 'codex exec -', resume_command: 'codex exec resume thread -', handoff_command: 'codex exec -', turn_timeout_ms: 3600000 },
+    agents: {
+      default: 'codex',
+      providers: {
+        codex: {
+          id: 'codex',
+          command: 'codex exec -',
+          resume_command: 'codex exec resume thread -',
+          handoff_command: 'codex exec -',
+          turn_timeout_ms: 3600000,
+          output_log: '.symphony/codex.jsonl',
+          max_concurrent: null,
+          extract_codex_thread_id: true,
+        },
+      },
+      routes: [{ provider: 'codex', any_labels: [], all_labels: [], none_labels: [], default: true }],
+    },
   };
 }
 

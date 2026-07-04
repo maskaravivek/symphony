@@ -56,6 +56,31 @@ export interface CodexConfig {
   turn_timeout_ms: number;
 }
 
+export interface AgentProviderConfig {
+  id: string;
+  command: string;
+  resume_command: string | null;
+  handoff_command: string | null;
+  turn_timeout_ms: number;
+  output_log: string;
+  max_concurrent: number | null;
+  extract_codex_thread_id: boolean;
+}
+
+export interface AgentRouteConfig {
+  provider: string;
+  any_labels: string[];
+  all_labels: string[];
+  none_labels: string[];
+  default: boolean;
+}
+
+export interface AgentsConfig {
+  default: string;
+  providers: Record<string, AgentProviderConfig>;
+  routes: AgentRouteConfig[];
+}
+
 export interface WorkflowConfig {
   tracker: GithubTrackerConfig;
   polling: PollingConfig;
@@ -63,6 +88,7 @@ export interface WorkflowConfig {
   hooks: HooksConfig;
   agent: AgentConfig;
   codex: CodexConfig;
+  agents: AgentsConfig;
 }
 
 export interface LoadedWorkflow {

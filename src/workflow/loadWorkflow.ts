@@ -4,7 +4,7 @@ import { parse as parseYaml } from 'yaml';
 import { getGhAuthToken } from '../github/ghAuth.js';
 import { SymphonyConfigError } from '../utils/errors.js';
 import { expandHomeDir } from '../utils/fs.js';
-import type { LoadedWorkflow, WorkflowConfig } from './types.js';
+import type { AgentProviderConfig, AgentRouteConfig, AgentsConfig, CodexConfig, LoadedWorkflow, WorkflowConfig } from './types.js';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -105,6 +105,105 @@ function normalizeEpicConfig(value: unknown): WorkflowConfig['tracker']['epics']
   };
 }
 
+function normalizeLabelList(value: unknown, keyPath: string): string[] {
+  return (asStringArray(value, keyPath) ?? []).map((label) => label.trim().toLowerCase()).filter(Boolean);
+}
+
+function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentProviderConfig> = {}): AgentProviderConfig {
+  if (!isRecord(value)) throw new SymphonyConfigError(`agents.providers.${id} must be an object`);
+  const command = asString(value.command, `agents.providers.${id}.command`) ?? fallback.command;
+  if (!command) throw new SymphonyConfigError(`agents.providers.${id}.command is required`);
+  const resumeCommand = asString(value.resume_command, `agents.providers.${id}.resume_command`) ?? fallback.resume_command ?? null;
+  const handoffCommand = asString(value.handoff_command, `agents.providers.${id}.handoff_command`) ?? fallback.handoff_command ?? null;
+  const turnTimeoutMs =
+    asNumber(value.turn_timeout_ms, `agents.providers.${id}.turn_timeout_ms`) ?? fallback.turn_timeout_ms ?? 3600000;
+  const outputLog = asString(value.output_log, `agents.providers.${id}.output_log`) ?? fallback.output_log ?? `.symphony/${id}.log`;
+  const maxConcurrent = asNumber(value.max_concurrent, `agents.providers.${id}.max_concurrent`) ?? fallback.max_concurrent ?? null;
+  const extractCodexThreadId =
+    asBoolean(value.extract_codex_thread_id, `agents.providers.${id}.extract_codex_thread_id`) ??
+    fallback.extract_codex_thread_id ??
+    id === 'codex';
+
+  if (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0) {
+    throw new SymphonyConfigError(`agents.providers.${id}.turn_timeout_ms must be a positive number`);
+  }
+  if (maxConcurrent !== null && (!Number.isFinite(maxConcurrent) || maxConcurrent < 0)) {
+    throw new SymphonyConfigError(`agents.providers.${id}.max_concurrent must be a non-negative number`);
+  }
+
+  return {
+    id,
+    command,
+    resume_command: resumeCommand,
+    handoff_command: handoffCommand,
+    turn_timeout_ms: turnTimeoutMs,
+    output_log: outputLog,
+    max_concurrent: maxConcurrent === null ? null : Math.floor(maxConcurrent),
+    extract_codex_thread_id: extractCodexThreadId,
+  };
+}
+
+function normalizeRoute(value: unknown, index: number): AgentRouteConfig {
+  if (!isRecord(value)) throw new SymphonyConfigError(`agents.routes[${index}] must be an object`);
+  const provider = asString(value.provider, `agents.routes[${index}].provider`);
+  if (!provider) throw new SymphonyConfigError(`agents.routes[${index}].provider is required`);
+  return {
+    provider,
+    any_labels: normalizeLabelList(value.any_labels ?? value.labels, `agents.routes[${index}].any_labels`),
+    all_labels: normalizeLabelList(value.all_labels, `agents.routes[${index}].all_labels`),
+    none_labels: normalizeLabelList(value.none_labels, `agents.routes[${index}].none_labels`),
+    default: asBoolean(value.default, `agents.routes[${index}].default`) ?? false,
+  };
+}
+
+function normalizeAgentsConfig(raw: AnyRecord, codex: CodexConfig): AgentsConfig {
+  const fallbackCodexProvider: AgentProviderConfig = {
+    id: 'codex',
+    command: codex.command,
+    resume_command: codex.resume_command,
+    handoff_command: codex.handoff_command,
+    turn_timeout_ms: codex.turn_timeout_ms,
+    output_log: '.symphony/codex.jsonl',
+    max_concurrent: null,
+    extract_codex_thread_id: true,
+  };
+
+  const agentsRaw = isRecord(raw.agents) ? raw.agents : null;
+  if (!agentsRaw) {
+    return {
+      default: 'codex',
+      providers: { codex: fallbackCodexProvider },
+      routes: [{ provider: 'codex', any_labels: [], all_labels: [], none_labels: [], default: true }],
+    };
+  }
+
+  const providersRaw = isRecord(agentsRaw.providers) ? agentsRaw.providers : null;
+  if (!providersRaw) throw new SymphonyConfigError('agents.providers is required');
+
+  const providers: Record<string, AgentProviderConfig> = {};
+  for (const [id, providerRaw] of Object.entries(providersRaw)) {
+    const normalizedId = id.trim().toLowerCase();
+    if (!normalizedId) throw new SymphonyConfigError('agents.providers keys must be non-empty');
+    providers[normalizedId] = normalizeProvider(normalizedId, providerRaw, normalizedId === 'codex' ? fallbackCodexProvider : {});
+  }
+  if (!providers.codex && raw.codex !== undefined) providers.codex = fallbackCodexProvider;
+
+  const defaultProvider = (asString(agentsRaw.default, 'agents.default') ?? 'codex').trim().toLowerCase();
+  if (!providers[defaultProvider]) throw new SymphonyConfigError(`agents.default references unknown provider: ${defaultProvider}`);
+
+  const routesRaw = agentsRaw.routes;
+  const routes = Array.isArray(routesRaw) ? routesRaw.map((route, idx) => normalizeRoute(route, idx)) : [];
+  for (const route of routes) {
+    route.provider = route.provider.trim().toLowerCase();
+    if (!providers[route.provider]) throw new SymphonyConfigError(`agents.routes references unknown provider: ${route.provider}`);
+  }
+  if (!routes.some((route) => route.default)) {
+    routes.push({ provider: defaultProvider, any_labels: [], all_labels: [], none_labels: [], default: true });
+  }
+
+  return { default: defaultProvider, providers, routes };
+}
+
 function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   if (!isRecord(raw)) throw new SymphonyConfigError('WORKFLOW.md front matter must be a YAML object');
 
@@ -182,6 +281,13 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
     asString(codexRaw.handoff_command, 'codex.handoff_command') ??
     'bash -lc \'set -o pipefail; codex exec --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl\'';
   const codexTurnTimeoutMs = asNumber(codexRaw.turn_timeout_ms, 'codex.turn_timeout_ms') ?? 3600000;
+  const codex: CodexConfig = {
+    command: codexCommand,
+    resume_command: codexResumeCommand,
+    handoff_command: codexHandoffCommand,
+    turn_timeout_ms: codexTurnTimeoutMs,
+  };
+  const agents = normalizeAgentsConfig(raw, codex);
 
   const priorityLabels = normalizePriorityLabels(trackerRaw.priority_labels);
 
@@ -219,12 +325,8 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       max_attempts: maxAttempts === null ? null : Math.floor(maxAttempts),
       max_concurrent_agents_by_state: maxConcurrentAgentsByState,
     },
-    codex: {
-      command: codexCommand,
-      resume_command: codexResumeCommand,
-      handoff_command: codexHandoffCommand,
-      turn_timeout_ms: codexTurnTimeoutMs,
-    },
+    codex,
+    agents,
   };
 }
 

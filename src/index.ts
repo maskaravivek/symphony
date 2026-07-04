@@ -118,7 +118,7 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
   const entries = await loadDoctorWorkflows(options);
   let failures = 0;
 
-  const tools = ['git', 'gh', 'codex'];
+  const tools = ['git', 'gh'];
   for (const tool of tools) {
     const ok = await commandExists(tool);
     // eslint-disable-next-line no-console
@@ -129,6 +129,13 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
   for (const entry of entries) {
     const config = entry.loaded.config;
     const prefix = `${entry.id} (${config.tracker.owner}/${config.tracker.repo})`;
+    const providerCommands = new Set(Object.values(config.agents.providers).map((provider) => provider.command.trim().split(/\s+/)[0]).filter(Boolean));
+    for (const tool of providerCommands) {
+      const ok = await commandExists(tool);
+      // eslint-disable-next-line no-console
+      console.log(`${ok ? 'ok' : 'fail'} provider tool ${tool}`);
+      if (!ok) failures += 1;
+    }
     // eslint-disable-next-line no-console
     console.log(`\n${prefix}`);
     // eslint-disable-next-line no-console
@@ -239,7 +246,8 @@ async function main(): Promise<void> {
           lifecycle: s.workflow_state ?? '',
           labels: (s.labels ?? []).join(','),
           pause: s.pause_reason ?? '',
-          thread: shortThreadId(s.codex_thread_id),
+          agent: s.agent_provider ?? 'codex',
+          thread: shortThreadId(s.agent_thread_id ?? s.codex_thread_id),
           updated: s.updated_at,
           workspace: s.workspace_path,
         })),
@@ -251,6 +259,7 @@ async function main(): Promise<void> {
           lifecycle: `${s.terminal_children}/${s.total_children} terminal`,
           labels: s.labels.join(','),
           pause: '',
+          agent: '',
           thread: '',
           updated: s.updated_at,
           workspace: '(epic coordinator)',
@@ -268,6 +277,7 @@ async function main(): Promise<void> {
           lifecycle: s.lifecycle,
           labels: s.labels,
           pause: s.pause,
+          agent: s.agent,
           thread: s.thread,
           updated: s.updated,
           workspace: s.workspace,
@@ -284,17 +294,18 @@ async function main(): Promise<void> {
       const statusW = Math.max('status'.length, ...rows.map((r) => r.status.length));
       const lifecycleW = Math.max('lifecycle'.length, ...rows.map((r) => r.lifecycle.length));
       const pauseW = Math.max('pause'.length, ...rows.map((r) => r.pause.length));
+      const agentW = Math.max('agent'.length, ...rows.map((r) => r.agent.length));
       const threadW = Math.max('thread'.length, ...rows.map((r) => r.thread.length));
       const labelsW = Math.max('labels'.length, ...rows.map((r) => r.labels.length));
 
       // eslint-disable-next-line no-console
       console.log(
-        `${padRight('repo', repoW)}  ${padRight('issue', issueW)}  ${padRight('status', statusW)}  ${padRight('lifecycle', lifecycleW)}  ${padRight('pause', pauseW)}  ${padRight('thread', threadW)}  ${padRight('labels', labelsW)}  updated_at                 workspace`,
+        `${padRight('repo', repoW)}  ${padRight('issue', issueW)}  ${padRight('status', statusW)}  ${padRight('lifecycle', lifecycleW)}  ${padRight('pause', pauseW)}  ${padRight('agent', agentW)}  ${padRight('thread', threadW)}  ${padRight('labels', labelsW)}  updated_at                 workspace`,
       );
       for (const r of rows) {
         // eslint-disable-next-line no-console
         console.log(
-          `${padRight(r.repo, repoW)}  ${padRight(r.issue, issueW)}  ${padRight(r.status, statusW)}  ${padRight(r.lifecycle, lifecycleW)}  ${padRight(r.pause, pauseW)}  ${padRight(r.thread, threadW)}  ${padRight(r.labels, labelsW)}  ${r.updated}  ${r.workspace}`,
+          `${padRight(r.repo, repoW)}  ${padRight(r.issue, issueW)}  ${padRight(r.status, statusW)}  ${padRight(r.lifecycle, lifecycleW)}  ${padRight(r.pause, pauseW)}  ${padRight(r.agent, agentW)}  ${padRight(r.thread, threadW)}  ${padRight(r.labels, labelsW)}  ${r.updated}  ${r.workspace}`,
         );
       }
     });
@@ -324,7 +335,9 @@ async function main(): Promise<void> {
       // eslint-disable-next-line no-console
       console.log(`prompt:    ${selection.state.prompt_path ?? ''}`);
       // eslint-disable-next-line no-console
-      console.log(`codex:     ${selection.state.codex_jsonl_path ?? ''}`);
+      console.log(`agent:     ${selection.state.agent_provider ?? 'codex'}`);
+      // eslint-disable-next-line no-console
+      console.log(`log:       ${selection.state.agent_log_path ?? selection.state.agent_output_path ?? selection.state.codex_jsonl_path ?? ''}`);
       // eslint-disable-next-line no-console
       console.log(`last:      ${selection.state.last_message_path ?? ''}`);
       // eslint-disable-next-line no-console
@@ -334,18 +347,19 @@ async function main(): Promise<void> {
       // eslint-disable-next-line no-console
       console.log(`labels:    ${(selection.state.labels ?? []).join(',')}`);
       // eslint-disable-next-line no-console
-      console.log(`thread:    ${selection.state.codex_thread_id ?? ''}`);
-      if (selection.state.codex_thread_id) {
+      console.log(`thread:    ${selection.state.agent_thread_id ?? selection.state.codex_thread_id ?? ''}`);
+      if ((selection.state.agent_provider ?? 'codex') === 'codex' && (selection.state.agent_thread_id ?? selection.state.codex_thread_id)) {
+        const threadId = selection.state.agent_thread_id ?? selection.state.codex_thread_id;
         // eslint-disable-next-line no-console
-        console.log(`resume:    codex resume --include-non-interactive ${selection.state.codex_thread_id}`);
+        console.log(`resume:    codex resume --include-non-interactive ${threadId}`);
         // eslint-disable-next-line no-console
-        console.log(`exec:      codex exec resume ${selection.state.codex_thread_id} -`);
+        console.log(`exec:      codex exec resume ${threadId} -`);
       }
     });
 
   program
     .command('tail')
-    .description('Tail the Codex JSONL output for an issue number')
+    .description('Tail the agent output for an issue number')
     .argument('<issue_ref>', 'GitHub issue number or repo-qualified ref (e.g. 264 or mdedit#264)')
     .option('-c, --config <path>', 'Path to symphony.config.yml')
     .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
@@ -361,13 +375,14 @@ async function main(): Promise<void> {
         console.log(`Issue ${issueRef} is ambiguous. Use one of: ${selection.matches.map((s) => `${s.repo_id}#${s.issue_number}`).join(', ')}`);
         return;
       }
-      if (!selection.state || !selection.state.codex_jsonl_path) {
+      const logPath = selection.state?.agent_log_path ?? selection.state?.agent_output_path ?? selection.state?.codex_jsonl_path;
+      if (!selection.state || !logPath) {
         // eslint-disable-next-line no-console
-        console.log(`No codex log found for issue ${issueRef}.`);
+        console.log(`No agent log found for issue ${issueRef}.`);
         return;
       }
 
-      const child = spawn('tail', ['-n', String(safeLines), '-f', selection.state.codex_jsonl_path], { stdio: 'inherit' });
+      const child = spawn('tail', ['-n', String(safeLines), '-f', logPath], { stdio: 'inherit' });
       await new Promise<void>((resolve, reject) => {
         child.on('error', reject);
         child.on('exit', () => resolve());

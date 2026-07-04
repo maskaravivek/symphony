@@ -13,10 +13,16 @@ export function formatStatusComment(options: {
   state: Partial<RunState>;
   message: string;
 }): string {
-  const threadId = options.state.codex_thread_id ?? null;
+  const provider = options.state.agent_provider ?? 'codex';
+  const threadId = options.state.agent_thread_id ?? options.state.codex_thread_id ?? null;
   const workspace = options.state.workspace_path ?? '';
-  const resumeCommand = threadId ? `codex resume --include-non-interactive ${threadId}` : '(available after Codex thread starts)';
-  const execResumeCommand = threadId ? `codex exec resume ${threadId} -` : '(available after Codex thread starts)';
+  const isCodex = provider === 'codex';
+  const resumeCommand = isCodex && threadId ? `codex resume --include-non-interactive ${threadId}` : null;
+  const execResumeCommand = isCodex && threadId ? `codex exec resume ${threadId} -` : null;
+  const resumeBlock =
+    resumeCommand && execResumeCommand
+      ? `\nInteractive resume:\n\n\`\`\`bash\n${resumeCommand}\n\`\`\`\n\nNon-interactive resume:\n\n\`\`\`bash\n${execResumeCommand}\n\`\`\`\n`
+      : '';
 
-  return `${statusMarker(options.issue)}\n### Symphony Status\n\n${options.message}\n\n- Repo: ${options.config.tracker.owner}/${options.config.tracker.repo}\n- Symphony repo id: ${options.repoId ?? '(single-repo)'}\n- Issue: ${options.issue.identifier}\n- Workspace: \`${workspace || '(not prepared)'}\`\n- Branch: \`${options.issue.branch_name ?? '(unknown)'}\`\n- Status: \`${options.state.status ?? 'unknown'}\`\n- Pause reason: \`${options.state.pause_reason ?? 'none'}\`\n- Codex thread: \`${threadId ?? 'pending'}\`\n\nInteractive resume:\n\n\`\`\`bash\n${resumeCommand}\n\`\`\`\n\nNon-interactive resume:\n\n\`\`\`bash\n${execResumeCommand}\n\`\`\`\n`;
+  return `${statusMarker(options.issue)}\n### Symphony Status\n\n${options.message}\n\n- Repo: ${options.config.tracker.owner}/${options.config.tracker.repo}\n- Symphony repo id: ${options.repoId ?? '(single-repo)'}\n- Issue: ${options.issue.identifier}\n- Workspace: \`${workspace || '(not prepared)'}\`\n- Branch: \`${options.issue.branch_name ?? '(unknown)'}\`\n- Status: \`${options.state.status ?? 'unknown'}\`\n- Pause reason: \`${options.state.pause_reason ?? 'none'}\`\n- Agent provider: \`${provider}\`\n- Agent thread: \`${threadId ?? 'pending'}\`\n${resumeBlock}`;
 }

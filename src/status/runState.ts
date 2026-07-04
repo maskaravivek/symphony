@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 
 export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
 
-export type CodexMode = 'autonomous' | 'interactive-handoff' | 'resolve-conflicts';
+export type AgentMode = 'autonomous' | 'interactive-handoff' | 'resolve-conflicts';
+export type CodexMode = AgentMode;
 
 export type PauseReason = 'interactive' | 'needs-info' | null;
 
@@ -24,6 +25,10 @@ export interface RunState {
 
   attempt: number;
   session_id: string | null;
+  agent_provider?: string | null;
+  agent_thread_id?: string | null;
+  agent_mode?: AgentMode | null;
+  agent_log_path?: string | null;
   codex_thread_id: string | null;
   codex_mode: CodexMode | null;
   pause_reason: PauseReason;
@@ -38,6 +43,7 @@ export interface RunState {
   last_error: string | null;
 
   prompt_path: string | null;
+  agent_output_path?: string | null;
   codex_jsonl_path: string | null;
   last_message_path: string | null;
   last_seen_comment_id: number | null;

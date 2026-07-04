@@ -11,8 +11,8 @@ import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { runHookScript } from '../workspace/hooks.js';
 import { WorkspaceManager } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
-import type { LoadedWorkflow, WorkflowConfig } from '../workflow/types.js';
-import { readRunState, updateRunState, writeRunState, type CodexMode, type PauseReason, type RunState } from '../status/runState.js';
+import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig } from '../workflow/types.js';
+import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
 import { readEpicStates, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
 import { buildRunContext } from './runContext.js';
 import { formatPauseComment, parsePauseRequest } from './pauseProtocol.js';
@@ -25,6 +25,8 @@ import { execFile } from 'node:child_process';
 interface DispatchCapacity {
   remaining: number | null;
 }
+
+type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity';
 
 export interface OrchestratorOptions {
   workflowPath: string;
@@ -63,6 +65,7 @@ interface RunningSession {
   issue_state: string;
   workspace_path: string;
   session_id: string;
+  agent_provider: string;
   started_at_ms: number;
   cancelled_reason: string | null;
   cancel: (reason: string) => Promise<void>;
@@ -176,6 +179,27 @@ function isSameTrackerRepo(config: WorkflowConfig, issue: Issue): boolean {
 
 function isTerminalIssue(config: WorkflowConfig, issue: Issue): boolean {
   return config.tracker.terminal_states.includes(issue.state);
+}
+
+function labelsMatchRoute(labels: string[], route: WorkflowConfig['agents']['routes'][number]): boolean {
+  const set = new Set(labels.map((label) => label.trim().toLowerCase()));
+  if (route.none_labels.some((label) => set.has(label))) return false;
+  if (route.all_labels.some((label) => !set.has(label))) return false;
+  if (route.any_labels.length > 0 && !route.any_labels.some((label) => set.has(label))) return false;
+  return route.default || route.any_labels.length > 0 || route.all_labels.length > 0 || route.none_labels.length > 0;
+}
+
+function selectAgentProvider(config: WorkflowConfig, issue: Issue): AgentProviderConfig {
+  const labels = issue.labels.map((label) => label.trim().toLowerCase());
+  const route = config.agents.routes.find((candidate) => labelsMatchRoute(labels, candidate));
+  const providerId = route?.provider ?? config.agents.default;
+  const provider = config.agents.providers[providerId];
+  if (!provider) throw new SymphonyConfigError(`agent provider not found: ${providerId}`);
+  return provider;
+}
+
+function resolveAgentLogPath(workspacePath: string, provider: AgentProviderConfig): string {
+  return path.isAbsolute(provider.output_log) ? provider.output_log : path.join(workspacePath, provider.output_log);
 }
 
 function collectEpicChildren(root: EpicTreeNode): Array<{ node: EpicTreeNode; depth: number }> {
@@ -307,13 +331,14 @@ export class Orchestrator {
         'tracker.token is required (set tracker.token: $GITHUB_TOKEN and export GITHUB_TOKEN, or provide a literal token)',
       );
     }
-    if (!config.codex.command) throw new SymphonyConfigError('codex.command is required');
-    if (!config.codex.resume_command) throw new SymphonyConfigError('codex.resume_command is required');
-    if (!config.codex.handoff_command) throw new SymphonyConfigError('codex.handoff_command is required');
+    if (!config.agents.default) throw new SymphonyConfigError('agents.default is required');
+    if (!config.agents.providers[config.agents.default]) throw new SymphonyConfigError(`agents.default references unknown provider: ${config.agents.default}`);
     if (!config.workspace.root) throw new SymphonyConfigError('workspace.root is required');
-    assertAgentEligibleCommand(config.codex.command);
-    assertAgentEligibleCommand(config.codex.resume_command);
-    assertAgentEligibleCommand(config.codex.handoff_command);
+    for (const provider of Object.values(config.agents.providers)) {
+      assertAgentEligibleCommand(provider.command, `agents.providers.${provider.id}.command`);
+      if (provider.resume_command) assertAgentEligibleCommand(provider.resume_command, `agents.providers.${provider.id}.resume_command`);
+      if (provider.handoff_command) assertAgentEligibleCommand(provider.handoff_command, `agents.providers.${provider.id}.handoff_command`);
+    }
   }
 
   private async reconcileRunning(
@@ -551,9 +576,6 @@ export class Orchestrator {
   ): Promise<void> {
     if (this.hasConflictResolverRunning()) return;
     if (capacity.remaining !== null && capacity.remaining <= 0) return;
-    const maxConcurrentAgents = this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents;
-    if (this.running.size >= maxConcurrentAgents) return;
-
     const now = nowMs();
     const entry = [...this.conflictQueue.values()]
       .filter((candidate) => candidate.next_run_at_ms <= now)
@@ -575,11 +597,14 @@ export class Orchestrator {
       this.conflictQueue.delete(entry.pr_number);
       return;
     }
+    const provider = selectAgentProvider(config, issue);
+    if (this.dispatchBlockReason(config, issue, provider, capacity)) return;
 
     try {
       await this.dispatchIssue(config, issue, workspaceManager, {
         attempt: 1,
         mode: 'resolve-conflicts',
+        provider,
         conflict: {
           pr_number: entry.pr_number,
           pr_url: entry.url,
@@ -761,9 +786,12 @@ export class Orchestrator {
         continue;
       }
 
-      if (!this.canDispatch(config, candidate, capacity)) return;
+      const provider = selectAgentProvider(config, candidate);
+      const blocked = this.dispatchBlockReason(config, candidate, provider, capacity);
+      if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
+      if (blocked === 'provider_capacity') continue;
       try {
-        await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt });
+        await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt, provider });
         if (capacity.remaining !== null) capacity.remaining -= 1;
       } catch (err) {
         log('error', 'issue_dispatch_failed', {
@@ -784,10 +812,13 @@ export class Orchestrator {
     capacity: DispatchCapacity,
   ): Promise<void> {
     for (const issue of candidates) {
-      if (!this.canDispatch(config, issue, capacity)) return;
+      const provider = selectAgentProvider(config, issue);
+      const blocked = this.dispatchBlockReason(config, issue, provider, capacity);
+      if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
+      if (blocked === 'provider_capacity') continue;
       if (this.retries.has(issue.id)) continue;
       try {
-        await this.dispatchIssue(config, issue, workspaceManager, { attempt: 1 });
+        await this.dispatchIssue(config, issue, workspaceManager, { attempt: 1, provider });
         if (capacity.remaining !== null) capacity.remaining -= 1;
       } catch (err) {
         log('error', 'issue_dispatch_failed', {
@@ -804,12 +835,13 @@ export class Orchestrator {
     config: WorkflowConfig,
     issue: Issue,
     workspaceManager: WorkspaceManager,
-    opts: { attempt: number; mode?: CodexMode; conflict?: ConflictDispatchOptions },
+    opts: { attempt: number; mode?: AgentMode; provider?: AgentProviderConfig; conflict?: ConflictDispatchOptions },
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
+    const provider = opts.provider ?? selectAgentProvider(config, issue);
     const issueFields = getIssueLogFields(config, issue, this.repoId);
 
-    log('info', 'issue_claimed', { ...issueFields, event: 'issue_claimed', status: 'claimed' });
+    log('info', 'issue_claimed', { ...issueFields, event: 'issue_claimed', status: 'claimed', agent_provider: provider.id });
 
     const { workspace_path: workspacePath, is_new: isNew } = await workspaceManager.ensureWorkspace(issue);
     const workspaceFields = { ...issueFields, workspace_path: workspacePath };
@@ -894,19 +926,33 @@ export class Orchestrator {
         )
       : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}`;
     const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
-    const codexJsonlPath = path.join(workspacePath, '.symphony', 'codex.jsonl');
+    const agentLogPath = resolveAgentLogPath(workspacePath, provider);
+    await fs.mkdir(path.dirname(agentLogPath), { recursive: true });
+    const codexJsonlPath = provider.id === 'codex' ? agentLogPath : path.join(workspacePath, '.symphony', 'codex.jsonl');
 
-    let codexThreadId = existingState?.codex_thread_id ?? null;
-    const codexMode: CodexMode = isConflictResolution ? 'resolve-conflicts' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
+    let agentThreadId =
+      existingState?.agent_provider === provider.id
+        ? existingState?.agent_thread_id ?? existingState?.codex_thread_id ?? null
+        : provider.id === 'codex'
+          ? existingState?.codex_thread_id ?? null
+          : null;
+    let codexThreadId = provider.id === 'codex' ? agentThreadId : null;
+    const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
     const commandTemplate = isInteractiveHandoff
-      ? config.codex.handoff_command
-      : codexThreadId
-        ? config.codex.resume_command
-        : config.codex.command;
+      ? provider.handoff_command ?? provider.command
+      : agentThreadId && provider.resume_command
+        ? provider.resume_command
+        : provider.command;
     const renderedCommand = await renderTemplate(commandTemplate, {
       issue,
-      symphony: { prompt_path: promptPath, workspace_path: workspacePath, codex_thread_id: codexThreadId ?? '' },
+      symphony: {
+        prompt_path: promptPath,
+        workspace_path: workspacePath,
+        agent_provider: provider.id,
+        agent_thread_id: agentThreadId ?? '',
+        codex_thread_id: codexThreadId ?? '',
+      },
     });
 
     const env: Record<string, string> = {
@@ -920,6 +966,8 @@ export class Orchestrator {
       SYMPHONY_WORKSPACE_PATH: workspacePath,
       SYMPHONY_PROMPT_PATH: promptPath,
       SYMPHONY_BRANCH_NAME: issue.branch_name ?? '',
+      SYMPHONY_AGENT_PROVIDER: provider.id,
+      SYMPHONY_AGENT_THREAD_ID: agentThreadId ?? '',
       SYMPHONY_CODEX_THREAD_ID: codexThreadId ?? '',
     };
 
@@ -937,8 +985,12 @@ export class Orchestrator {
       workspace_path: workspacePath,
       attempt: opts.attempt,
       session_id: null,
+      agent_provider: provider.id,
+      agent_thread_id: agentThreadId,
+      agent_mode: agentMode,
+      agent_log_path: agentLogPath,
       codex_thread_id: codexThreadId,
-      codex_mode: codexMode,
+      codex_mode: provider.id === 'codex' ? agentMode : null,
       pause_reason: pauseReason,
       worker_pid: null,
       status: 'running',
@@ -948,7 +1000,8 @@ export class Orchestrator {
       last_signal: null,
       last_error: null,
       prompt_path: promptPath,
-      codex_jsonl_path: codexJsonlPath,
+      agent_output_path: agentLogPath,
+      codex_jsonl_path: provider.id === 'codex' ? codexJsonlPath : existingState?.codex_jsonl_path ?? null,
       last_message_path: lastMessagePath,
       last_seen_comment_id: runContext.lastSeenCommentId,
       status_comment_id: statusCommentId,
@@ -962,7 +1015,7 @@ export class Orchestrator {
       if (isInteractiveHandoff) {
         await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] });
         await this.updateLifecycleState(workspacePath, { remove: [LABEL_READY, LABEL_RUNNING], workflowState: 'interactive' });
-        await this.upsertStatus(config, issue, initialState, 'Interactive handoff requested. Preparing a Codex thread and pausing autonomous work.');
+        await this.upsertStatus(config, issue, initialState, `Interactive handoff requested. Preparing a ${provider.id} session and pausing autonomous work.`);
       } else if (isConflictResolution) {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO] });
         await this.updateLifecycleState(workspacePath, {
@@ -970,11 +1023,11 @@ export class Orchestrator {
           remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO],
           workflowState: LABEL_RUNNING,
         });
-        await this.upsertStatus(config, issue, initialState, `Merge conflicts detected for PR #${opts.conflict?.pr_number}. Symphony is starting conflict-resolution mode.`);
+        await this.upsertStatus(config, issue, initialState, `Merge conflicts detected for PR #${opts.conflict?.pr_number}. Symphony is starting ${provider.id} conflict-resolution mode.`);
       } else {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
         await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
-        await this.upsertStatus(config, issue, initialState, 'Claimed by Symphony. Autonomous Codex run is starting.');
+        await this.upsertStatus(config, issue, initialState, `Claimed by Symphony. Autonomous ${provider.id} run is starting.`);
       }
     } catch (err) {
       await this.applyLabels(config, issue.number, { add: [LABEL_READY], remove: [LABEL_RUNNING] }).catch(() => {});
@@ -999,15 +1052,22 @@ export class Orchestrator {
       command: renderedCommand,
       cwd: workspacePath,
       env,
-      turnTimeoutMs: config.codex.turn_timeout_ms,
-      logFields: { ...workspaceFields, event: 'worker_started', status: 'running', attempt: opts.attempt },
+      turnTimeoutMs: provider.turn_timeout_ms,
+      logFields: { ...workspaceFields, event: 'worker_started', status: 'running', attempt: opts.attempt, agent_provider: provider.id },
       onStdoutLine: (line) => {
+        if (!provider.extract_codex_thread_id) return;
         const threadId = extractCodexThreadId(line);
-        if (!threadId || threadId === codexThreadId) return;
-        codexThreadId = threadId;
+        if (!threadId || threadId === agentThreadId) return;
+        agentThreadId = threadId;
+        codexThreadId = provider.id === 'codex' ? threadId : codexThreadId;
         void updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
-          return { ...cur, codex_thread_id: threadId, updated_at: new Date().toISOString() };
+          return {
+            ...cur,
+            agent_thread_id: threadId,
+            codex_thread_id: provider.id === 'codex' ? threadId : cur.codex_thread_id,
+            updated_at: new Date().toISOString(),
+          };
         });
       },
     });
@@ -1030,6 +1090,7 @@ export class Orchestrator {
       issue_state: isConflictResolution ? 'conflict-resolution' : issue.state,
       workspace_path: workspacePath,
       session_id: agent.session_id,
+      agent_provider: provider.id,
       started_at_ms: nowMs(),
       cancelled_reason: null,
       cancel: agent.cancel,
@@ -1428,15 +1489,27 @@ ${runContext}`;
     });
   }
 
-  private canDispatch(config: WorkflowConfig, issue: Issue, capacity: DispatchCapacity): boolean {
-    if (capacity.remaining !== null && capacity.remaining <= 0) return false;
+  private dispatchBlockReason(
+    config: WorkflowConfig,
+    issue: Issue,
+    provider: AgentProviderConfig,
+    capacity: DispatchCapacity,
+  ): DispatchBlockReason | null {
+    if (capacity.remaining !== null && capacity.remaining <= 0) return 'global_capacity';
     const maxConcurrentAgents = this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents;
-    if (this.running.size >= maxConcurrentAgents) return false;
+    if (this.running.size >= maxConcurrentAgents) return 'global_capacity';
     const byState = config.agent.max_concurrent_agents_by_state;
-    if (!byState) return true;
-    const limit = byState[issue.state];
-    if (typeof limit !== 'number') return true;
-    const runningInState = [...this.running.values()].filter((s) => s.issue_state === issue.state).length;
-    return runningInState < limit;
+    if (byState) {
+      const limit = byState[issue.state];
+      if (typeof limit === 'number') {
+        const runningInState = [...this.running.values()].filter((s) => s.issue_state === issue.state).length;
+        if (runningInState >= limit) return 'state_capacity';
+      }
+    }
+    if (provider.max_concurrent !== null) {
+      const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider === provider.id).length;
+      if (runningForProvider >= provider.max_concurrent) return 'provider_capacity';
+    }
+    return null;
   }
 }

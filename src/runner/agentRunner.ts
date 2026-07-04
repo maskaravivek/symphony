@@ -105,6 +105,6 @@ export function runAgent(options: AgentRunOptions): AgentRunResult {
   };
 }
 
-export function assertAgentEligibleCommand(command: string): void {
-  if (!command.trim()) throw new SymphonyRuntimeError('codex.command must be non-empty');
+export function assertAgentEligibleCommand(command: string, keyPath = 'agent command'): void {
+  if (!command.trim()) throw new SymphonyRuntimeError(`${keyPath} must be non-empty`);
 }

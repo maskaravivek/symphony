@@ -41,7 +41,7 @@ yarn dev
 Symphony writes per-issue artifacts under each workspace:
 
 - `.symphony/prompt.md` (rendered prompt)
-- `.symphony/codex.jsonl` (Codex `--json` output; tail this)
+- `.symphony/codex.jsonl` or `.symphony/claude.log` (configured agent output; tail this)
 - `.symphony/last_message.md` (final agent message)
 - `.symphony/run.json` (run metadata used by `symphony status/open/tail`)
 
@@ -88,13 +88,41 @@ Set `tracker.priority_labels` in `WORKFLOW.md` to match the target repo's actual
 
 For `mangoappstudio/mdedit`, use `priority:p0`, `priority:p1`, `priority:p2`, and `priority:p3`. The mdedit Project board separately maps those labels into its High/Medium/Low Priority field through the repo's issue-priority sync workflow, so new agent-created issues must include exactly one `priority:p*` label.
 
+## Agent routing
+
+Symphony can route issues to different CLI agents by GitHub labels. `agents.default` handles ordinary work, while ordered `agents.routes` can send scarce or specialized work to another provider:
+
+```yaml
+agents:
+  default: codex
+  providers:
+    codex:
+      command: bash -lc 'codex exec --json -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
+      resume_command: bash -lc 'codex exec resume --json --output-last-message .symphony/last_message.md "{{ symphony.agent_thread_id }}" - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
+      handoff_command: bash -lc 'codex exec --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
+      output_log: .symphony/codex.jsonl
+    claude:
+      command: bash -lc 'claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log'
+      output_log: .symphony/claude.log
+      max_concurrent: 1
+  routes:
+    - provider: claude
+      any_labels: [agent:claude, ui, ux, design]
+      none_labels: [agent:codex]
+    - provider: codex
+      default: true
+```
+
+Routes are evaluated in order. A route can use `any_labels`, `all_labels`, `none_labels`, and `default`. Provider `max_concurrent` lets you reserve low-limit agents like Claude for critical labeled work without consuming every Symphony worker slot.
+
 ## Notes
 
 - `WORKFLOW.md` contains YAML front matter for config + a Markdown prompt template body.
-- `symphony.config.yml` only coordinates repos. Each repo still owns its own `WORKFLOW.md`, labels, hooks, prompt, workspace root, and Codex command.
+- `symphony.config.yml` only coordinates repos. Each repo still owns its own `WORKFLOW.md`, labels, hooks, prompt, workspace root, and agent commands.
 - `--workflow` is resolved by searching up parent directories when omitted, or can be passed explicitly as a relative path from the Symphony repo.
 - If `tracker.token` resolves to null, Symphony will try `gh auth token` and use that token (and set `GITHUB_TOKEN` for hooks/agent subprocesses for this run).
 - If a workspace exists but is missing `.git`, Symphony will clear the workspace contents and re-run `hooks.after_create` (to recover from interrupted runs).
 - Hook scripts (`hooks.after_create`, `hooks.before_run`, `hooks.after_run`) are rendered as Liquid templates with `issue.*` available.
-- `codex.command` is also rendered as a Liquid template with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` available.
+- Agent commands are rendered as Liquid templates with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` / `symphony.agent_provider` / `symphony.agent_thread_id` available.
+- Legacy `codex.command` workflows still work; Symphony converts them into a default `codex` provider internally.
 - GitHub writes (comments, labels, PR creation) are intentionally left to the agent/toolchain (`gh`, MCP, etc.).
