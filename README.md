@@ -82,6 +82,12 @@ tracker:
 
 When a `ready-for-agent` issue has native sub-issues, Symphony treats it as a coordinator epic instead of an implementation issue. It does not create a parent workspace or run Codex on the parent. It adds `ready-for-agent` to eligible open leaf sub-issues, updates a parent epic status comment, and marks the parent `ready-for-human` once all descendants are terminal.
 
+## Priority labels
+
+Set `tracker.priority_labels` in `WORKFLOW.md` to match the target repo's actual labels. Symphony treats lower numeric values as higher priority when selecting queued work.
+
+For `mangoappstudio/mdedit`, use `priority:p0`, `priority:p1`, `priority:p2`, and `priority:p3`. The mdedit Project board separately maps those labels into its High/Medium/Low Priority field through the repo's issue-priority sync workflow, so new agent-created issues must include exactly one `priority:p*` label.
+
 ## Notes
 
 - `WORKFLOW.md` contains YAML front matter for config + a Markdown prompt template body.

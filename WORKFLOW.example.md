@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: github
-  owner: maskaravivek
+  owner: mangoappstudio
   repo: mdedit
   token: $GITHUB_TOKEN
   active_states:
@@ -21,10 +21,10 @@ tracker:
     parent_mode: coordinator_only
     max_depth: 8
   priority_labels:
-    "priority: urgent": 1
-    "priority: high": 2
-    "priority: medium": 3
-    "priority: low": 4
+    "priority:p0": 1
+    "priority:p1": 2
+    "priority:p2": 3
+    "priority:p3": 4
   # Produces flat branches like symphony-123-short-title.
   # Avoid "/" here unless you intentionally want nested Git refs.
   branch_prefix: symphony
@@ -54,13 +54,13 @@ hooks:
     if [ -d "$mirror" ]; then
       git -C "$mirror" remote update --prune
     else
-      git clone --mirror git@github.com:maskaravivek/mdedit.git "$mirror"
+      git clone --mirror git@github.com:mangoappstudio/mdedit.git "$mirror"
     fi
 
     rmdir "$mirror_lock"
     trap - EXIT
 
-    git clone --reference-if-able "$mirror" git@github.com:maskaravivek/mdedit.git .
+    git clone --reference-if-able "$mirror" git@github.com:mangoappstudio/mdedit.git .
     mkdir -p .git/info
     touch .git/info/exclude
     grep -qxF '.symphony/' .git/info/exclude || echo '.symphony/' >> .git/info/exclude
@@ -153,6 +153,11 @@ Issue:
 - URL: {{ issue.url }}
 - Labels: {{ issue.labels | join: ", " }}
 
+Priority:
+- Symphony sorts queued work by `priority:p0`, `priority:p1`, `priority:p2`, then `priority:p3`.
+- The mdedit Project board maps `priority:p0` and `priority:p1` to High, `priority:p2` to Medium, and `priority:p3` to Low through the repo's issue-priority sync workflow.
+- Preserve priority labels unless the issue scope is clearly wrong. If you create a follow-up issue, apply exactly one `priority:p*` label using `docs/agents/issue-tracker.md` and `docs/agents/product-priorities.md`.
+
 Description:
 
 {{ issue.description }}
@@ -161,6 +166,7 @@ Instructions:
 
 1. Understand the issue and inspect the repository.
 2. Read the repo's agent instructions and relevant local docs before editing.
+   - For QA, maturity, or follow-up issue work, read `docs/agents/product-priorities.md`, `docs/agents/issue-tracker.md`, and the relevant QA/stewardship docs.
 3. Make the smallest safe change that solves the issue.
 4. Add or update tests when behavior changes.
 5. Run the strongest local checks that are practical for the touched area.
