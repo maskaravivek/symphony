@@ -471,6 +471,52 @@ function buildMockFetchWithLabels(
   };
 }
 
+async function writeWorkflowWithPlanningMode(workspaceRoot: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-planning-workflow-'));
+  const workflowPath = path.join(dir, 'WORKFLOW.md');
+  await fs.writeFile(
+    workflowPath,
+    `---
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  api_base_url: https://api.github.test
+  active_states: [open]
+  terminal_states: [closed]
+  required_labels: [ready-for-agent]
+  ignored_labels: [blocked, ready-for-human, wontfix]
+workspace:
+  root: ${workspaceRoot}
+hooks:
+  after_run: exit 1
+agent:
+  max_concurrent_agents: 1
+agents:
+  default: codex
+  providers:
+    codex:
+      provider_group: codex
+      provider_kind: codex
+      command: bash -c 'printf "Detailed plan" > .symphony/last_message.md'
+      handoff_command: bash -c 'printf "Detailed plan" > .symphony/last_message.md'
+      output_log: .symphony/codex.jsonl
+---
+
+Prompt body
+`,
+    'utf8',
+  );
+  return workflowPath;
+}
+
+function commentBodies(calls: { url: string; method: string; body: unknown }[], issueNumber: number): string[] {
+  return calls
+    .filter((c) => c.url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${issueNumber}/comments` && c.method === 'POST')
+    .map((c) => (c.body && typeof c.body === 'object' && 'body' in c.body ? String((c.body as { body: unknown }).body) : ''));
+}
+
 test('blocks dispatch when usage_limit_check_command exits non-zero', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-check-blocked-workspace-'));
   const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, "bash -c 'exit 1'");
@@ -532,6 +578,27 @@ test('applies max_concurrent across providers in the same provider_group', async
     await orchestrator.tickOnce();
     assert.ok(wasDispatched(calls, 40), 'high-complexity UX issue should dispatch to claude-fable');
     assert.equal(wasDispatched(calls, 41), false, 'default UX issue should wait while a claude-group sibling is running');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('planning issues post the final message as an issue comment and skip after_run', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-planning-workspace-'));
+  const workflowPath = await writeWorkflowWithPlanningMode(workspaceRoot);
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetchWithLabels({ 50: ['ready-for-agent', 'task:spec'] }, calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    await waitFor(() => commentBodies(calls, 50).some((body) => body.includes('## Symphony Technical Specification') && body.includes('Detailed plan')));
+    assert.ok(commentBodies(calls, 50).some((body) => body.includes('Detailed plan')), 'planning result should be posted as an issue comment');
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;

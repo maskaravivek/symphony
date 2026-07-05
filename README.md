@@ -143,6 +143,8 @@ agents:
 
 Routes are evaluated in order. A route can use `any_labels`, `all_labels`, `none_labels`, and `default`. The example above sends high/critical UX work to Fable, tiny/docs/chore work to Codex Spark, UX work without a complexity label to default Claude, and everything else to default Codex. Providers with the same `provider_group` share `max_concurrent`, proactive usage checks, and usage-limit backoff; `provider_kind: codex` marks Codex-compatible providers that support thread extraction and resume instructions.
 
+Issues labeled `task:spec` or `planning` run in planning-only mode regardless of provider route. Symphony uses the provider's `handoff_command` when available, appends spec-writing instructions to the prompt, posts the captured final message back to the issue as a technical specification comment, skips `after_run` PR validation, and marks the issue `ready-for-human` without expecting a branch or pull request.
+
 ## Notes
 
 - `WORKFLOW.md` contains YAML front matter for config + a Markdown prompt template body.

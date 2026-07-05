@@ -86,6 +86,8 @@ const LABEL_RUNNING = 'agent-running';
 const LABEL_INTERACTIVE = 'interactive';
 const LABEL_NEEDS_INFO = 'needs-info';
 const LABEL_READY_FOR_HUMAN = 'ready-for-human';
+const LABEL_PLANNING = 'planning';
+const LABEL_TASK_SPEC = 'task:spec';
 
 function nowMs(): number {
   return Date.now();
@@ -105,6 +107,11 @@ function hasAnyOf(labels: string[], requiredAny: string[] | null): boolean {
   if (!requiredAny || requiredAny.length === 0) return true;
   const set = new Set(labels);
   return requiredAny.some((l) => set.has(l));
+}
+
+function isPlanningIssue(labels: string[]): boolean {
+  const set = new Set(labels.map((label) => label.trim().toLowerCase()));
+  return set.has(LABEL_PLANNING) || set.has(LABEL_TASK_SPEC);
 }
 
 function computeBackoffMs(attempt: number, maxBackoffMs: number): number {
@@ -1084,8 +1091,12 @@ export class Orchestrator {
     const isConflictResolution = opts.mode === 'resolve-conflicts';
     const isPullRequestReview = opts.mode === 'pr-review';
     const isInteractiveHandoff = !isConflictResolution && !isPullRequestReview && issue.labels.includes(LABEL_INTERACTIVE);
+    const isPlanningRun = !isConflictResolution && !isPullRequestReview && !isInteractiveHandoff && isPlanningIssue(issue.labels);
     const handoffInstructions = isInteractiveHandoff
       ? '\n\n---\n\n## Interactive Handoff Instructions\n\nCreate a concise orientation summary for the user to continue this issue interactively. Do not edit files, run write commands, commit, push, or open a PR in this handoff pass.\n'
+      : '';
+    const planningInstructions = isPlanningRun
+      ? '\n\n---\n\n## Planning / Technical Specification Instructions\n\nThis is a planning-only Symphony run. These instructions supersede any workflow instructions that ask you to edit files, commit, push, or open a pull request.\n\n- Inspect the repository and issue context enough to produce a concrete technical specification.\n- Do not edit files, run write commands, commit, push, create branches, or open a pull request.\n- Write the final answer as a detailed technical specification suitable for the issue thread.\n- Include: problem statement, relevant existing code/architecture, proposed implementation, files likely to change, API/data model implications, UX implications when relevant, test plan, risks, open questions, and suggested implementation tickets if the work should be split.\n- If implementation needs a product, architecture, security, data-loss, cost, or irreversible decision, use the SYMPHONY_PAUSE protocol instead of guessing.\n'
       : '';
     const pullRequestReviewInstructions =
       isPullRequestReview && opts.prReview
@@ -1098,7 +1109,7 @@ export class Orchestrator {
           conflictBriefPath ?? path.join(workspacePath, '.symphony', 'merge-conflict.md'),
           runContext.text,
         )
-      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}${pullRequestReviewInstructions}`;
+      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}`;
     const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
     const agentLogPath = resolveAgentLogPath(workspacePath, provider);
     await fs.mkdir(path.dirname(agentLogPath), { recursive: true });
@@ -1112,9 +1123,9 @@ export class Orchestrator {
           ? existingState?.codex_thread_id ?? null
           : null;
     let codexThreadId = codexCompatible ? agentThreadId : null;
-    const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isPullRequestReview ? 'pr-review' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
+    const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isPullRequestReview ? 'pr-review' : isInteractiveHandoff ? 'interactive-handoff' : isPlanningRun ? 'planning' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
-    const commandTemplate = isInteractiveHandoff
+    const commandTemplate = isInteractiveHandoff || isPlanningRun
       ? provider.handoff_command ?? provider.command
       : agentThreadId && provider.resume_command
         ? provider.resume_command
@@ -1198,6 +1209,10 @@ export class Orchestrator {
         await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] });
         await this.updateLifecycleState(workspacePath, { remove: [LABEL_READY, LABEL_RUNNING], workflowState: 'interactive' });
         await this.upsertStatus(config, issue, initialState, `Interactive handoff requested. Preparing a ${provider.id} session and pausing autonomous work.`);
+      } else if (isPlanningRun) {
+        await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
+        await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
+        await this.upsertStatus(config, issue, initialState, `Planning run requested. Symphony is starting ${provider.id} in spec-only mode and will post the plan to this issue.`);
       } else if (isConflictResolution) {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO] });
         await this.updateLifecycleState(workspacePath, {
@@ -1359,6 +1374,18 @@ export class Orchestrator {
               cur ? { ...cur, status: 'paused', pause_reason: 'needs-info', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null,
             );
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Paused for user input. Symphony posted a question on this issue.');
+            return;
+          }
+
+          if (isPlanningRun) {
+            await this.postPlanningResult(config, issue, workspacePath, lastMessagePath);
+            await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+            await this.updateLifecycleState(workspacePath, {
+              add: [LABEL_READY_FOR_HUMAN],
+              remove: [LABEL_READY, LABEL_RUNNING],
+              workflowState: LABEL_READY_FOR_HUMAN,
+            });
+            await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Planning run completed. Symphony posted the technical specification to this issue.');
             return;
           }
 
@@ -1660,6 +1687,17 @@ ${runContext}`;
         : null,
     );
     await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), message);
+  }
+
+  private async postPlanningResult(config: WorkflowConfig, issue: Issue, workspacePath: string, lastMessagePath: string): Promise<void> {
+    if (!issue.number) return;
+    const lastMessage = (await this.readLastMessage(lastMessagePath)).trim();
+    const body = [
+      '## Symphony Technical Specification',
+      '',
+      lastMessage || `The planning agent completed successfully, but no final message was captured. Review the workspace artifacts in \`${workspacePath}\`.`,
+    ].join('\n');
+    await new GithubIssueTrackerClient(config.tracker).createIssueComment(issue.number, body);
   }
 
   private async readLastMessage(lastMessagePath: string): Promise<string> {
