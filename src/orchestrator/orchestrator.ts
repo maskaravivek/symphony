@@ -351,6 +351,9 @@ export class Orchestrator {
       assertAgentEligibleCommand(provider.command, `agents.providers.${provider.id}.command`);
       if (provider.resume_command) assertAgentEligibleCommand(provider.resume_command, `agents.providers.${provider.id}.resume_command`);
       if (provider.handoff_command) assertAgentEligibleCommand(provider.handoff_command, `agents.providers.${provider.id}.handoff_command`);
+      if (provider.usage_limit_check_command) {
+        assertAgentEligibleCommand(provider.usage_limit_check_command, `agents.providers.${provider.id}.usage_limit_check_command`);
+      }
     }
   }
 
@@ -1719,6 +1722,13 @@ ${runContext}`;
       providers.map(async (provider) => {
         const command = provider.usage_limit_check_command!;
         const blocked = await new Promise<boolean>((resolve) => {
+          let settled = false;
+          const finalize = (value: boolean) => {
+            if (settled) return;
+            settled = true;
+            resolve(value);
+          };
+
           const child = spawn(command, {
             shell: true,
             stdio: 'ignore',
@@ -1733,7 +1743,7 @@ ${runContext}`;
               agent_provider: provider.id,
               check_command: command,
             });
-            resolve(false);
+            finalize(true);
           }, 30_000);
           timeout.unref();
           child.on('error', (err) => {
@@ -1745,11 +1755,11 @@ ${runContext}`;
               check_command: command,
               error: err.message,
             });
-            resolve(false);
+            finalize(true);
           });
           child.on('exit', (code) => {
             clearTimeout(timeout);
-            resolve(code !== 0);
+            finalize(code !== 0);
           });
         });
         if (blocked) {

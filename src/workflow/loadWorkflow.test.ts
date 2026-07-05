@@ -194,6 +194,24 @@ codex:
   assert.equal(loaded.config.agents.providers.codex.usage_limit_backoff_ms, 0);
 });
 
+test('rejects empty usage_limit_check_command', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_check_command: "   "
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /usage_limit_check_command must be a non-empty string/);
+});
+
 test('rejects non-integer values in usage_limit_exit_codes', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:

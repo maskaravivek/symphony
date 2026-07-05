@@ -39,6 +39,14 @@ function asString(value: unknown, keyPath: string): string | null {
   return value;
 }
 
+function asTrimmedStringOrNull(value: unknown, keyPath: string): string | null {
+  const raw = asString(value, keyPath);
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) throw new SymphonyConfigError(`${keyPath} must be a non-empty string`);
+  return trimmed;
+}
+
 function splitFrontMatter(markdown: string): { yaml: string | null; body: string } {
   if (!markdown.startsWith('---\n') && markdown !== '---') return { yaml: null, body: markdown };
   const lines = markdown.split('\n');
@@ -143,7 +151,7 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
     fallback.usage_limit_backoff_ms ??
     0;
   const usageLimitCheckCommand =
-    asString(value.usage_limit_check_command, `agents.providers.${id}.usage_limit_check_command`) ??
+    asTrimmedStringOrNull(value.usage_limit_check_command, `agents.providers.${id}.usage_limit_check_command`) ??
     fallback.usage_limit_check_command ??
     null;
 
