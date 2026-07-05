@@ -1424,6 +1424,7 @@ export class Orchestrator {
 
         if (code !== null && provider.usage_limit_exit_codes?.includes(code) && provider.usage_limit_backoff_ms > 0) {
           const backoffUntil = nowMs() + provider.usage_limit_backoff_ms;
+          const backoffSeconds = Math.round(provider.usage_limit_backoff_ms / 1000);
           this.providerUsageLimitBackoffUntil.set(provider.id, backoffUntil);
           log('warn', 'provider_usage_limit_backoff', {
             ...endFields,
@@ -1433,7 +1434,7 @@ export class Orchestrator {
             backoff_ms: provider.usage_limit_backoff_ms,
             backoff_until: new Date(backoffUntil).toISOString(),
           });
-          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${provider.id} dispatches for ${Math.round(provider.usage_limit_backoff_ms / 1000)}s and retry.`);
+          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${provider.id} dispatches for ${backoffSeconds}s and retry.`);
         } else {
           await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
         }
