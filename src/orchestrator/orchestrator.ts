@@ -1125,6 +1125,8 @@ export class Orchestrator {
         prompt_path: promptPath,
         workspace_path: workspacePath,
         agent_provider: provider.id,
+        agent_provider_group: provider.provider_group,
+        agent_provider_kind: provider.provider_kind,
         agent_thread_id: agentThreadId ?? '',
         codex_thread_id: codexThreadId ?? '',
       },

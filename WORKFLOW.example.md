@@ -158,15 +158,15 @@ agents:
       # quota window resets (e.g. 5-hour or weekly limits for Codex / Claude).
       # Example: check remaining Codex requests via the OpenAI API headers.
       # Keep this command strict-fail; any curl/auth/parse error blocks dispatch.
-      # usage_limit_check_command: |
-      #   remaining=$(
-      #     curl -sf -I \
-      #       -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-      #       https://api.openai.com/v1/models \
-      #     | awk 'tolower($1)=="x-ratelimit-remaining-requests:" {print $2}' \
-      #     | tr -d '\r'
-      #   )
-      #   [ "${remaining:-0}" -gt 5 ]
+      usage_limit_check_command: |
+        remaining=$(
+          curl -sf -I \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            https://api.openai.com/v1/models \
+          | awk 'tolower($1)=="x-ratelimit-remaining-requests:" {print $2}' \
+          | tr -d '\r'
+        )
+        [ "${remaining:-0}" -gt 5 ]
     codex-spark:
       provider_group: codex
       provider_kind: codex
@@ -185,16 +185,16 @@ agents:
       max_concurrent: 1
       # Example: check remaining Claude requests via Anthropic rate-limit headers.
       # Keep this command strict-fail; any curl/auth/parse error blocks dispatch.
-      # usage_limit_check_command: |
-      #   remaining=$(
-      #     curl -sf -I \
-      #       -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-      #       -H "anthropic-version: 2023-06-01" \
-      #       https://api.anthropic.com/v1/models \
-      #     | awk 'tolower($1)=="anthropic-ratelimit-requests-remaining:" {print $2}' \
-      #     | tr -d '\r'
-      #   )
-      #   [ "${remaining:-0}" -gt 5 ]
+      usage_limit_check_command: |
+        remaining=$(
+          curl -sf -I \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            https://api.anthropic.com/v1/models \
+          | awk 'tolower($1)=="anthropic-ratelimit-requests-remaining:" {print $2}' \
+          | tr -d '\r'
+        )
+        [ "${remaining:-0}" -gt 5 ]
     claude-fable:
       provider_group: claude
       provider_kind: claude

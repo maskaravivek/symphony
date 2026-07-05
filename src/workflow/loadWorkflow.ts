@@ -157,7 +157,7 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
   const extractCodexThreadId =
     asBoolean(value.extract_codex_thread_id, `agents.providers.${id}.extract_codex_thread_id`) ??
     fallback.extract_codex_thread_id ??
-    id === 'codex';
+    providerKind === 'codex';
   const usageLimitExitCodes =
     asIntegerArray(value.usage_limit_exit_codes, `agents.providers.${id}.usage_limit_exit_codes`) ??
     fallback.usage_limit_exit_codes ??

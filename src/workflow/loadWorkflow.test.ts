@@ -165,6 +165,27 @@ agents:
   });
 });
 
+test('defaults codex thread extraction from provider_kind codex', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex-spark
+  providers:
+    codex-spark:
+      provider_group: codex
+      provider_kind: codex
+      command: codex exec --model gpt-5.3-codex-spark -
+      output_log: .symphony/codex-spark.jsonl
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.equal(loaded.config.agents.providers['codex-spark'].extract_codex_thread_id, true);
+});
+
 test('loads usage_limit_exit_codes and usage_limit_backoff_ms for a provider', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:
