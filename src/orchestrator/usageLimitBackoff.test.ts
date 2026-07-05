@@ -293,3 +293,82 @@ test('does not block dispatch when exit code is not in usage_limit_exit_codes', 
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }
 });
+
+async function writeWorkflowWithCheckCommand(workspaceRoot: string, checkCommand: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-check-workflow-'));
+  const workflowPath = path.join(dir, 'WORKFLOW.md');
+  // Agent command is a long sleep so it stays running — the check command is what we are testing
+  await fs.writeFile(
+    workflowPath,
+    `---
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  api_base_url: https://api.github.test
+  active_states: [open]
+  terminal_states: [closed]
+  required_labels: [ready-for-agent]
+  ignored_labels: [blocked, ready-for-human, wontfix]
+workspace:
+  root: ${workspaceRoot}
+agent:
+  max_concurrent_agents: 2
+agents:
+  default: codex
+  providers:
+    codex:
+      command: sleep 3600
+      output_log: .symphony/codex.jsonl
+      usage_limit_check_command: ${checkCommand}
+---
+
+Prompt body
+`,
+    'utf8',
+  );
+  return workflowPath;
+}
+
+test('blocks dispatch when usage_limit_check_command exits non-zero', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-check-blocked-workspace-'));
+  const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, "bash -c 'exit 1'");
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([30], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    // The check command exits non-zero, so issue 30 must not be dispatched
+    assert.equal(wasDispatched(calls, 30), false, 'issue 30 should not be dispatched when check command exits non-zero');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('allows dispatch when usage_limit_check_command exits zero', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-check-allowed-workspace-'));
+  const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, "bash -c 'exit 0'");
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([31], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    // The check command exits zero (within limit), so issue 31 should be dispatched normally
+    assert.ok(wasDispatched(calls, 31), 'issue 31 should be dispatched when check command exits zero');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});

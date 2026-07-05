@@ -149,11 +149,28 @@ agents:
       handoff_command: bash -lc 'set -o pipefail; codex exec --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
       output_log: .symphony/codex.jsonl
       turn_timeout_ms: 3600000
+      # Proactive quota check: Symphony runs this command before each dispatch tick.
+      # Exit 0 → within limit, dispatch proceeds.
+      # Exit non-zero → over limit, dispatch is skipped for this tick and re-checked next tick.
+      # This avoids relying on fixed-duration backoffs when you don't know when a provider's
+      # quota window resets (e.g. 5-hour or weekly limits for Codex / Claude).
+      # Example: check remaining Codex requests via the OpenAI API headers
+      # usage_limit_check_command: |
+      #   remaining=$(curl -sf -o /dev/null -w '%{header:x-ratelimit-remaining-requests}' \
+      #     -H "Authorization: ******" \
+      #     https://api.openai.com/v1/models)
+      #   [ "${remaining:-0}" -gt 5 ]
     claude:
       command: bash -lc 'set -o pipefail; claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log'
       output_log: .symphony/claude.log
       turn_timeout_ms: 3600000
       max_concurrent: 1
+      # Example: check remaining Claude requests via Anthropic rate-limit headers
+      # usage_limit_check_command: |
+      #   remaining=$(curl -sf -o /dev/null -w '%{header:anthropic-ratelimit-requests-remaining}' \
+      #     -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+      #     https://api.anthropic.com/v1/models)
+      #   [ "${remaining:-0}" -gt 5 ]
   routes:
     - provider: claude
       any_labels: [agent:claude, ui, ux, design]

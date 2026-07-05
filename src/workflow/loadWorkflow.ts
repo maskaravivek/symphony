@@ -142,6 +142,10 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
     asNumber(value.usage_limit_backoff_ms, `agents.providers.${id}.usage_limit_backoff_ms`) ??
     fallback.usage_limit_backoff_ms ??
     0;
+  const usageLimitCheckCommand =
+    asString(value.usage_limit_check_command, `agents.providers.${id}.usage_limit_check_command`) ??
+    fallback.usage_limit_check_command ??
+    null;
 
   if (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0) {
     throw new SymphonyConfigError(`agents.providers.${id}.turn_timeout_ms must be a positive number`);
@@ -164,6 +168,7 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
     extract_codex_thread_id: extractCodexThreadId,
     usage_limit_exit_codes: usageLimitExitCodes,
     usage_limit_backoff_ms: usageLimitBackoffMs,
+    usage_limit_check_command: usageLimitCheckCommand,
   };
 }
 
@@ -192,6 +197,7 @@ function normalizeAgentsConfig(raw: AnyRecord, codex: CodexConfig): AgentsConfig
     extract_codex_thread_id: true,
     usage_limit_exit_codes: null,
     usage_limit_backoff_ms: 0,
+    usage_limit_check_command: null,
   };
 
   const agentsRaw = isRecord(raw.agents) ? raw.agents : null;

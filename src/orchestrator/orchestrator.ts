@@ -21,7 +21,7 @@ import { formatStatusComment, statusMarker } from './statusComment.js';
 import { epicStatusMarker, formatEpicStatusComment } from './epicStatusComment.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 
 interface DispatchCapacity {
   remaining: number | null;
@@ -231,6 +231,7 @@ export class Orchestrator {
   private conflictQueue = new Map<number, ConflictEntry>();
   private lastConflictScanAtMs = 0;
   private providerUsageLimitBackoffUntil = new Map<string, number>();
+  private providerUsageLimitCheckBlocked = new Set<string>();
 
   private stopped = false;
 
@@ -289,6 +290,7 @@ export class Orchestrator {
     await this.reconcileRunning(config, trackerClient, workspaceManager);
     await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
     await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
+    await this.refreshProviderUsageLimitChecks(config);
     const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
     await this.scanOpenPullRequestsForConflicts(config, trackerClient);
     await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
@@ -1710,6 +1712,45 @@ ${runContext}`;
     });
   }
 
+  private async refreshProviderUsageLimitChecks(config: WorkflowConfig): Promise<void> {
+    this.providerUsageLimitCheckBlocked.clear();
+    const providers = Object.values(config.agents.providers).filter((p) => p.usage_limit_check_command);
+    await Promise.all(
+      providers.map(async (provider) => {
+        const command = provider.usage_limit_check_command!;
+        const blocked = await new Promise<boolean>((resolve) => {
+          const child = spawn(command, {
+            shell: true,
+            stdio: 'ignore',
+            env: process.env,
+          });
+          const timeout = setTimeout(() => {
+            try { child.kill('SIGTERM'); } catch { /* ignore */ }
+            resolve(false);
+          }, 30_000);
+          timeout.unref();
+          child.on('error', () => {
+            clearTimeout(timeout);
+            resolve(false);
+          });
+          child.on('exit', (code) => {
+            clearTimeout(timeout);
+            resolve(code !== 0);
+          });
+        });
+        if (blocked) {
+          this.providerUsageLimitCheckBlocked.add(provider.id);
+          log('warn', 'provider_usage_limit_check_blocked', {
+            repo_id: this.repoId ?? undefined,
+            event: 'provider_usage_limit_check_blocked',
+            agent_provider: provider.id,
+            check_command: command,
+          });
+        }
+      }),
+    );
+  }
+
   private dispatchBlockReason(
     config: WorkflowConfig,
     issue: Issue,
@@ -1729,6 +1770,7 @@ ${runContext}`;
     }
     const backoffUntil = this.providerUsageLimitBackoffUntil.get(provider.id);
     if (backoffUntil !== undefined && nowMs() < backoffUntil) return 'usage_limit';
+    if (this.providerUsageLimitCheckBlocked.has(provider.id)) return 'usage_limit';
     if (provider.max_concurrent !== null) {
       const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider === provider.id).length;
       if (runningForProvider >= provider.max_concurrent) return 'provider_capacity';

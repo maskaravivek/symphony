@@ -67,6 +67,7 @@ export interface AgentProviderConfig {
   extract_codex_thread_id: boolean;
   usage_limit_exit_codes: number[] | null;
   usage_limit_backoff_ms: number;
+  usage_limit_check_command: string | null;
 }
 
 export interface AgentRouteConfig {
