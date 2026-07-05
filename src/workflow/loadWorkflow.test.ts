@@ -157,6 +157,79 @@ agents:
   });
 });
 
+test('loads usage_limit_exit_codes and usage_limit_backoff_ms for a provider', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_exit_codes: [5, 29]
+      usage_limit_backoff_ms: 3600000
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.agents.providers.codex.usage_limit_exit_codes, [5, 29]);
+  assert.equal(loaded.config.agents.providers.codex.usage_limit_backoff_ms, 3600000);
+});
+
+test('defaults usage_limit_exit_codes to null and usage_limit_backoff_ms to 0', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.equal(loaded.config.agents.providers.codex.usage_limit_exit_codes, null);
+  assert.equal(loaded.config.agents.providers.codex.usage_limit_backoff_ms, 0);
+});
+
+test('rejects non-integer values in usage_limit_exit_codes', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_exit_codes: [5, "notanumber"]
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /usage_limit_exit_codes must be an array of integers/);
+});
+
+test('rejects negative usage_limit_backoff_ms', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_backoff_ms: -1000
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /usage_limit_backoff_ms must be a non-negative number/);
+});
+
 test('rejects unsupported epic relationship source', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:

@@ -27,7 +27,7 @@ interface DispatchCapacity {
   remaining: number | null;
 }
 
-type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity';
+type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity' | 'usage_limit';
 
 export interface OrchestratorOptions {
   workflowPath: string;
@@ -230,6 +230,7 @@ export class Orchestrator {
   private retries = new Map<string, RetryEntry>();
   private conflictQueue = new Map<number, ConflictEntry>();
   private lastConflictScanAtMs = 0;
+  private providerUsageLimitBackoffUntil = new Map<string, number>();
 
   private stopped = false;
 
@@ -934,7 +935,7 @@ export class Orchestrator {
       const provider = selectAgentProvider(config, candidate);
       const blocked = this.dispatchBlockReason(config, candidate, provider, capacity);
       if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
-      if (blocked === 'provider_capacity') continue;
+      if (blocked === 'provider_capacity' || blocked === 'usage_limit') continue;
       try {
         await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt, provider });
         if (capacity.remaining !== null) capacity.remaining -= 1;
@@ -960,7 +961,7 @@ export class Orchestrator {
       const provider = selectAgentProvider(config, issue);
       const blocked = this.dispatchBlockReason(config, issue, provider, capacity);
       if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
-      if (blocked === 'provider_capacity') continue;
+      if (blocked === 'provider_capacity' || blocked === 'usage_limit') continue;
       if (this.retries.has(issue.id)) continue;
       try {
         await this.dispatchIssue(config, issue, workspaceManager, { attempt: 1, provider });
@@ -1420,7 +1421,22 @@ export class Orchestrator {
         log('error', 'worker_failed', { ...endFields, event: 'worker_failed', status: 'failed', code });
         await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
         await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
-        await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
+
+        if (code !== null && provider.usage_limit_exit_codes?.includes(code) && provider.usage_limit_backoff_ms > 0) {
+          const backoffUntil = nowMs() + provider.usage_limit_backoff_ms;
+          this.providerUsageLimitBackoffUntil.set(provider.id, backoffUntil);
+          log('warn', 'provider_usage_limit_backoff', {
+            ...endFields,
+            event: 'provider_usage_limit_backoff',
+            agent_provider: provider.id,
+            exit_code: code,
+            backoff_ms: provider.usage_limit_backoff_ms,
+            backoff_until: new Date(backoffUntil).toISOString(),
+          });
+          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${provider.id} dispatches for ${Math.round(provider.usage_limit_backoff_ms / 1000)}s and retry.`);
+        } else {
+          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
+        }
         await this.scheduleRetry(config, issue, opts.attempt, 'nonzero_exit', workspacePath);
       })
       .catch(async (err) => {
@@ -1710,6 +1726,8 @@ ${runContext}`;
         if (runningInState >= limit) return 'state_capacity';
       }
     }
+    const backoffUntil = this.providerUsageLimitBackoffUntil.get(provider.id);
+    if (backoffUntil !== undefined && nowMs() < backoffUntil) return 'usage_limit';
     if (provider.max_concurrent !== null) {
       const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider === provider.id).length;
       if (runningForProvider >= provider.max_concurrent) return 'provider_capacity';
