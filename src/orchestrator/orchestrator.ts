@@ -13,6 +13,7 @@ import { WorkspaceManager } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
+import { scanRunStates } from '../status/scanRunStates.js';
 import { readEpicStates, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
 import { buildRunContext } from './runContext.js';
 import { formatPauseComment, parsePauseRequest } from './pauseProtocol.js';
@@ -279,6 +280,7 @@ export class Orchestrator {
 
     await this.reconcileRunning(config, trackerClient, workspaceManager);
     await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
+    await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
     const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
     await this.scanOpenPullRequestsForConflicts(config, trackerClient);
     await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
@@ -500,6 +502,82 @@ export class Orchestrator {
             }
           : null,
       );
+    }
+  }
+
+  private async sweepTerminalWorkspaces(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    workspaceManager: WorkspaceManager,
+  ): Promise<void> {
+    if (!config.workspace.clean_on_terminal) return;
+
+    let states: RunState[];
+    try {
+      states = await scanRunStates(config.workspace.root);
+    } catch (err) {
+      log('error', 'terminal_workspace_sweep_failed', {
+        repo_id: this.repoId ?? undefined,
+        tracker_kind: config.tracker.kind,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'terminal_workspace_sweep_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    for (const state of states) {
+      if (this.running.has(state.issue_id)) continue;
+      if (state.status === 'running' && isProcessAlive(state.worker_pid)) continue;
+      if (!state.issue_number) continue;
+
+      let issue: Issue | null;
+      try {
+        issue = await tracker.fetchIssueByNumber(state.issue_number);
+      } catch (err) {
+        log('error', 'terminal_workspace_issue_fetch_failed', {
+          repo_id: this.repoId ?? undefined,
+          tracker_kind: config.tracker.kind,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          issue_id: state.issue_id,
+          issue_number: state.issue_number,
+          issue_identifier: state.issue_identifier,
+          issue_url: state.issue_url,
+          workspace_path: state.workspace_path,
+          event: 'terminal_workspace_issue_fetch_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+
+      if (!issue || !config.tracker.terminal_states.includes(issue.state)) continue;
+
+      log('info', 'terminal_workspace_cleaning', {
+        ...getIssueLogFields(config, issue, this.repoId),
+        workspace_path: state.workspace_path,
+        event: 'terminal_workspace_cleaning',
+        run_status: state.status,
+      });
+
+      try {
+        await workspaceManager.cleanWorkspace(state.workspace_path);
+        log('info', 'terminal_workspace_cleaned', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          workspace_path: state.workspace_path,
+          event: 'terminal_workspace_cleaned',
+          run_status: state.status,
+        });
+      } catch (err) {
+        log('error', 'terminal_workspace_clean_failed', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          workspace_path: state.workspace_path,
+          event: 'terminal_workspace_clean_failed',
+          run_status: state.status,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
