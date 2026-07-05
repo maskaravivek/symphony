@@ -216,11 +216,91 @@ test('lists open pull requests with merge state fields', async () => {
       title: 'Migrate frontend',
       body: 'Fixes #339',
       state: 'open',
+      labels: [],
       is_draft: false,
       url: 'https://github.test/pr/353',
       head_ref: 'codex-339-migrate-frontend',
       base_ref: 'main',
       merge_state_status: 'dirty',
+    },
+  ]);
+});
+
+test('fetches labeled pull requests as agent candidates', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50');
+    return jsonResponse([
+      {
+        id: 77,
+        node_id: 'PR_77',
+        number: 77,
+        title: 'Review follow-up',
+        state: 'open',
+        labels: [{ name: 'ready-for-agent' }],
+        html_url: 'https://github.test/mangoappstudio/mdedit/pull/77',
+        repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+        pull_request: {},
+      },
+      {
+        id: 78,
+        node_id: 'I_78',
+        number: 78,
+        title: 'Plain issue',
+        state: 'open',
+        labels: [{ name: 'ready-for-agent' }],
+        html_url: 'https://github.test/mangoappstudio/mdedit/issues/78',
+        repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+      },
+    ]);
+  };
+
+  let candidates;
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    candidates = await client.fetchCandidatePullRequestIssues();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(
+    candidates.map((issue) => issue.identifier),
+    ['mangoappstudio/mdedit#77'],
+  );
+});
+
+test('lists pull request review comments', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), 'https://api.github.test/repos/mangoappstudio/mdedit/pulls/77/comments?per_page=50');
+    return jsonResponse([
+      {
+        id: 901,
+        body: 'Please cover the retry path.',
+        html_url: 'https://github.test/comment/901',
+        created_at: '2026-07-05T12:00:00Z',
+        updated_at: '2026-07-05T12:00:00Z',
+        user: { login: 'reviewer' },
+      },
+    ]);
+  };
+
+  let comments;
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    comments = await client.listPullRequestReviewComments(77);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(comments, [
+    {
+      id: 901,
+      body: 'Please cover the retry path.',
+      url: 'https://github.test/comment/901',
+      author: 'reviewer',
+      created_at: '2026-07-05T12:00:00Z',
+      updated_at: '2026-07-05T12:00:00Z',
     },
   ]);
 });

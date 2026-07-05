@@ -1,0 +1,190 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import test from 'node:test';
+
+import { Orchestrator } from './orchestrator.js';
+
+const execFileAsync = promisify(execFile);
+
+function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+    ...init,
+  });
+}
+
+function issuePayload(number: number, title: string, state: string, labels: string[] = [], pullRequest = false) {
+  return {
+    id: number,
+    node_id: `${pullRequest ? 'PR' : 'I'}_${number}`,
+    number,
+    title,
+    state,
+    labels: labels.map((name) => ({ name })),
+    html_url: `https://github.test/mangoappstudio/mdedit/${pullRequest ? 'pull' : 'issues'}/${number}`,
+    repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+    ...(pullRequest ? { pull_request: {} } : {}),
+  };
+}
+
+async function createOriginRepo(): Promise<string> {
+  const repoPath = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-origin-'));
+  await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoPath });
+  await execFileAsync('git', ['config', 'user.email', 'test@example.com'], { cwd: repoPath });
+  await execFileAsync('git', ['config', 'user.name', 'Test User'], { cwd: repoPath });
+  await fs.writeFile(path.join(repoPath, 'README.md'), 'main\n', 'utf8');
+  await execFileAsync('git', ['add', 'README.md'], { cwd: repoPath });
+  await execFileAsync('git', ['commit', '-m', 'Initial commit'], { cwd: repoPath });
+  await execFileAsync('git', ['checkout', '-b', 'codex-77-review-follow-up'], { cwd: repoPath });
+  await fs.writeFile(path.join(repoPath, 'README.md'), 'pr branch\n', 'utf8');
+  await execFileAsync('git', ['commit', '-am', 'PR branch'], { cwd: repoPath });
+  await execFileAsync('git', ['checkout', 'main'], { cwd: repoPath });
+  return repoPath;
+}
+
+async function writeWorkflow(workspaceRoot: string, originRepo: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-workflow-'));
+  const workflowPath = path.join(dir, 'WORKFLOW.md');
+  await fs.writeFile(
+    workflowPath,
+    `---
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  api_base_url: https://api.github.test
+  active_states: [open]
+  terminal_states: [closed]
+  required_labels: [ready-for-agent]
+  ignored_labels: [blocked, ready-for-human, wontfix]
+  branch_prefix: codex
+workspace:
+  root: ${workspaceRoot}
+hooks:
+  after_create: |
+    git clone ${originRepo} .
+codex:
+  command: bash -lc 'echo addressed > .symphony/last_message.md'
+  resume_command: bash -lc 'echo addressed > .symphony/last_message.md'
+  handoff_command: bash -lc 'echo handoff > .symphony/last_message.md'
+---
+
+Prompt body
+`,
+    'utf8',
+  );
+  return workflowPath;
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(predicate(), true);
+}
+
+test('dispatches ready-for-agent pull requests with review comments and returns them to human review', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-workspace-'));
+  const originRepo = await createOriginRepo();
+  const workflowPath = await writeWorkflow(workspaceRoot, originRepo);
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([issuePayload(77, 'Review follow-up', 'open', ['ready-for-agent'], true)]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77') {
+      return jsonResponse(issuePayload(77, 'Review follow-up', 'open', ['agent-running'], true));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls/77') {
+      return jsonResponse({
+        number: 77,
+        title: 'Review follow-up',
+        body: 'Fixes #42',
+        state: 'open',
+        draft: false,
+        html_url: 'https://github.test/mangoappstudio/mdedit/pull/77',
+        head: { ref: 'codex-77-review-follow-up' },
+        base: { ref: 'main' },
+        mergeable_state: 'clean',
+      });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/comments?per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls/77/comments?per_page=50') {
+      return jsonResponse([
+        {
+          id: 901,
+          body: 'Please add the retry case.',
+          html_url: 'https://github.test/comment/901',
+          created_at: '2026-07-05T12:00:00Z',
+          updated_at: '2026-07-05T12:00:00Z',
+          user: { login: 'reviewer' },
+        },
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/labels' && method === 'POST') {
+      return jsonResponse([]);
+    }
+    if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues/77/labels/') && method === 'DELETE') {
+      return new Response(null, { status: 204 });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/comments' && method === 'POST') {
+      return jsonResponse({ id: 501, body: String(body), html_url: 'https://github.test/comment/501' });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/501' && method === 'PATCH') {
+      return jsonResponse({ id: 501, body: String(body), html_url: 'https://github.test/comment/501' });
+    }
+
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    await waitFor(() =>
+      calls.some(
+        (call) =>
+          call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/labels' &&
+          call.method === 'POST' &&
+          JSON.stringify(call.body) === JSON.stringify({ labels: ['ready-for-human'] }),
+      ),
+    );
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const prompt = await fs.readFile(path.join(workspaceRoot, 'mangoappstudio_mdedit_77', '.symphony', 'prompt.md'), 'utf8');
+  assert.match(prompt, /Pull Request Review Instructions/);
+  assert.match(prompt, /Please add the retry case\./);
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/labels' &&
+        call.method === 'POST' &&
+        JSON.stringify(call.body) === JSON.stringify({ labels: ['agent-running'] }),
+    ),
+  );
+});

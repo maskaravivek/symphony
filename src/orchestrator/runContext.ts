@@ -37,12 +37,22 @@ export async function buildRunContext(options: {
   workspacePath: string;
   comments: IssueComment[];
   lastSeenCommentId: number | null;
+  pullRequestReviewComments?: IssueComment[];
+  lastSeenPullRequestReviewCommentId?: number | null;
   lastMessagePath: string | null;
-}): Promise<{ text: string; lastSeenCommentId: number | null }> {
+}): Promise<{ text: string; lastSeenCommentId: number | null; lastSeenPullRequestReviewCommentId: number | null }> {
   const newComments = options.comments.filter(
     (comment) => (options.lastSeenCommentId === null || comment.id > options.lastSeenCommentId) && !comment.body.includes('<!-- symphony-status:'),
   );
   const lastSeenCommentId = options.comments.reduce<number | null>((max, comment) => (max === null || comment.id > max ? comment.id : max), options.lastSeenCommentId);
+  const pullRequestReviewComments = options.pullRequestReviewComments ?? [];
+  const lastSeenPullRequestReviewCommentId = pullRequestReviewComments.reduce<number | null>(
+    (max, comment) => (max === null || comment.id > max ? comment.id : max),
+    options.lastSeenPullRequestReviewCommentId ?? null,
+  );
+  const newPullRequestReviewComments = pullRequestReviewComments.filter(
+    (comment) => (options.lastSeenPullRequestReviewCommentId == null || comment.id > options.lastSeenPullRequestReviewCommentId) && !comment.body.includes('<!-- symphony-status:'),
+  );
 
   const [lastMessage, branch, status, recentCommits] = await Promise.all([
     readText(options.lastMessagePath, 12_000),
@@ -57,8 +67,18 @@ export async function buildRunContext(options: {
       : newComments
           .map((comment) => `Comment #${comment.id} by ${comment.author ?? 'unknown'} at ${comment.created_at ?? 'unknown'}:\n${comment.body}`)
           .join('\n\n---\n\n');
+  const pullRequestReviewCommentsText =
+    newPullRequestReviewComments.length === 0
+      ? 'No new PR review comments since the previous Symphony run.'
+      : newPullRequestReviewComments
+          .map((comment) => `PR review comment #${comment.id} by ${comment.author ?? 'unknown'} at ${comment.created_at ?? 'unknown'}:\n${comment.body}`)
+          .join('\n\n---\n\n');
 
-  const text = `\n\n---\n\n## Symphony Run Context\n\nCurrent branch:\n${branch || '(unknown)'}\n\nGit status --short:\n${status || '(clean)'}\n\nRecent commits:\n${recentCommits || '(none)'}\n\nNew issue comments:\n${commentsText}\n\nPrevious final Codex message:\n${lastMessage || '(none)'}\n\nDecision safety rule:\nIf implementation requires a product, architecture, security, data-loss, cost, or irreversible decision not specified in the issue or comments, stop and end your response with this exact block instead of guessing:\n\nSYMPHONY_PAUSE\nreason: <short reason>\nquestion: <specific question for the user>\noptions:\n- <option 1>\n- <option 2>\nEND_SYMPHONY_PAUSE\n`;
+  const prReviewText =
+    pullRequestReviewComments.length === 0
+      ? ''
+      : `\n\nNew PR review comments:\n${pullRequestReviewCommentsText}`;
+  const text = `\n\n---\n\n## Symphony Run Context\n\nCurrent branch:\n${branch || '(unknown)'}\n\nGit status --short:\n${status || '(clean)'}\n\nRecent commits:\n${recentCommits || '(none)'}\n\nNew issue/PR conversation comments:\n${commentsText}${prReviewText}\n\nPrevious final Codex message:\n${lastMessage || '(none)'}\n\nDecision safety rule:\nIf implementation requires a product, architecture, security, data-loss, cost, or irreversible decision not specified in the issue or comments, stop and end your response with this exact block instead of guessing:\n\nSYMPHONY_PAUSE\nreason: <short reason>\nquestion: <specific question for the user>\noptions:\n- <option 1>\n- <option 2>\nEND_SYMPHONY_PAUSE\n`;
 
-  return { text, lastSeenCommentId };
+  return { text, lastSeenCommentId, lastSeenPullRequestReviewCommentId };
 }

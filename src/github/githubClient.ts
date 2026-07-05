@@ -38,6 +38,7 @@ type GithubPullRequestPayload = {
   body?: string | null;
   state?: string;
   draft?: boolean;
+  labels?: GithubLabel[];
   html_url?: string;
   head?: { ref?: string; repo?: { full_name?: string } | null } | null;
   base?: { ref?: string; repo?: { full_name?: string } | null } | null;
@@ -76,6 +77,7 @@ export interface PullRequestRef {
   title: string;
   body: string | null;
   state: string;
+  labels: string[];
   is_draft: boolean;
   url: string | null;
   head_ref: string;
@@ -213,6 +215,7 @@ function normalizePullRequestPayload(payload: GithubPullRequestPayload): PullReq
     title: typeof payload.title === 'string' ? payload.title : '',
     body: typeof payload.body === 'string' ? payload.body : null,
     state: typeof payload.state === 'string' ? payload.state : 'unknown',
+    labels: normalizeLabels(payload.labels),
     is_draft: Boolean(payload.draft),
     url: typeof payload.html_url === 'string' ? payload.html_url : null,
     head_ref: typeof payload.head?.ref === 'string' ? payload.head.ref : '',
@@ -250,6 +253,23 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     const raw = await this.fetchAllPages(url.toString());
     const issues = raw
       .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
+      .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
+
+    const eligible = await this.filterEligibleIssues(issues);
+    return this.sortIssues(eligible);
+  }
+
+  async fetchCandidatePullRequestIssues(): Promise<Issue[]> {
+    const state = this.tracker.active_states[0] ?? 'open';
+    const labelsParam = this.tracker.required_labels.join(',');
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues`, this.tracker.api_base_url);
+    url.searchParams.set('state', state);
+    url.searchParams.set('labels', labelsParam);
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+
+    const raw = await this.fetchAllPages(url.toString());
+    const issues = raw
+      .filter((p) => p.pull_request !== undefined)
       .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
 
     const eligible = await this.filterEligibleIssues(issues);
@@ -328,6 +348,13 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
 
   async listIssueComments(number: number): Promise<IssueComment[]> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/comments`, this.tracker.api_base_url);
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages(url.toString());
+    return raw.map((p) => normalizeGithubCommentPayload(p as GithubCommentPayload));
+  }
+
+  async listPullRequestReviewComments(number: number): Promise<IssueComment[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}/comments`, this.tracker.api_base_url);
     url.searchParams.set('per_page', String(this.tracker.page_size));
     const raw = await this.fetchAllPages(url.toString());
     return raw.map((p) => normalizeGithubCommentPayload(p as GithubCommentPayload));

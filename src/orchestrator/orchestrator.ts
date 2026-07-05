@@ -1,6 +1,6 @@
 import type { Issue } from '../domain/issue.js';
 import type { EpicTreeNode } from '../domain/epic.js';
-import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubClient.js';
+import { GithubIssueTrackerClient, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
@@ -52,6 +52,13 @@ interface ConflictEntry {
 }
 
 interface ConflictDispatchOptions {
+  pr_number: number;
+  pr_url: string | null;
+  head_ref: string;
+  base_ref: string;
+}
+
+interface PullRequestReviewDispatchOptions {
   pr_number: number;
   pr_url: string | null;
   head_ref: string;
@@ -284,6 +291,7 @@ export class Orchestrator {
     const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
     await this.scanOpenPullRequestsForConflicts(config, trackerClient);
     await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
+    await this.dispatchPullRequestReviews(config, trackerClient, workspaceManager, capacity);
 
     let candidates: Issue[];
     try {
@@ -703,6 +711,65 @@ export class Orchestrator {
     }
   }
 
+  private async dispatchPullRequestReviews(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    workspaceManager: WorkspaceManager,
+    capacity: DispatchCapacity,
+  ): Promise<void> {
+    if (capacity.remaining !== null && capacity.remaining <= 0) return;
+
+    let candidates: Issue[];
+    try {
+      candidates = await tracker.fetchCandidatePullRequestIssues();
+    } catch (err) {
+      log('error', 'pr_review_candidate_fetch_failed', {
+        repo_id: this.repoId ?? undefined,
+        tracker_kind: config.tracker.kind,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'pr_review_candidate_fetch_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    for (const issue of candidates) {
+      if (capacity.remaining !== null && capacity.remaining <= 0) return;
+      if (!issue.number) continue;
+      if (this.running.has(issue.id)) continue;
+
+      const pr = await tracker.fetchPullRequest(issue.number).catch(() => null);
+      if (!pr || pr.is_draft || !pr.head_ref) continue;
+
+      const provider = selectAgentProvider(config, issue);
+      if (this.dispatchBlockReason(config, issue, provider, capacity)) continue;
+
+      try {
+        await this.dispatchIssue(config, issue, workspaceManager, {
+          attempt: 1,
+          mode: 'pr-review',
+          provider,
+          prReview: {
+            pr_number: pr.number,
+            pr_url: pr.url,
+            head_ref: pr.head_ref,
+            base_ref: pr.base_ref || 'main',
+          },
+        });
+        if (capacity.remaining !== null) capacity.remaining -= 1;
+      } catch (err) {
+        log('error', 'pr_review_dispatch_failed', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'pr_review_dispatch_failed',
+          pr_number: issue.number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await this.scheduleRetry(config, issue, 1, 'dispatch_error');
+      }
+    }
+  }
+
   private shouldSkipConflictResolution(issue: Issue): boolean {
     return issue.labels.includes(LABEL_NEEDS_INFO) || issue.labels.includes('blocked') || issue.labels.includes('wontfix') || issue.labels.includes(LABEL_INTERACTIVE);
   }
@@ -913,7 +980,7 @@ export class Orchestrator {
     config: WorkflowConfig,
     issue: Issue,
     workspaceManager: WorkspaceManager,
-    opts: { attempt: number; mode?: AgentMode; provider?: AgentProviderConfig; conflict?: ConflictDispatchOptions },
+    opts: { attempt: number; mode?: AgentMode; provider?: AgentProviderConfig; conflict?: ConflictDispatchOptions; prReview?: PullRequestReviewDispatchOptions },
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
     const provider = opts.provider ?? selectAgentProvider(config, issue);
@@ -980,21 +1047,35 @@ export class Orchestrator {
     if (opts.mode === 'resolve-conflicts' && opts.conflict) {
       conflictBriefPath = await this.prepareConflictResolutionWorkspace(workspacePath, opts.conflict);
     }
+    if (opts.mode === 'pr-review' && opts.prReview) {
+      await this.preparePullRequestReviewWorkspace(workspacePath, opts.prReview);
+    }
 
     const comments = await new GithubIssueTrackerClient(config.tracker).listIssueComments(issue.number);
+    let pullRequestReviewComments: IssueComment[] = [];
+    if (opts.mode === 'pr-review' && opts.prReview) {
+      pullRequestReviewComments = await new GithubIssueTrackerClient(config.tracker).listPullRequestReviewComments(opts.prReview.pr_number);
+    }
     const lastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
     const runContext = await buildRunContext({
       workspacePath,
       comments,
       lastSeenCommentId: existingState?.last_seen_comment_id ?? null,
+      pullRequestReviewComments,
+      lastSeenPullRequestReviewCommentId: existingState?.last_seen_pr_review_comment_id ?? null,
       lastMessagePath: existingState?.last_message_path ?? lastMessagePath,
     });
 
     const isConflictResolution = opts.mode === 'resolve-conflicts';
-    const isInteractiveHandoff = !isConflictResolution && issue.labels.includes(LABEL_INTERACTIVE);
+    const isPullRequestReview = opts.mode === 'pr-review';
+    const isInteractiveHandoff = !isConflictResolution && !isPullRequestReview && issue.labels.includes(LABEL_INTERACTIVE);
     const handoffInstructions = isInteractiveHandoff
       ? '\n\n---\n\n## Interactive Handoff Instructions\n\nCreate a concise orientation summary for the user to continue this issue interactively. Do not edit files, run write commands, commit, push, or open a PR in this handoff pass.\n'
       : '';
+    const pullRequestReviewInstructions =
+      isPullRequestReview && opts.prReview
+        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- Commit changes to the existing PR branch and push back to origin.\n- Do not open a replacement PR.\n`
+        : '';
     const prompt = isConflictResolution && opts.conflict
       ? this.formatConflictResolutionPrompt(
           issue,
@@ -1002,7 +1083,7 @@ export class Orchestrator {
           conflictBriefPath ?? path.join(workspacePath, '.symphony', 'merge-conflict.md'),
           runContext.text,
         )
-      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}`;
+      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}${pullRequestReviewInstructions}`;
     const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
     const agentLogPath = resolveAgentLogPath(workspacePath, provider);
     await fs.mkdir(path.dirname(agentLogPath), { recursive: true });
@@ -1015,7 +1096,7 @@ export class Orchestrator {
           ? existingState?.codex_thread_id ?? null
           : null;
     let codexThreadId = provider.id === 'codex' ? agentThreadId : null;
-    const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
+    const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isPullRequestReview ? 'pr-review' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
     const commandTemplate = isInteractiveHandoff
       ? provider.handoff_command ?? provider.command
@@ -1082,6 +1163,7 @@ export class Orchestrator {
       codex_jsonl_path: provider.id === 'codex' ? codexJsonlPath : existingState?.codex_jsonl_path ?? null,
       last_message_path: lastMessagePath,
       last_seen_comment_id: runContext.lastSeenCommentId,
+      last_seen_pr_review_comment_id: runContext.lastSeenPullRequestReviewCommentId,
       status_comment_id: statusCommentId,
       last_handoff_at: isInteractiveHandoff ? new Date().toISOString() : existingState?.last_handoff_at ?? null,
       updated_at: new Date().toISOString(),
@@ -1102,6 +1184,14 @@ export class Orchestrator {
           workflowState: LABEL_RUNNING,
         });
         await this.upsertStatus(config, issue, initialState, `Merge conflicts detected for PR #${opts.conflict?.pr_number}. Symphony is starting ${provider.id} conflict-resolution mode.`);
+      } else if (isPullRequestReview) {
+        await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO] });
+        await this.updateLifecycleState(workspacePath, {
+          add: [LABEL_RUNNING],
+          remove: [LABEL_READY, LABEL_READY_FOR_HUMAN, LABEL_NEEDS_INFO],
+          workflowState: LABEL_RUNNING,
+        });
+        await this.upsertStatus(config, issue, initialState, `PR review feedback is ready. Symphony is starting ${provider.id} on PR #${opts.prReview?.pr_number}.`);
       } else {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
         await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
@@ -1280,7 +1370,7 @@ export class Orchestrator {
             return;
           }
 
-          if (!isConflictResolution) {
+          if (!isConflictResolution && !isPullRequestReview) {
             const dirtyPr = await this.findDirtyPullRequestForIssue(config, issue);
             if (dirtyPr) {
               this.conflictQueue.set(dirtyPr.number, {
@@ -1298,13 +1388,32 @@ export class Orchestrator {
             }
           }
 
+          if (!isConflictResolution && !isPullRequestReview) {
+            const pr = await this.findPullRequestForIssue(config, issue).catch(() => null);
+            if (pr) {
+              await this.applyLabels(config, pr.number, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] }).catch((err) => {
+                log('error', 'pr_ready_for_human_label_failed', {
+                  ...getIssueLogFields(config, issue, this.repoId),
+                  event: 'pr_ready_for_human_label_failed',
+                  pr_number: pr.number,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              });
+            }
+          }
+
           await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
           await this.updateLifecycleState(workspacePath, {
             add: [LABEL_READY_FOR_HUMAN],
             remove: [LABEL_READY, LABEL_RUNNING],
             workflowState: LABEL_READY_FOR_HUMAN,
           });
-          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Autonomous run completed. Issue is ready for human review.');
+          await this.upsertStatus(
+            config,
+            issue,
+            await this.mustReadRunState(workspacePath),
+            isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
+          );
           return;
         }
 
@@ -1389,6 +1498,11 @@ export class Orchestrator {
     return briefPath;
   }
 
+  private async preparePullRequestReviewWorkspace(workspacePath: string, pr: PullRequestReviewDispatchOptions): Promise<void> {
+    await runGit(workspacePath, ['fetch', 'origin', pr.head_ref]);
+    await runGit(workspacePath, ['checkout', '-B', pr.head_ref, 'FETCH_HEAD']);
+  }
+
   private formatConflictResolutionPrompt(issue: Issue, conflict: ConflictDispatchOptions, briefPath: string, runContext: string): string {
     return `You are resolving merge conflicts for ${issue.identifier}.
 
@@ -1425,6 +1539,18 @@ ${runContext}`;
       if (issueNumberFromPullRequestBody(pr.body) !== issue.number) continue;
       const detailed = await client.fetchPullRequest(pr.number).catch(() => pr);
       if (detailed && isDirtyMergeState(detailed.merge_state_status)) return detailed;
+    }
+    return null;
+  }
+
+  private async findPullRequestForIssue(config: WorkflowConfig, issue: Issue): Promise<PullRequestRef | null> {
+    if (!issue.number) return null;
+    const client = new GithubIssueTrackerClient(config.tracker);
+    const prs = await client.listOpenPullRequests().catch(() => []);
+    for (const pr of prs) {
+      if (!this.isSymphonyPullRequest(config, pr)) continue;
+      if (issueNumberFromPullRequestBody(pr.body) !== issue.number) continue;
+      return await client.fetchPullRequest(pr.number).catch(() => pr);
     }
     return null;
   }
