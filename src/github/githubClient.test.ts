@@ -12,6 +12,7 @@ function trackerConfig(): GithubTrackerConfig {
     token: 'test-token',
     api_base_url: 'https://api.github.test',
     graphql_url: 'https://api.github.test/graphql',
+    candidate_order: 'priority_then_created_at',
     active_states: ['open'],
     terminal_states: ['closed'],
     required_labels: ['ready-for-agent'],
@@ -38,6 +39,27 @@ function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
     headers: { 'content-type': 'application/json' },
     ...init,
   });
+}
+
+function issuePayload(
+  number: number,
+  createdAt: string,
+  labels: string[] = ['ready-for-agent'],
+  extra: Partial<{ updated_at: string; pull_request: unknown; title: string }> = {},
+) {
+  return {
+    id: number,
+    node_id: `I_${number}`,
+    number,
+    title: extra.title ?? `Issue ${number}`,
+    state: 'open',
+    labels: labels.map((name) => ({ name })),
+    html_url: `https://github.test/mangoappstudio/mdedit/issues/${number}`,
+    repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+    created_at: createdAt,
+    updated_at: extra.updated_at ?? createdAt,
+    ...(extra.pull_request !== undefined ? { pull_request: extra.pull_request } : {}),
+  };
 }
 
 test('derives flat branch names from issues', async () => {
@@ -267,6 +289,245 @@ test('fetches labeled pull requests as agent candidates', async () => {
     candidates.map((issue) => issue.identifier),
     ['mangoappstudio/mdedit#77'],
   );
+});
+
+test('defaults candidate ordering to priority then created_at', async () => {
+  const client = new GithubIssueTrackerClient(trackerConfig());
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50');
+    return jsonResponse([
+      issuePayload(2, '2026-07-05T12:05:00Z'),
+      issuePayload(1, '2026-07-05T12:00:00Z'),
+    ]);
+  };
+
+  try {
+    const issues = await client.fetchCandidateIssues();
+    assert.deepEqual(
+      issues.map((issue) => ({ number: issue.number, ready_for_agent_labeled_at: issue.ready_for_agent_labeled_at })),
+      [
+        { number: 1, ready_for_agent_labeled_at: null },
+        { number: 2, ready_for_agent_labeled_at: null },
+      ],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('orders candidates by ready-for-agent label application time when enabled', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([
+        issuePayload(10, '2026-07-05T12:10:00Z', ['ready-for-agent', 'priority:p0'], { updated_at: '2026-07-05T12:12:00Z' }),
+        issuePayload(11, '2026-07-05T12:00:00Z', ['ready-for-agent', 'priority:p3'], { updated_at: '2026-07-05T12:11:00Z' }),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100') {
+      return jsonResponse([
+        { event: 'labeled', created_at: '2026-07-05T12:09:00Z', label: { name: 'ready-for-agent' }, issue: { number: 10 } },
+        { event: 'labeled', created_at: '2026-07-05T12:01:00Z', label: { name: 'ready-for-agent' }, issue: { number: 11 } },
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient({
+      ...trackerConfig(),
+      candidate_order: 'ready_for_agent_labeled_at',
+      priority_labels: { 'priority:p0': 1, 'priority:p3': 4 },
+    });
+    const issues = await client.fetchCandidateIssues();
+    assert.deepEqual(
+      issues.map((issue) => ({ number: issue.number, ready_for_agent_labeled_at: issue.ready_for_agent_labeled_at })),
+      [
+        { number: 11, ready_for_agent_labeled_at: '2026-07-05T12:01:00Z' },
+        { number: 10, ready_for_agent_labeled_at: '2026-07-05T12:09:00Z' },
+      ],
+    );
+    assert.deepEqual(calls, [
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50',
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('uses the latest active ready-for-agent label timestamp after re-labeling', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([issuePayload(10, '2026-07-05T12:00:00Z', ['ready-for-agent'], { updated_at: '2026-07-05T12:20:00Z' })]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100') {
+      return jsonResponse([
+        { event: 'labeled', created_at: '2026-07-05T12:10:00Z', label: { name: 'ready-for-agent' }, issue: { number: 10 } },
+        { event: 'unlabeled', created_at: '2026-07-05T12:05:00Z', label: { name: 'ready-for-agent' }, issue: { number: 10 } },
+        { event: 'labeled', created_at: '2026-07-05T12:01:00Z', label: { name: 'ready-for-agent' }, issue: { number: 10 } },
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient({ ...trackerConfig(), candidate_order: 'ready_for_agent_labeled_at' });
+    const [issue] = await client.fetchCandidateIssues();
+    assert.equal(issue?.ready_for_agent_labeled_at, '2026-07-05T12:10:00Z');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('falls back to deterministic ordering when a ready-for-agent timestamp cannot be derived', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([
+        issuePayload(20, '2026-07-05T12:05:00Z', ['ready-for-agent', 'priority:p0'], { updated_at: '2026-07-05T12:12:00Z' }),
+        issuePayload(21, '2026-07-05T12:00:00Z', ['ready-for-agent', 'priority:p3'], { updated_at: '2026-07-05T12:10:00Z' }),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100') {
+      return jsonResponse([{ event: 'labeled', created_at: '2026-07-05T12:06:00Z', label: { name: 'ready-for-agent' }, issue: { number: 21 } }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient({ ...trackerConfig(), candidate_order: 'ready_for_agent_labeled_at' });
+    const issues = await client.fetchCandidateIssues();
+    assert.deepEqual(
+      issues.map((issue) => issue.number),
+      [21, 20],
+    );
+    assert.equal(issues[0]?.ready_for_agent_labeled_at, '2026-07-05T12:06:00Z');
+    assert.equal(issues[1]?.ready_for_agent_labeled_at, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('reuses cached ready-for-agent timestamps until issue updated_at changes', async () => {
+  const originalFetch = globalThis.fetch;
+  let candidateFetchCount = 0;
+  let eventFetchCount = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      candidateFetchCount += 1;
+      const updatedAt = candidateFetchCount < 3 ? '2026-07-05T12:10:00Z' : '2026-07-05T12:15:00Z';
+      return jsonResponse([issuePayload(30, '2026-07-05T12:00:00Z', ['ready-for-agent'], { updated_at: updatedAt })]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100') {
+      eventFetchCount += 1;
+      const timestamp = eventFetchCount === 1 ? '2026-07-05T12:01:00Z' : '2026-07-05T12:02:00Z';
+      return jsonResponse([{ event: 'labeled', created_at: timestamp, label: { name: 'ready-for-agent' }, issue: { number: 30 } }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient({ ...trackerConfig(), candidate_order: 'ready_for_agent_labeled_at' });
+    const first = await client.fetchCandidateIssues();
+    const second = await client.fetchCandidateIssues();
+    const third = await client.fetchCandidateIssues();
+
+    assert.equal(first[0]?.ready_for_agent_labeled_at, '2026-07-05T12:01:00Z');
+    assert.equal(second[0]?.ready_for_agent_labeled_at, '2026-07-05T12:01:00Z');
+    assert.equal(third[0]?.ready_for_agent_labeled_at, '2026-07-05T12:02:00Z');
+    assert.equal(eventFetchCount, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('applies ready-for-agent ordering to pull request candidates too', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([
+        issuePayload(77, '2026-07-05T12:05:00Z', ['ready-for-agent'], {
+          updated_at: '2026-07-05T12:11:00Z',
+          pull_request: {},
+          title: 'Later queued PR',
+        }),
+        issuePayload(78, '2026-07-05T12:00:00Z', ['ready-for-agent'], {
+          updated_at: '2026-07-05T12:12:00Z',
+          pull_request: {},
+          title: 'Earlier queued PR',
+        }),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100') {
+      return jsonResponse([
+        { event: 'labeled', created_at: '2026-07-05T12:04:00Z', label: { name: 'ready-for-agent' }, issue: { number: 77 } },
+        { event: 'labeled', created_at: '2026-07-05T12:01:00Z', label: { name: 'ready-for-agent' }, issue: { number: 78 } },
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient({ ...trackerConfig(), include_pull_requests: true, candidate_order: 'ready_for_agent_labeled_at' });
+    const issues = await client.fetchCandidatePullRequestIssues();
+    assert.deepEqual(issues.map((issue) => issue.number), [78, 77]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('scans repo issue events across pages until all unresolved candidates are resolved', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([
+        issuePayload(40, '2026-07-05T12:00:00Z', ['ready-for-agent'], { updated_at: '2026-07-05T12:20:00Z' }),
+        issuePayload(41, '2026-07-05T12:01:00Z', ['ready-for-agent'], { updated_at: '2026-07-05T12:21:00Z' }),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100') {
+      return jsonResponse(
+        [{ event: 'labeled', created_at: '2026-07-05T12:10:00Z', label: { name: 'ready-for-agent' }, issue: { number: 40 } }],
+        { headers: { link: '<https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100&page=2>; rel="next"' } },
+      );
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100&page=2') {
+      return jsonResponse([{ event: 'labeled', created_at: '2026-07-05T12:11:00Z', label: { name: 'ready-for-agent' }, issue: { number: 41 } }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient({ ...trackerConfig(), candidate_order: 'ready_for_agent_labeled_at' });
+    const issues = await client.fetchCandidateIssues();
+    assert.deepEqual(
+      issues.map((issue) => ({ number: issue.number, ready_for_agent_labeled_at: issue.ready_for_agent_labeled_at })),
+      [
+        { number: 40, ready_for_agent_labeled_at: '2026-07-05T12:10:00Z' },
+        { number: 41, ready_for_agent_labeled_at: '2026-07-05T12:11:00Z' },
+      ],
+    );
+    assert.deepEqual(calls, [
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50',
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100',
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues/events?per_page=100&page=2',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('lists pull request review comments', async () => {

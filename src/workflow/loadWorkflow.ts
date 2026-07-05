@@ -91,6 +91,14 @@ function normalizePriorityLabels(value: unknown): Record<string, number> | null 
   return out;
 }
 
+function normalizeCandidateOrder(value: unknown): WorkflowConfig['tracker']['candidate_order'] {
+  const raw = asString(value, 'tracker.candidate_order') ?? 'priority_then_created_at';
+  if (raw !== 'priority_then_created_at' && raw !== 'ready_for_agent_labeled_at') {
+    throw new SymphonyConfigError('tracker.candidate_order must be priority_then_created_at or ready_for_agent_labeled_at');
+  }
+  return raw;
+}
+
 function normalizeEpicConfig(value: unknown): WorkflowConfig['tracker']['epics'] {
   const raw = isRecord(value) ? value : {};
   const enabled = asBoolean(raw.enabled, 'tracker.epics.enabled') ?? false;
@@ -291,6 +299,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   );
 
   const branchPrefix = asString(trackerRaw.branch_prefix, 'tracker.branch_prefix') ?? 'symphony';
+  const candidateOrder = normalizeCandidateOrder(trackerRaw.candidate_order);
 
   const includePullRequests = asBoolean(trackerRaw.include_pull_requests, 'tracker.include_pull_requests') ?? false;
   const pageSize = asNumber(trackerRaw.page_size, 'tracker.page_size') ?? 50;
@@ -359,6 +368,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       token,
       api_base_url: apiBaseUrl,
       graphql_url: graphqlUrl,
+      candidate_order: candidateOrder,
       active_states: activeStates,
       terminal_states: terminalStates,
       required_labels: requiredLabels,

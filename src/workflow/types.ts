@@ -13,6 +13,7 @@ export interface GithubTrackerConfig {
   token: string | null;
   api_base_url: string;
   graphql_url: string;
+  candidate_order: 'priority_then_created_at' | 'ready_for_agent_labeled_at';
   active_states: string[];
   terminal_states: string[];
   required_labels: string[];

@@ -30,6 +30,55 @@ codex:
   assert.equal(loaded.config.agent.max_attempts, 3);
 });
 
+test('defaults candidate ordering to priority then created_at', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.equal(loaded.config.tracker.candidate_order, 'priority_then_created_at');
+});
+
+test('loads ready_for_agent_labeled_at candidate ordering', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  candidate_order: ready_for_agent_labeled_at
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.equal(loaded.config.tracker.candidate_order, 'ready_for_agent_labeled_at');
+});
+
+test('rejects invalid candidate ordering', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  candidate_order: newest_first
+codex:
+  command: codex exec -
+`);
+
+  await assert.rejects(
+    () => loadWorkflowFromFile(workflowPath),
+    /tracker.candidate_order must be priority_then_created_at or ready_for_agent_labeled_at/,
+  );
+});
+
 test('rejects invalid bounded retry attempts', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:

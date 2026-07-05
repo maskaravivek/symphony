@@ -2,6 +2,7 @@ import type { Issue } from '../domain/issue.js';
 import type { EpicTreeNode } from '../domain/epic.js';
 import type { GithubTrackerConfig } from '../workflow/types.js';
 import { SymphonyRuntimeError } from '../utils/errors.js';
+import { log } from '../utils/log.js';
 
 type GithubLabel = { name?: string } | string;
 type GithubUser = { login?: string };
@@ -30,6 +31,13 @@ type GithubIssuePayload = {
   created_at?: string;
   updated_at?: string;
   pull_request?: unknown;
+};
+
+type GithubIssueEventPayload = {
+  event?: string;
+  created_at?: string;
+  label?: GithubLabel | null;
+  issue?: { number?: number } | null;
 };
 
 type GithubPullRequestPayload = {
@@ -205,6 +213,7 @@ function normalizeGithubIssuePayload(owner: string, repo: string, tracker: Githu
     pull_requests: [],
     created_at: payload.created_at ?? null,
     updated_at: payload.updated_at ?? null,
+    ready_for_agent_labeled_at: null,
   };
 }
 
@@ -237,6 +246,7 @@ function parseLinkHeader(linkHeader: string | null): Map<string, string> {
 
 export class GithubIssueTrackerClient implements IssueTrackerClient {
   private tracker: GithubTrackerConfig;
+  private readyForAgentLabeledAtCache = new Map<string, { updated_at: string | null; ready_for_agent_labeled_at: string | null }>();
 
   constructor(tracker: GithubTrackerConfig) {
     this.tracker = tracker;
@@ -250,12 +260,13 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     url.searchParams.set('labels', labelsParam);
     url.searchParams.set('per_page', String(this.tracker.page_size));
 
-    const raw = await this.fetchAllPages(url.toString());
+    const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
     const issues = raw
       .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
       .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
 
     const eligible = await this.filterEligibleIssues(issues);
+    await this.enrichReadyForAgentLabeledAt(eligible);
     return this.sortIssues(eligible);
   }
 
@@ -267,12 +278,13 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     url.searchParams.set('labels', labelsParam);
     url.searchParams.set('per_page', String(this.tracker.page_size));
 
-    const raw = await this.fetchAllPages(url.toString());
+    const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
     const issues = raw
       .filter((p) => p.pull_request !== undefined)
       .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
 
     const eligible = await this.filterEligibleIssues(issues);
+    await this.enrichReadyForAgentLabeledAt(eligible);
     return this.sortIssues(eligible);
   }
 
@@ -282,7 +294,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
       const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues`, this.tracker.api_base_url);
       url.searchParams.set('state', state);
       url.searchParams.set('per_page', String(this.tracker.page_size));
-      const raw = await this.fetchAllPages(url.toString());
+      const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
       for (const p of raw) {
         if (!this.tracker.include_pull_requests && p.pull_request !== undefined) continue;
         issues.push(normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
@@ -315,7 +327,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
   async listSubIssues(number: number): Promise<Issue[]> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/sub_issues`, this.tracker.api_base_url);
     url.searchParams.set('per_page', String(this.tracker.page_size));
-    const raw = await this.fetchAllPages(url.toString());
+    const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
     return raw
       .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
       .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
@@ -529,33 +541,121 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     return true;
   }
 
+  private async enrichReadyForAgentLabeledAt(issues: Issue[]): Promise<void> {
+    if (this.tracker.candidate_order !== 'ready_for_agent_labeled_at') return;
+    const unresolved = new Map<number, Issue>();
+    for (const issue of issues) {
+      const cached = this.readyForAgentLabeledAtCache.get(issue.id);
+      if (cached && cached.updated_at === issue.updated_at) {
+        issue.ready_for_agent_labeled_at = cached.ready_for_agent_labeled_at;
+        continue;
+      }
+      issue.ready_for_agent_labeled_at = null;
+      if (issue.number) unresolved.set(issue.number, issue);
+    }
+
+    if (unresolved.size === 0) return;
+
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/events`, this.tracker.api_base_url);
+    url.searchParams.set('per_page', '100');
+
+    await this.forEachPage<GithubIssueEventPayload>(url.toString(), async (page) => {
+      for (const event of page) {
+        const labelName = event.label ? normalizeLabelName(event.label) : null;
+        if (labelName !== 'ready-for-agent') continue;
+
+        const issueNumber = event.issue?.number;
+        if (typeof issueNumber !== 'number') continue;
+
+        const issue = unresolved.get(issueNumber);
+        if (!issue) continue;
+
+        issue.ready_for_agent_labeled_at = event.event === 'labeled' ? (event.created_at ?? null) : null;
+        this.readyForAgentLabeledAtCache.set(issue.id, {
+          updated_at: issue.updated_at,
+          ready_for_agent_labeled_at: issue.ready_for_agent_labeled_at,
+        });
+        unresolved.delete(issueNumber);
+      }
+
+      return unresolved.size > 0;
+    });
+
+    for (const issue of unresolved.values()) {
+      this.readyForAgentLabeledAtCache.set(issue.id, {
+        updated_at: issue.updated_at,
+        ready_for_agent_labeled_at: null,
+      });
+      if (issue.labels.includes('ready-for-agent')) {
+        log('warn', 'ready_for_agent_label_timestamp_missing', {
+          event: 'ready_for_agent_label_timestamp_missing',
+          issue_identifier: issue.identifier,
+          issue_number: issue.number,
+        });
+      }
+    }
+  }
+
+  private compareByPriorityThenCreatedAt(a: Issue, b: Issue): number {
+    const pa = a.priority ?? Number.POSITIVE_INFINITY;
+    const pb = b.priority ?? Number.POSITIVE_INFINITY;
+    if (pa !== pb) return pa - pb;
+    const ca = a.created_at ?? '';
+    const cb = b.created_at ?? '';
+    if (ca !== cb) return ca.localeCompare(cb);
+    const na = a.number ?? Number.POSITIVE_INFINITY;
+    const nb = b.number ?? Number.POSITIVE_INFINITY;
+    return na - nb;
+  }
+
+  private compareByCreatedAt(a: Issue, b: Issue): number {
+    const ca = a.created_at ?? '';
+    const cb = b.created_at ?? '';
+    if (ca !== cb) return ca.localeCompare(cb);
+    const na = a.number ?? Number.POSITIVE_INFINITY;
+    const nb = b.number ?? Number.POSITIVE_INFINITY;
+    return na - nb;
+  }
+
   private sortIssues(issues: Issue[]): Issue[] {
     return [...issues].sort((a, b) => {
-      const pa = a.priority ?? Number.POSITIVE_INFINITY;
-      const pb = b.priority ?? Number.POSITIVE_INFINITY;
-      if (pa !== pb) return pa - pb;
-      const ca = a.created_at ?? '';
-      const cb = b.created_at ?? '';
-      if (ca !== cb) return ca.localeCompare(cb);
-      const na = a.number ?? Number.POSITIVE_INFINITY;
-      const nb = b.number ?? Number.POSITIVE_INFINITY;
-      return na - nb;
+      if (this.tracker.candidate_order === 'ready_for_agent_labeled_at') {
+        const ta = a.ready_for_agent_labeled_at;
+        const tb = b.ready_for_agent_labeled_at;
+        if (ta && tb && ta !== tb) return ta.localeCompare(tb);
+        if (ta && !tb) return -1;
+        if (!ta && tb) return 1;
+        return this.compareByCreatedAt(a, b);
+      }
+      return this.compareByPriorityThenCreatedAt(a, b);
     });
   }
 
-  private async fetchAllPages(urlString: string): Promise<GithubIssuePayload[]> {
-    const out: GithubIssuePayload[] = [];
+  private async fetchAllPages<T>(urlString: string): Promise<T[]> {
+    const out: T[] = [];
     let nextUrl: string | null = urlString;
 
     while (nextUrl) {
       const { data, link } = await this.fetchJson(nextUrl);
       if (!Array.isArray(data)) throw new SymphonyRuntimeError('Expected GitHub list response to be an array');
-      out.push(...(data as GithubIssuePayload[]));
+      out.push(...(data as T[]));
       const links = parseLinkHeader(link);
       nextUrl = links.get('next') ?? null;
     }
 
     return out;
+  }
+
+  private async forEachPage<T>(urlString: string, visitor: (page: T[]) => Promise<boolean> | boolean): Promise<void> {
+    let nextUrl: string | null = urlString;
+    while (nextUrl) {
+      const { data, link } = await this.fetchJson(nextUrl);
+      if (!Array.isArray(data)) throw new SymphonyRuntimeError('Expected GitHub list response to be an array');
+      const shouldContinue = await visitor(data as T[]);
+      if (!shouldContinue) return;
+      const links = parseLinkHeader(link);
+      nextUrl = links.get('next') ?? null;
+    }
   }
 
   private async fetchIssueByNumberInRepo(owner: string, repo: string, number: number): Promise<GithubIssuePayload | null> {

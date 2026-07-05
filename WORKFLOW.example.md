@@ -14,6 +14,10 @@ tracker:
     - blocked
     - ready-for-human
     - wontfix
+  # Default ordering keeps priority labels first, then issue creation time.
+  # Set to ready_for_agent_labeled_at to dispatch by when ready-for-agent
+  # was most recently applied, oldest active label first.
+  candidate_order: priority_then_created_at
   epics:
     enabled: true
     relationship_source: native_subissues

@@ -28,5 +28,5 @@ export interface Issue {
   pull_requests: PullRequestRef[];
   created_at: string | null;
   updated_at: string | null;
+  ready_for_agent_labeled_at: string | null;
 }
-

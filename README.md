@@ -88,6 +88,24 @@ Set `tracker.priority_labels` in `WORKFLOW.md` to match the target repo's actual
 
 For `mangoappstudio/mdedit`, use `priority:p0`, `priority:p1`, `priority:p2`, and `priority:p3`. The mdedit Project board separately maps those labels into its High/Medium/Low Priority field through the repo's issue-priority sync workflow, so new agent-created issues must include exactly one `priority:p*` label.
 
+## Candidate ordering
+
+By default, Symphony orders `ready-for-agent` candidates by priority label and then issue creation time:
+
+```yaml
+tracker:
+  candidate_order: priority_then_created_at
+```
+
+Repos can opt into queue-order dispatch based on when `ready-for-agent` was most recently applied:
+
+```yaml
+tracker:
+  candidate_order: ready_for_agent_labeled_at
+```
+
+In `ready_for_agent_labeled_at` mode, Symphony ignores priority labels for candidate ordering and picks the oldest active `ready-for-agent` label first. If `ready-for-agent` is removed and later re-added, the re-add time becomes the new queue position.
+
 ## Agent routing
 
 Symphony can route issues to different CLI agents by GitHub labels. `agents.default` handles ordinary work, while ordered `agents.routes` can send scarce or specialized work to another provider:

@@ -25,6 +25,7 @@ function issue(): Issue {
     pull_requests: [],
     created_at: null,
     updated_at: null,
+    ready_for_agent_labeled_at: null,
   };
 }
 
@@ -37,6 +38,7 @@ function config(): WorkflowConfig {
       token: 'token',
       api_base_url: 'https://api.github.test',
       graphql_url: 'https://api.github.test/graphql',
+      candidate_order: 'priority_then_created_at',
       active_states: ['open'],
       terminal_states: ['closed'],
       required_labels: ['ready-for-agent'],
@@ -65,6 +67,8 @@ function config(): WorkflowConfig {
       providers: {
         codex: {
           id: 'codex',
+          provider_group: 'codex',
+          provider_kind: 'codex',
           command: 'codex exec -',
           resume_command: 'codex exec resume thread -',
           handoff_command: 'codex exec -',
