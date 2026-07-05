@@ -1725,12 +1725,26 @@ ${runContext}`;
             env: process.env,
           });
           const timeout = setTimeout(() => {
-            try { child.kill('SIGTERM'); } catch { /* ignore */ }
+            // Process may have already exited by the time kill() is called; that is harmless.
+            try { child.kill('SIGTERM'); } catch { /* already exited */ }
+            log('warn', 'provider_usage_limit_check_timeout', {
+              repo_id: this.repoId ?? undefined,
+              event: 'provider_usage_limit_check_timeout',
+              agent_provider: provider.id,
+              check_command: command,
+            });
             resolve(false);
           }, 30_000);
           timeout.unref();
-          child.on('error', () => {
+          child.on('error', (err) => {
             clearTimeout(timeout);
+            log('warn', 'provider_usage_limit_check_error', {
+              repo_id: this.repoId ?? undefined,
+              event: 'provider_usage_limit_check_error',
+              agent_provider: provider.id,
+              check_command: command,
+              error: err.message,
+            });
             resolve(false);
           });
           child.on('exit', (code) => {
