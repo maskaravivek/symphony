@@ -348,7 +348,9 @@ async function main(): Promise<void> {
       console.log(`labels:    ${(selection.state.labels ?? []).join(',')}`);
       // eslint-disable-next-line no-console
       console.log(`thread:    ${selection.state.agent_thread_id ?? selection.state.codex_thread_id ?? ''}`);
-      if ((selection.state.agent_provider ?? 'codex') === 'codex' && (selection.state.agent_thread_id ?? selection.state.codex_thread_id)) {
+      const provider = selection.state.agent_provider ?? 'codex';
+      const isCodexProvider = selection.state.agent_provider_kind === 'codex' || provider === 'codex' || provider.startsWith('codex-');
+      if (isCodexProvider && (selection.state.agent_thread_id ?? selection.state.codex_thread_id)) {
         const threadId = selection.state.agent_thread_id ?? selection.state.codex_thread_id;
         // eslint-disable-next-line no-console
         console.log(`resume:    codex resume --include-non-interactive ${threadId}`);

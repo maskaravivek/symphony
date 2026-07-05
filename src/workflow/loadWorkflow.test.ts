@@ -110,6 +110,8 @@ codex:
 
   const loaded = await loadWorkflowFromFile(workflowPath);
   assert.equal(loaded.config.agents.default, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_group, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_kind, 'codex');
   assert.equal(loaded.config.agents.providers.codex.command, 'codex exec -');
   assert.equal(loaded.config.agents.providers.codex.resume_command, 'codex exec resume "{{ symphony.codex_thread_id }}" -');
   assert.equal(loaded.config.agents.providers.codex.handoff_command, 'codex exec --readonly -');
@@ -132,6 +134,8 @@ agents:
       command: codex exec -
       output_log: .symphony/codex.jsonl
     claude:
+      provider_group: claude
+      provider_kind: claude
       command: claude -p
       output_log: .symphony/claude.log
       max_concurrent: 1
@@ -145,6 +149,10 @@ agents:
 
   const loaded = await loadWorkflowFromFile(workflowPath);
   assert.equal(loaded.config.agents.default, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_group, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_kind, 'codex');
+  assert.equal(loaded.config.agents.providers.claude.provider_group, 'claude');
+  assert.equal(loaded.config.agents.providers.claude.provider_kind, 'claude');
   assert.equal(loaded.config.agents.providers.claude.command, 'claude -p');
   assert.equal(loaded.config.agents.providers.claude.max_concurrent, 1);
   assert.equal(loaded.config.agents.providers.claude.extract_codex_thread_id, false);
@@ -155,6 +163,118 @@ agents:
     none_labels: ['agent:codex'],
     default: false,
   });
+});
+
+test('defaults codex thread extraction from provider_kind codex', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex-spark
+  providers:
+    codex-spark:
+      provider_group: codex
+      provider_kind: codex
+      command: codex exec --model gpt-5.3-codex-spark -
+      output_log: .symphony/codex-spark.jsonl
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.equal(loaded.config.agents.providers['codex-spark'].extract_codex_thread_id, true);
+});
+
+test('loads usage_limit_exit_codes and usage_limit_backoff_ms for a provider', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_exit_codes: [5, 29]
+      usage_limit_backoff_ms: 3600000
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.agents.providers.codex.usage_limit_exit_codes, [5, 29]);
+  assert.equal(loaded.config.agents.providers.codex.usage_limit_backoff_ms, 3600000);
+});
+
+test('defaults usage_limit_exit_codes to null and usage_limit_backoff_ms to 0', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.equal(loaded.config.agents.providers.codex.usage_limit_exit_codes, null);
+  assert.equal(loaded.config.agents.providers.codex.usage_limit_backoff_ms, 0);
+});
+
+test('rejects empty usage_limit_check_command', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_check_command: "   "
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /usage_limit_check_command must be a non-empty string/);
+});
+
+test('rejects non-integer values in usage_limit_exit_codes', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_exit_codes: [5, "notanumber"]
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /usage_limit_exit_codes must be an array of integers/);
+});
+
+test('rejects negative usage_limit_backoff_ms', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+      usage_limit_backoff_ms: -1000
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /usage_limit_backoff_ms must be a non-negative number/);
 });
 
 test('rejects unsupported epic relationship source', async () => {

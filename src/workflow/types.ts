@@ -58,6 +58,8 @@ export interface CodexConfig {
 
 export interface AgentProviderConfig {
   id: string;
+  provider_group: string;
+  provider_kind: string;
   command: string;
   resume_command: string | null;
   handoff_command: string | null;
@@ -65,6 +67,9 @@ export interface AgentProviderConfig {
   output_log: string;
   max_concurrent: number | null;
   extract_codex_thread_id: boolean;
+  usage_limit_exit_codes: number[] | null;
+  usage_limit_backoff_ms: number;
+  usage_limit_check_command: string | null;
 }
 
 export interface AgentRouteConfig {

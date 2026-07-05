@@ -39,6 +39,18 @@ function asString(value: unknown, keyPath: string): string | null {
   return value;
 }
 
+function asTrimmedStringOrNull(value: unknown, keyPath: string): string | null {
+  const raw = asString(value, keyPath);
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) throw new SymphonyConfigError(`${keyPath} must be a non-empty string`);
+  return trimmed;
+}
+
+function normalizeIdentifier(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function splitFrontMatter(markdown: string): { yaml: string | null; body: string } {
   if (!markdown.startsWith('---\n') && markdown !== '---') return { yaml: null, body: markdown };
   const lines = markdown.split('\n');
@@ -109,8 +121,31 @@ function normalizeLabelList(value: unknown, keyPath: string): string[] {
   return (asStringArray(value, keyPath) ?? []).map((label) => label.trim().toLowerCase()).filter(Boolean);
 }
 
+function asIntegerArray(value: unknown, keyPath: string): number[] | null {
+  if (value === undefined || value === null) return null;
+  if (!Array.isArray(value)) throw new SymphonyConfigError(`${keyPath} must be an array of integers`);
+  for (const item of value) {
+    if (typeof item !== 'number' || !Number.isInteger(item)) {
+      throw new SymphonyConfigError(`${keyPath} must be an array of integers`);
+    }
+  }
+  return value as number[];
+}
+
 function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentProviderConfig> = {}): AgentProviderConfig {
   if (!isRecord(value)) throw new SymphonyConfigError(`agents.providers.${id} must be an object`);
+  const providerGroup = normalizeIdentifier(
+    asString(value.provider_group, `agents.providers.${id}.provider_group`) ??
+    fallback.provider_group ??
+    id,
+  );
+  if (!providerGroup) throw new SymphonyConfigError(`agents.providers.${id}.provider_group must be a non-empty string`);
+  const providerKind = normalizeIdentifier(
+    asString(value.provider_kind, `agents.providers.${id}.provider_kind`) ??
+    fallback.provider_kind ??
+    id,
+  );
+  if (!providerKind) throw new SymphonyConfigError(`agents.providers.${id}.provider_kind must be a non-empty string`);
   const command = asString(value.command, `agents.providers.${id}.command`) ?? fallback.command;
   if (!command) throw new SymphonyConfigError(`agents.providers.${id}.command is required`);
   const resumeCommand = asString(value.resume_command, `agents.providers.${id}.resume_command`) ?? fallback.resume_command ?? null;
@@ -122,7 +157,19 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
   const extractCodexThreadId =
     asBoolean(value.extract_codex_thread_id, `agents.providers.${id}.extract_codex_thread_id`) ??
     fallback.extract_codex_thread_id ??
-    id === 'codex';
+    providerKind === 'codex';
+  const usageLimitExitCodes =
+    asIntegerArray(value.usage_limit_exit_codes, `agents.providers.${id}.usage_limit_exit_codes`) ??
+    fallback.usage_limit_exit_codes ??
+    null;
+  const usageLimitBackoffMs =
+    asNumber(value.usage_limit_backoff_ms, `agents.providers.${id}.usage_limit_backoff_ms`) ??
+    fallback.usage_limit_backoff_ms ??
+    0;
+  const usageLimitCheckCommand =
+    asTrimmedStringOrNull(value.usage_limit_check_command, `agents.providers.${id}.usage_limit_check_command`) ??
+    fallback.usage_limit_check_command ??
+    null;
 
   if (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0) {
     throw new SymphonyConfigError(`agents.providers.${id}.turn_timeout_ms must be a positive number`);
@@ -130,9 +177,14 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
   if (maxConcurrent !== null && (!Number.isFinite(maxConcurrent) || maxConcurrent < 0)) {
     throw new SymphonyConfigError(`agents.providers.${id}.max_concurrent must be a non-negative number`);
   }
+  if (!Number.isFinite(usageLimitBackoffMs) || usageLimitBackoffMs < 0) {
+    throw new SymphonyConfigError(`agents.providers.${id}.usage_limit_backoff_ms must be a non-negative number`);
+  }
 
   return {
     id,
+    provider_group: providerGroup,
+    provider_kind: providerKind,
     command,
     resume_command: resumeCommand,
     handoff_command: handoffCommand,
@@ -140,6 +192,9 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
     output_log: outputLog,
     max_concurrent: maxConcurrent === null ? null : Math.floor(maxConcurrent),
     extract_codex_thread_id: extractCodexThreadId,
+    usage_limit_exit_codes: usageLimitExitCodes,
+    usage_limit_backoff_ms: usageLimitBackoffMs,
+    usage_limit_check_command: usageLimitCheckCommand,
   };
 }
 
@@ -159,6 +214,8 @@ function normalizeRoute(value: unknown, index: number): AgentRouteConfig {
 function normalizeAgentsConfig(raw: AnyRecord, codex: CodexConfig): AgentsConfig {
   const fallbackCodexProvider: AgentProviderConfig = {
     id: 'codex',
+    provider_group: 'codex',
+    provider_kind: 'codex',
     command: codex.command,
     resume_command: codex.resume_command,
     handoff_command: codex.handoff_command,
@@ -166,6 +223,9 @@ function normalizeAgentsConfig(raw: AnyRecord, codex: CodexConfig): AgentsConfig
     output_log: '.symphony/codex.jsonl',
     max_concurrent: null,
     extract_codex_thread_id: true,
+    usage_limit_exit_codes: null,
+    usage_limit_backoff_ms: 0,
+    usage_limit_check_command: null,
   };
 
   const agentsRaw = isRecord(raw.agents) ? raw.agents : null;
