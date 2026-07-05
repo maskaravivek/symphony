@@ -331,6 +331,146 @@ Prompt body
   return workflowPath;
 }
 
+async function writeWorkflowWithGroupedCheckCommand(workspaceRoot: string, checkCommand: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-grouped-check-workflow-'));
+  const workflowPath = path.join(dir, 'WORKFLOW.md');
+  await fs.writeFile(
+    workflowPath,
+    `---
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  api_base_url: https://api.github.test
+  active_states: [open]
+  terminal_states: [closed]
+  required_labels: [ready-for-agent]
+  ignored_labels: [blocked, ready-for-human, wontfix]
+workspace:
+  root: ${workspaceRoot}
+agent:
+  max_concurrent_agents: 2
+agents:
+  default: codex-spark
+  providers:
+    codex:
+      provider_group: codex
+      provider_kind: codex
+      command: sleep 3600
+      output_log: .symphony/codex.jsonl
+      usage_limit_check_command: ${checkCommand}
+    codex-spark:
+      provider_group: codex
+      provider_kind: codex
+      command: sleep 3600
+      output_log: .symphony/codex-spark.jsonl
+      extract_codex_thread_id: true
+---
+
+Prompt body
+`,
+    'utf8',
+  );
+  return workflowPath;
+}
+
+async function writeWorkflowWithGroupedClaudeProviders(workspaceRoot: string): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-grouped-capacity-workflow-'));
+  const workflowPath = path.join(dir, 'WORKFLOW.md');
+  await fs.writeFile(
+    workflowPath,
+    `---
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  api_base_url: https://api.github.test
+  active_states: [open]
+  terminal_states: [closed]
+  required_labels: [ready-for-agent]
+  ignored_labels: [blocked, ready-for-human, wontfix]
+workspace:
+  root: ${workspaceRoot}
+agent:
+  max_concurrent_agents: 2
+agents:
+  default: codex
+  providers:
+    codex:
+      command: sleep 3600
+    claude:
+      provider_group: claude
+      provider_kind: claude
+      command: sleep 3600
+      output_log: .symphony/claude.log
+      max_concurrent: 1
+    claude-fable:
+      provider_group: claude
+      provider_kind: claude
+      command: sleep 3600
+      output_log: .symphony/claude-fable.log
+      max_concurrent: 1
+  routes:
+    - provider: claude-fable
+      any_labels: [user-experience]
+      all_labels: [complexity:high]
+    - provider: claude
+      any_labels: [user-experience]
+    - provider: codex
+      default: true
+---
+
+Prompt body
+`,
+    'utf8',
+  );
+  return workflowPath;
+}
+
+function buildMockFetchWithLabels(
+  issueLabels: Record<number, string[]>,
+  calls: { url: string; method: string; body: unknown }[],
+): typeof globalThis.fetch {
+  const issueNumbers = Object.keys(issueLabels).map(Number);
+  return async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues?')) {
+      return jsonResponse(issueNumbers.map((n) => issuePayload(n, `Issue ${n}`, 'open', issueLabels[n])));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    for (const n of issueNumbers) {
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}`) {
+        return jsonResponse(issuePayload(n, `Issue ${n}`, 'open', issueLabels[n]));
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/comments?per_page=50`) {
+        return jsonResponse([]);
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/comments` && method === 'POST') {
+        return jsonResponse({ id: 500 + n, body: String(body), html_url: `https://github.test/comment/${500 + n}` });
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/${500 + n}` && method === 'PATCH') {
+        return jsonResponse({ id: 500 + n, body: String(body), html_url: `https://github.test/comment/${500 + n}` });
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/labels` && method === 'POST') {
+        return jsonResponse([]);
+      }
+      if (url.startsWith(`https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/labels/`) && method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+    }
+
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+}
+
 test('blocks dispatch when usage_limit_check_command exits non-zero', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-check-blocked-workspace-'));
   const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, "bash -c 'exit 1'");
@@ -345,6 +485,53 @@ test('blocks dispatch when usage_limit_check_command exits non-zero', async () =
     await orchestrator.tickOnce();
     // The check command exits non-zero, so issue 30 must not be dispatched
     assert.equal(wasDispatched(calls, 30), false, 'issue 30 should not be dispatched when check command exits non-zero');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('blocks sibling providers in the same provider_group when usage_limit_check_command exits non-zero', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-grouped-check-blocked-workspace-'));
+  const workflowPath = await writeWorkflowWithGroupedCheckCommand(workspaceRoot, "bash -c 'exit 1'");
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([32], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    assert.equal(wasDispatched(calls, 32), false, 'codex-spark should not dispatch while the codex provider group is blocked');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('applies max_concurrent across providers in the same provider_group', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-grouped-capacity-workspace-'));
+  const workflowPath = await writeWorkflowWithGroupedClaudeProviders(workspaceRoot);
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetchWithLabels(
+    {
+      40: ['ready-for-agent', 'user-experience', 'complexity:high'],
+      41: ['ready-for-agent', 'user-experience'],
+    },
+    calls,
+  );
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    assert.ok(wasDispatched(calls, 40), 'high-complexity UX issue should dispatch to claude-fable');
+    assert.equal(wasDispatched(calls, 41), false, 'default UX issue should wait while a claude-group sibling is running');
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;

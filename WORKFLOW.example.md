@@ -144,6 +144,8 @@ agents:
   default: codex
   providers:
     codex:
+      provider_group: codex
+      provider_kind: codex
       command: bash -lc 'set -o pipefail; codex exec --json --dangerously-bypass-approvals-and-sandbox -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
       resume_command: bash -lc 'set -o pipefail; codex exec resume --json --dangerously-bypass-approvals-and-sandbox --output-last-message .symphony/last_message.md "{{ symphony.agent_thread_id }}" - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
       handoff_command: bash -lc 'set -o pipefail; codex exec --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
@@ -165,8 +167,19 @@ agents:
       #     | tr -d '\r'
       #   )
       #   [ "${remaining:-0}" -gt 5 ]
+    codex-spark:
+      provider_group: codex
+      provider_kind: codex
+      command: bash -lc 'set -o pipefail; codex exec --model gpt-5.3-codex-spark --json --dangerously-bypass-approvals-and-sandbox -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex-spark.jsonl'
+      resume_command: bash -lc 'set -o pipefail; codex exec resume --json --dangerously-bypass-approvals-and-sandbox --output-last-message .symphony/last_message.md "{{ symphony.agent_thread_id }}" - < "{{ symphony.prompt_path }}" | tee .symphony/codex-spark.jsonl'
+      handoff_command: bash -lc 'set -o pipefail; codex exec --model gpt-5.3-codex-spark --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex-spark.jsonl'
+      output_log: .symphony/codex-spark.jsonl
+      turn_timeout_ms: 3600000
+      extract_codex_thread_id: true
     claude:
-      command: bash -lc 'set -o pipefail; claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log'
+      provider_group: claude
+      provider_kind: claude
+      command: bash -lc 'set -o pipefail; claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log .symphony/last_message.md'
       output_log: .symphony/claude.log
       turn_timeout_ms: 3600000
       max_concurrent: 1
@@ -182,10 +195,27 @@ agents:
       #     | tr -d '\r'
       #   )
       #   [ "${remaining:-0}" -gt 5 ]
+    claude-fable:
+      provider_group: claude
+      provider_kind: claude
+      command: bash -lc 'set -o pipefail; claude -p --model fable < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log .symphony/last_message.md'
+      output_log: .symphony/claude-fable.log
+      turn_timeout_ms: 3600000
+      max_concurrent: 1
   routes:
-    - provider: claude
-      any_labels: [agent:claude, ui, ux, design]
+    - provider: claude-fable
+      any_labels: [agent:claude, user-experience, ui, ux, design]
+      all_labels: [complexity:critical]
       none_labels: [agent:codex]
+    - provider: claude-fable
+      any_labels: [agent:claude, user-experience, ui, ux, design]
+      all_labels: [complexity:high]
+      none_labels: [agent:codex]
+    - provider: codex-spark
+      any_labels: [complexity:tiny, task:docs, chore]
+    - provider: claude
+      any_labels: [agent:claude, user-experience, ui, ux, design]
+      none_labels: [agent:codex, complexity:tiny, complexity:low, complexity:medium, complexity:high, complexity:critical]
     - provider: codex
       default: true
 ---

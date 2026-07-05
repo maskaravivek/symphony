@@ -58,6 +58,8 @@ export interface CodexConfig {
 
 export interface AgentProviderConfig {
   id: string;
+  provider_group: string;
+  provider_kind: string;
   command: string;
   resume_command: string | null;
   handoff_command: string | null;

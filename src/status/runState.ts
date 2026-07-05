@@ -26,6 +26,8 @@ export interface RunState {
   attempt: number;
   session_id: string | null;
   agent_provider?: string | null;
+  agent_provider_group?: string | null;
+  agent_provider_kind?: string | null;
   agent_thread_id?: string | null;
   agent_mode?: AgentMode | null;
   agent_log_path?: string | null;

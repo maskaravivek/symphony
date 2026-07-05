@@ -47,6 +47,10 @@ function asTrimmedStringOrNull(value: unknown, keyPath: string): string | null {
   return trimmed;
 }
 
+function normalizeIdentifier(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 function splitFrontMatter(markdown: string): { yaml: string | null; body: string } {
   if (!markdown.startsWith('---\n') && markdown !== '---') return { yaml: null, body: markdown };
   const lines = markdown.split('\n');
@@ -130,6 +134,18 @@ function asIntegerArray(value: unknown, keyPath: string): number[] | null {
 
 function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentProviderConfig> = {}): AgentProviderConfig {
   if (!isRecord(value)) throw new SymphonyConfigError(`agents.providers.${id} must be an object`);
+  const providerGroup = normalizeIdentifier(
+    asString(value.provider_group, `agents.providers.${id}.provider_group`) ??
+    fallback.provider_group ??
+    id,
+  );
+  if (!providerGroup) throw new SymphonyConfigError(`agents.providers.${id}.provider_group must be a non-empty string`);
+  const providerKind = normalizeIdentifier(
+    asString(value.provider_kind, `agents.providers.${id}.provider_kind`) ??
+    fallback.provider_kind ??
+    id,
+  );
+  if (!providerKind) throw new SymphonyConfigError(`agents.providers.${id}.provider_kind must be a non-empty string`);
   const command = asString(value.command, `agents.providers.${id}.command`) ?? fallback.command;
   if (!command) throw new SymphonyConfigError(`agents.providers.${id}.command is required`);
   const resumeCommand = asString(value.resume_command, `agents.providers.${id}.resume_command`) ?? fallback.resume_command ?? null;
@@ -167,6 +183,8 @@ function normalizeProvider(id: string, value: unknown, fallback: Partial<AgentPr
 
   return {
     id,
+    provider_group: providerGroup,
+    provider_kind: providerKind,
     command,
     resume_command: resumeCommand,
     handoff_command: handoffCommand,
@@ -196,6 +214,8 @@ function normalizeRoute(value: unknown, index: number): AgentRouteConfig {
 function normalizeAgentsConfig(raw: AnyRecord, codex: CodexConfig): AgentsConfig {
   const fallbackCodexProvider: AgentProviderConfig = {
     id: 'codex',
+    provider_group: 'codex',
+    provider_kind: 'codex',
     command: codex.command,
     resume_command: codex.resume_command,
     handoff_command: codex.handoff_command,

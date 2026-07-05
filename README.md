@@ -97,23 +97,51 @@ agents:
   default: codex
   providers:
     codex:
+      provider_group: codex
+      provider_kind: codex
       command: bash -lc 'codex exec --json -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
       resume_command: bash -lc 'codex exec resume --json --output-last-message .symphony/last_message.md "{{ symphony.agent_thread_id }}" - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
       handoff_command: bash -lc 'codex exec --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex.jsonl'
       output_log: .symphony/codex.jsonl
+    codex-spark:
+      provider_group: codex
+      provider_kind: codex
+      command: bash -lc 'codex exec --model gpt-5.3-codex-spark --json -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex-spark.jsonl'
+      resume_command: bash -lc 'codex exec resume --json --output-last-message .symphony/last_message.md "{{ symphony.agent_thread_id }}" - < "{{ symphony.prompt_path }}" | tee .symphony/codex-spark.jsonl'
+      handoff_command: bash -lc 'codex exec --model gpt-5.3-codex-spark --json -s read-only -C . --output-last-message .symphony/last_message.md - < "{{ symphony.prompt_path }}" | tee .symphony/codex-spark.jsonl'
+      output_log: .symphony/codex-spark.jsonl
+      extract_codex_thread_id: true
     claude:
-      command: bash -lc 'claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log'
+      provider_group: claude
+      provider_kind: claude
+      command: bash -lc 'claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log .symphony/last_message.md'
       output_log: .symphony/claude.log
       max_concurrent: 1
+    claude-fable:
+      provider_group: claude
+      provider_kind: claude
+      command: bash -lc 'claude -p --model fable < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log .symphony/last_message.md'
+      output_log: .symphony/claude-fable.log
+      max_concurrent: 1
   routes:
-    - provider: claude
-      any_labels: [agent:claude, ui, ux, design]
+    - provider: claude-fable
+      any_labels: [agent:claude, user-experience, ui, ux, design]
+      all_labels: [complexity:critical]
       none_labels: [agent:codex]
+    - provider: claude-fable
+      any_labels: [agent:claude, user-experience, ui, ux, design]
+      all_labels: [complexity:high]
+      none_labels: [agent:codex]
+    - provider: codex-spark
+      any_labels: [complexity:tiny, task:docs, chore]
+    - provider: claude
+      any_labels: [agent:claude, user-experience, ui, ux, design]
+      none_labels: [agent:codex, complexity:tiny, complexity:low, complexity:medium, complexity:high, complexity:critical]
     - provider: codex
       default: true
 ```
 
-Routes are evaluated in order. A route can use `any_labels`, `all_labels`, `none_labels`, and `default`. Provider `max_concurrent` lets you reserve low-limit agents like Claude for critical labeled work without consuming every Symphony worker slot.
+Routes are evaluated in order. A route can use `any_labels`, `all_labels`, `none_labels`, and `default`. The example above sends high/critical UX work to Fable, tiny/docs/chore work to Codex Spark, UX work without a complexity label to default Claude, and everything else to default Codex. Providers with the same `provider_group` share `max_concurrent`, proactive usage checks, and usage-limit backoff; `provider_kind: codex` marks Codex-compatible providers that support thread extraction and resume instructions.
 
 ## Notes
 

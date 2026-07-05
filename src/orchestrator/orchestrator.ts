@@ -74,6 +74,7 @@ interface RunningSession {
   workspace_path: string;
   session_id: string;
   agent_provider: string;
+  agent_provider_group: string;
   started_at_ms: number;
   cancelled_reason: string | null;
   cancel: (reason: string) => Promise<void>;
@@ -208,6 +209,14 @@ function selectAgentProvider(config: WorkflowConfig, issue: Issue): AgentProvide
 
 function resolveAgentLogPath(workspacePath: string, provider: AgentProviderConfig): string {
   return path.isAbsolute(provider.output_log) ? provider.output_log : path.join(workspacePath, provider.output_log);
+}
+
+function isCodexProvider(provider: AgentProviderConfig): boolean {
+  return provider.provider_kind === 'codex' || provider.extract_codex_thread_id;
+}
+
+function providerLimitKey(provider: AgentProviderConfig): string {
+  return provider.provider_group || provider.id;
 }
 
 function collectEpicChildren(root: EpicTreeNode): Array<{ node: EpicTreeNode; depth: number }> {
@@ -1093,7 +1102,8 @@ export class Orchestrator {
     const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
     const agentLogPath = resolveAgentLogPath(workspacePath, provider);
     await fs.mkdir(path.dirname(agentLogPath), { recursive: true });
-    const codexJsonlPath = provider.id === 'codex' ? agentLogPath : path.join(workspacePath, '.symphony', 'codex.jsonl');
+    const codexCompatible = isCodexProvider(provider);
+    const codexJsonlPath = codexCompatible ? agentLogPath : path.join(workspacePath, '.symphony', 'codex.jsonl');
 
     let agentThreadId =
       existingState?.agent_provider === provider.id
@@ -1101,7 +1111,7 @@ export class Orchestrator {
         : provider.id === 'codex'
           ? existingState?.codex_thread_id ?? null
           : null;
-    let codexThreadId = provider.id === 'codex' ? agentThreadId : null;
+    let codexThreadId = codexCompatible ? agentThreadId : null;
     const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isPullRequestReview ? 'pr-review' : isInteractiveHandoff ? 'interactive-handoff' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
     const commandTemplate = isInteractiveHandoff
@@ -1132,6 +1142,8 @@ export class Orchestrator {
       SYMPHONY_PROMPT_PATH: promptPath,
       SYMPHONY_BRANCH_NAME: issue.branch_name ?? '',
       SYMPHONY_AGENT_PROVIDER: provider.id,
+      SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
+      SYMPHONY_AGENT_PROVIDER_KIND: provider.provider_kind,
       SYMPHONY_AGENT_THREAD_ID: agentThreadId ?? '',
       SYMPHONY_CODEX_THREAD_ID: codexThreadId ?? '',
     };
@@ -1151,11 +1163,13 @@ export class Orchestrator {
       attempt: opts.attempt,
       session_id: null,
       agent_provider: provider.id,
+      agent_provider_group: provider.provider_group,
+      agent_provider_kind: provider.provider_kind,
       agent_thread_id: agentThreadId,
       agent_mode: agentMode,
       agent_log_path: agentLogPath,
       codex_thread_id: codexThreadId,
-      codex_mode: provider.id === 'codex' ? agentMode : null,
+      codex_mode: codexCompatible ? agentMode : null,
       pause_reason: pauseReason,
       worker_pid: null,
       status: 'running',
@@ -1166,7 +1180,7 @@ export class Orchestrator {
       last_error: null,
       prompt_path: promptPath,
       agent_output_path: agentLogPath,
-      codex_jsonl_path: provider.id === 'codex' ? codexJsonlPath : existingState?.codex_jsonl_path ?? null,
+      codex_jsonl_path: codexCompatible ? codexJsonlPath : existingState?.codex_jsonl_path ?? null,
       last_message_path: lastMessagePath,
       last_seen_comment_id: runContext.lastSeenCommentId,
       last_seen_pr_review_comment_id: runContext.lastSeenPullRequestReviewCommentId,
@@ -1233,13 +1247,13 @@ export class Orchestrator {
         const threadId = extractCodexThreadId(line);
         if (!threadId || threadId === agentThreadId) return;
         agentThreadId = threadId;
-        codexThreadId = provider.id === 'codex' ? threadId : codexThreadId;
+        codexThreadId = codexCompatible ? threadId : codexThreadId;
         void updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
           return {
             ...cur,
             agent_thread_id: threadId,
-            codex_thread_id: provider.id === 'codex' ? threadId : cur.codex_thread_id,
+            codex_thread_id: codexCompatible ? threadId : cur.codex_thread_id,
             updated_at: new Date().toISOString(),
           };
         });
@@ -1265,6 +1279,7 @@ export class Orchestrator {
       workspace_path: workspacePath,
       session_id: agent.session_id,
       agent_provider: provider.id,
+      agent_provider_group: provider.provider_group,
       started_at_ms: nowMs(),
       cancelled_reason: null,
       cancel: agent.cancel,
@@ -1307,37 +1322,6 @@ export class Orchestrator {
           return;
         }
 
-        if (config.hooks.after_run) {
-          log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started' });
-          try {
-            const rendered = await renderTemplate(config.hooks.after_run, { issue });
-            await runHookScript(rendered, workspacePath, config.hooks.timeout_ms);
-            log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed' });
-          } catch (err) {
-            const error = err instanceof Error ? err.message : String(err);
-            log('error', 'workspace_after_run_hook_failed', {
-              ...endFields,
-              event: 'workspace_after_run_hook_failed',
-              error,
-            });
-            await updateRunState(workspacePath, (cur) =>
-              cur
-                ? {
-                    ...cur,
-                    status: 'failed',
-                    last_error: `after_run hook failed: ${error}`,
-                    updated_at: new Date().toISOString(),
-                  }
-                : null,
-            );
-            await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
-            await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
-            await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Post-run validation failed: ${error}. Symphony will retry.`);
-            await this.scheduleRetry(config, issue, opts.attempt, 'after_run_failed', workspacePath);
-            return;
-          }
-        }
-
         if (signal) {
           log('error', 'worker_failed', { ...endFields, event: 'worker_failed', status: 'failed', signal });
           await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
@@ -1374,6 +1358,37 @@ export class Orchestrator {
             );
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Paused for user input. Symphony posted a question on this issue.');
             return;
+          }
+
+          if (config.hooks.after_run) {
+            log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started' });
+            try {
+              const rendered = await renderTemplate(config.hooks.after_run, { issue });
+              await runHookScript(rendered, workspacePath, config.hooks.timeout_ms);
+              log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed' });
+            } catch (err) {
+              const error = err instanceof Error ? err.message : String(err);
+              log('error', 'workspace_after_run_hook_failed', {
+                ...endFields,
+                event: 'workspace_after_run_hook_failed',
+                error,
+              });
+              await updateRunState(workspacePath, (cur) =>
+                cur
+                  ? {
+                      ...cur,
+                      status: 'failed',
+                      last_error: `after_run hook failed: ${error}`,
+                      updated_at: new Date().toISOString(),
+                    }
+                  : null,
+              );
+              await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
+              await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
+              await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Post-run validation failed: ${error}. Symphony will retry.`);
+              await this.scheduleRetry(config, issue, opts.attempt, 'after_run_failed', workspacePath);
+              return;
+            }
           }
 
           if (!isConflictResolution && !isPullRequestReview) {
@@ -1428,18 +1443,20 @@ export class Orchestrator {
         await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
 
         if (code !== null && provider.usage_limit_exit_codes?.includes(code) && provider.usage_limit_backoff_ms > 0) {
+          const limitKey = providerLimitKey(provider);
           const backoffUntil = nowMs() + provider.usage_limit_backoff_ms;
           const backoffSeconds = Math.round(provider.usage_limit_backoff_ms / 1000);
-          this.providerUsageLimitBackoffUntil.set(provider.id, backoffUntil);
+          this.providerUsageLimitBackoffUntil.set(limitKey, backoffUntil);
           log('warn', 'provider_usage_limit_backoff', {
             ...endFields,
             event: 'provider_usage_limit_backoff',
             agent_provider: provider.id,
+            agent_provider_group: limitKey,
             exit_code: code,
             backoff_ms: provider.usage_limit_backoff_ms,
             backoff_until: new Date(backoffUntil).toISOString(),
           });
-          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${provider.id} dispatches for ${backoffSeconds}s and retry.`);
+          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${limitKey} dispatches for ${backoffSeconds}s and retry.`);
         } else {
           await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
         }
@@ -1717,10 +1734,17 @@ ${runContext}`;
 
   private async refreshProviderUsageLimitChecks(config: WorkflowConfig): Promise<void> {
     this.providerUsageLimitCheckBlocked.clear();
-    const providers = Object.values(config.agents.providers).filter((p) => p.usage_limit_check_command);
+    const providersByGroup = new Map<string, AgentProviderConfig>();
+    for (const provider of Object.values(config.agents.providers)) {
+      if (!provider.usage_limit_check_command) continue;
+      const limitKey = providerLimitKey(provider);
+      if (!providersByGroup.has(limitKey)) providersByGroup.set(limitKey, provider);
+    }
+    const providers = [...providersByGroup.values()];
     await Promise.all(
       providers.map(async (provider) => {
         const command = provider.usage_limit_check_command!;
+        const limitKey = providerLimitKey(provider);
         const blocked = await new Promise<boolean>((resolve) => {
           let settled = false;
           const finalize = (value: boolean) => {
@@ -1741,6 +1765,7 @@ ${runContext}`;
               repo_id: this.repoId ?? undefined,
               event: 'provider_usage_limit_check_timeout',
               agent_provider: provider.id,
+              agent_provider_group: limitKey,
               check_command: command,
             });
             finalize(true);
@@ -1752,6 +1777,7 @@ ${runContext}`;
               repo_id: this.repoId ?? undefined,
               event: 'provider_usage_limit_check_error',
               agent_provider: provider.id,
+              agent_provider_group: limitKey,
               check_command: command,
               error: err.message,
             });
@@ -1763,11 +1789,12 @@ ${runContext}`;
           });
         });
         if (blocked) {
-          this.providerUsageLimitCheckBlocked.add(provider.id);
+          this.providerUsageLimitCheckBlocked.add(limitKey);
           log('warn', 'provider_usage_limit_check_blocked', {
             repo_id: this.repoId ?? undefined,
             event: 'provider_usage_limit_check_blocked',
             agent_provider: provider.id,
+            agent_provider_group: limitKey,
             check_command: command,
           });
         }
@@ -1792,11 +1819,12 @@ ${runContext}`;
         if (runningInState >= limit) return 'state_capacity';
       }
     }
-    const backoffUntil = this.providerUsageLimitBackoffUntil.get(provider.id);
+    const limitKey = providerLimitKey(provider);
+    const backoffUntil = this.providerUsageLimitBackoffUntil.get(limitKey);
     if (backoffUntil !== undefined && nowMs() < backoffUntil) return 'usage_limit';
-    if (this.providerUsageLimitCheckBlocked.has(provider.id)) return 'usage_limit';
+    if (this.providerUsageLimitCheckBlocked.has(limitKey)) return 'usage_limit';
     if (provider.max_concurrent !== null) {
-      const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider === provider.id).length;
+      const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider_group === limitKey).length;
       if (runningForProvider >= provider.max_concurrent) return 'provider_capacity';
     }
     return null;

@@ -16,7 +16,7 @@ export function formatStatusComment(options: {
   const provider = options.state.agent_provider ?? 'codex';
   const threadId = options.state.agent_thread_id ?? options.state.codex_thread_id ?? null;
   const workspace = options.state.workspace_path ?? '';
-  const isCodex = provider === 'codex';
+  const isCodex = options.state.agent_provider_kind === 'codex' || provider === 'codex' || provider.startsWith('codex-');
   const resumeCommand = isCodex && threadId ? `codex resume --include-non-interactive ${threadId}` : null;
   const execResumeCommand = isCodex && threadId ? `codex exec resume ${threadId} -` : null;
   const resumeBlock =

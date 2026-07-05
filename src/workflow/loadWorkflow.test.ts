@@ -110,6 +110,8 @@ codex:
 
   const loaded = await loadWorkflowFromFile(workflowPath);
   assert.equal(loaded.config.agents.default, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_group, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_kind, 'codex');
   assert.equal(loaded.config.agents.providers.codex.command, 'codex exec -');
   assert.equal(loaded.config.agents.providers.codex.resume_command, 'codex exec resume "{{ symphony.codex_thread_id }}" -');
   assert.equal(loaded.config.agents.providers.codex.handoff_command, 'codex exec --readonly -');
@@ -132,6 +134,8 @@ agents:
       command: codex exec -
       output_log: .symphony/codex.jsonl
     claude:
+      provider_group: claude
+      provider_kind: claude
       command: claude -p
       output_log: .symphony/claude.log
       max_concurrent: 1
@@ -145,6 +149,10 @@ agents:
 
   const loaded = await loadWorkflowFromFile(workflowPath);
   assert.equal(loaded.config.agents.default, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_group, 'codex');
+  assert.equal(loaded.config.agents.providers.codex.provider_kind, 'codex');
+  assert.equal(loaded.config.agents.providers.claude.provider_group, 'claude');
+  assert.equal(loaded.config.agents.providers.claude.provider_kind, 'claude');
   assert.equal(loaded.config.agents.providers.claude.command, 'claude -p');
   assert.equal(loaded.config.agents.providers.claude.max_concurrent, 1);
   assert.equal(loaded.config.agents.providers.claude.extract_codex_thread_id, false);
