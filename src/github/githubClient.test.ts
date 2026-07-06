@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { GithubIssueTrackerClient } from './githubClient.js';
+import { GithubIssueTrackerClient, isGithubRateLimitError } from './githubClient.js';
 import type { GithubTrackerConfig } from '../workflow/types.js';
 
 function trackerConfig(): GithubTrackerConfig {
@@ -204,6 +204,51 @@ test('updates sticky status comment when marker exists', async () => {
   assert.equal(calls[1]?.url, 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/11');
   assert.equal(calls[1]?.method, 'PATCH');
   assert.deepEqual(calls[1]?.body, { body: 'new body' });
+});
+
+test('throws a typed rate limit error with reset metadata', async () => {
+  const resetSeconds = Math.floor((Date.now() + 90_000) / 1000);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ message: 'API rate limit exceeded for user ID 123' }), {
+      status: 403,
+      statusText: 'Forbidden',
+      headers: {
+        'content-type': 'application/json',
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': String(resetSeconds),
+      },
+    });
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    await assert.rejects(
+      () => client.fetchIssueByNumber(42),
+      (err) => isGithubRateLimitError(err) && err.resetAtMs === resetSeconds * 1000,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('caches issue fetches by repo and number within a client', async () => {
+  let fetchCount = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return jsonResponse(issuePayload(42, '2026-01-01T00:00:00Z'));
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    const first = await client.fetchIssueByNumber(42);
+    const second = await client.fetchIssueByNumber(42);
+    assert.equal(first?.identifier, 'mangoappstudio/mdedit#42');
+    assert.equal(second?.identifier, 'mangoappstudio/mdedit#42');
+    assert.equal(fetchCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('lists open pull requests with merge state fields', async () => {

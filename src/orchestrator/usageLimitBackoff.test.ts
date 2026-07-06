@@ -626,3 +626,62 @@ test('allows dispatch when usage_limit_check_command exits zero', async () => {
     await fs.rm(workspaceRoot, { recursive: true, force: true });
   }
 });
+
+test('allows dispatch when usage_limit_check_command returns unknown', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-check-unknown-workspace-'));
+  const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, "bash -c 'exit 2'");
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([33], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    assert.ok(wasDispatched(calls, 33), 'issue 33 should dispatch when usage check result is unknown');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('backs off GitHub polling after rate limit responses', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-github-rate-limit-workspace-'));
+  const workflowPath = await writeWorkflowWithUsageLimit(workspaceRoot, 'sleep 3600', [], 0);
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    calls.push({
+      url: String(input),
+      method: init?.method ?? 'GET',
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return new Response(JSON.stringify({ message: 'API rate limit exceeded for user ID 123' }), {
+      status: 403,
+      statusText: 'Forbidden',
+      headers: {
+        'content-type': 'application/json',
+        'x-ratelimit-remaining': '0',
+        'x-ratelimit-reset': String(Math.floor((Date.now() + 60_000) / 1000)),
+      },
+    });
+  };
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    const afterFirstTick = calls.length;
+    assert.ok(afterFirstTick > 0, 'first tick should hit GitHub and see the rate limit');
+
+    await orchestrator.tickOnce();
+    assert.equal(calls.length, afterFirstTick, 'second tick should skip GitHub while rate limit backoff is active');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});

@@ -93,6 +93,22 @@ export interface PullRequestRef {
   merge_state_status: string | null;
 }
 
+export class GithubRateLimitError extends SymphonyRuntimeError {
+  override name = 'GithubRateLimitError';
+  readonly resetAtMs: number | null;
+  readonly retryAfterMs: number | null;
+
+  constructor(message: string, opts: { resetAtMs?: number | null; retryAfterMs?: number | null } = {}) {
+    super(message);
+    this.resetAtMs = opts.resetAtMs ?? null;
+    this.retryAfterMs = opts.retryAfterMs ?? null;
+  }
+}
+
+export function isGithubRateLimitError(err: unknown): err is GithubRateLimitError {
+  return err instanceof GithubRateLimitError;
+}
+
 function normalizeLabelName(label: GithubLabel): string | null {
   if (typeof label === 'string') return label.trim().toLowerCase();
   if (label && typeof label.name === 'string') return label.name.trim().toLowerCase();
@@ -247,6 +263,7 @@ function parseLinkHeader(linkHeader: string | null): Map<string, string> {
 export class GithubIssueTrackerClient implements IssueTrackerClient {
   private tracker: GithubTrackerConfig;
   private readyForAgentLabeledAtCache = new Map<string, { updated_at: string | null; ready_for_agent_labeled_at: string | null }>();
+  private issueByNumberCache = new Map<string, Promise<GithubIssuePayload | null>>();
 
   constructor(tracker: GithubTrackerConfig) {
     this.tracker = tracker;
@@ -659,11 +676,24 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
   }
 
   private async fetchIssueByNumberInRepo(owner: string, repo: string, number: number): Promise<GithubIssuePayload | null> {
-    const url = new URL(`/repos/${owner}/${repo}/issues/${number}`, this.tracker.api_base_url);
-    const { data } = await this.fetchJson(url.toString(), { allowNotFound: true });
-    if (data === null) return null;
-    if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub issue response to be an object');
-    return data as GithubIssuePayload;
+    const key = `${owner}/${repo}#${number}`;
+    const cached = this.issueByNumberCache.get(key);
+    if (cached) return cached;
+
+    const promise = (async () => {
+      const url = new URL(`/repos/${owner}/${repo}/issues/${number}`, this.tracker.api_base_url);
+      const { data } = await this.fetchJson(url.toString(), { allowNotFound: true });
+      if (data === null) return null;
+      if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub issue response to be an object');
+      return data as GithubIssuePayload;
+    })();
+    this.issueByNumberCache.set(key, promise);
+    try {
+      return await promise;
+    } catch (err) {
+      this.issueByNumberCache.delete(key);
+      throw err;
+    }
   }
 
   private async fetchJson(
@@ -690,6 +720,12 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
       if (opts.allowNoContent && res.status === 204) return { data: null, link: null };
       if (!res.ok) {
         const bodyText = await res.text().catch(() => '');
+        if (isRateLimitResponse(res, bodyText)) {
+          throw new GithubRateLimitError(`GitHub request rate limited ${res.status} ${res.statusText}: ${bodyText.slice(0, 300)}`, {
+            resetAtMs: parseRateLimitResetMs(res.headers.get('x-ratelimit-reset')),
+            retryAfterMs: parseRetryAfterMs(res.headers.get('retry-after')),
+          });
+        }
         throw new SymphonyRuntimeError(`GitHub request failed ${res.status} ${res.statusText}: ${bodyText.slice(0, 300)}`);
       }
       const link = res.headers.get('link');
@@ -706,6 +742,30 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
       clearTimeout(timeout);
     }
   }
+}
+
+function isRateLimitResponse(res: Response, bodyText: string): boolean {
+  if (res.status === 429) return true;
+  if (res.status !== 403) return false;
+  const remaining = res.headers.get('x-ratelimit-remaining');
+  if (remaining === '0') return true;
+  return /rate limit exceeded|secondary rate limit|abuse detection/i.test(bodyText);
+}
+
+function parseRateLimitResetMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return seconds * 1000;
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(value);
+  if (!Number.isFinite(dateMs)) return null;
+  return Math.max(0, dateMs - Date.now());
 }
 
 function normalizeGithubCommentPayload(payload: GithubCommentPayload): IssueComment {

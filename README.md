@@ -179,6 +179,8 @@ Issues labeled `task:spec` or `planning` run in planning-only mode regardless of
 - `symphony.config.yml` only coordinates repos. Each repo still owns its own `WORKFLOW.md`, labels, hooks, prompt, workspace root, and agent commands.
 - `--workflow` is resolved by searching up parent directories when omitted, or can be passed explicitly as a relative path from the Symphony repo.
 - If `tracker.token` resolves to null, Symphony will try `gh auth token` and use that token (and set `GITHUB_TOKEN` for hooks/agent subprocesses for this run).
+- GitHub API rate-limit responses pause repo polling until GitHub's reset/retry window instead of continuing to fan out failed issue fetches.
+- `usage_limit_check_command` is optional and provider-specific: exit `0` allows dispatch, exit `1` blocks dispatch for that provider group, and exit `2` means "unknown" so Symphony logs the check result but does not block. Command errors/timeouts are also treated as unknown. GitHub auth cannot report OpenAI/Anthropic usage; use provider CLIs, local auth, or provider API keys inside the check command when you want proactive model-provider quota checks.
 - If a workspace exists but is missing `.git`, Symphony will clear the workspace contents and re-run `hooks.after_create` (to recover from interrupted runs).
 - Hook scripts (`hooks.after_create`, `hooks.before_run`, `hooks.after_run`) are rendered as Liquid templates with `issue.*` available.
 - Agent commands are rendered as Liquid templates with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` / `symphony.agent_provider` / `symphony.agent_thread_id` available.

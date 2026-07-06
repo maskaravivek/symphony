@@ -1,6 +1,6 @@
 import type { Issue } from '../domain/issue.js';
 import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
-import { GithubIssueTrackerClient, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
+import { GithubIssueTrackerClient, isGithubRateLimitError, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
@@ -28,6 +28,7 @@ interface DispatchCapacity {
 }
 
 type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity' | 'usage_limit';
+type UsageLimitCheckResult = 'allowed' | 'blocked' | 'unknown';
 
 export interface OrchestratorOptions {
   workflowPath: string;
@@ -279,6 +280,7 @@ export class Orchestrator {
   private lastConflictScanAtMs = 0;
   private providerUsageLimitBackoffUntil = new Map<string, number>();
   private providerUsageLimitCheckBlocked = new Set<string>();
+  private githubRateLimitBackoffUntilMs = 0;
 
   private stopped = false;
 
@@ -331,38 +333,78 @@ export class Orchestrator {
     if (!loaded) return;
     const { config } = loaded;
 
+    if (this.isGithubRateLimitBackoffActive(config)) return;
+
     const trackerClient = new GithubIssueTrackerClient(config.tracker);
     const workspaceManager = new WorkspaceManager(config.workspace);
 
-    await this.reconcileRunning(config, trackerClient, workspaceManager);
-    await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
-    await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
-    await this.refreshProviderUsageLimitChecks(config);
-    const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
-    await this.scanOpenPullRequestsForConflicts(config, trackerClient);
-    await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
-    await this.dispatchPullRequestReviews(config, trackerClient, workspaceManager, capacity);
-
-    let candidates: Issue[];
     try {
-      candidates = await trackerClient.fetchCandidateIssues();
+      await this.reconcileRunning(config, trackerClient, workspaceManager);
+      await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
+      await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
+      await this.refreshProviderUsageLimitChecks(config);
+      const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
+      await this.scanOpenPullRequestsForConflicts(config, trackerClient);
+      await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
+      await this.dispatchPullRequestReviews(config, trackerClient, workspaceManager, capacity);
+
+      let candidates: Issue[];
+      try {
+        candidates = await trackerClient.fetchCandidateIssues();
+      } catch (err) {
+        if (this.handleGithubRateLimit(config, err, 'github_candidate_fetch_rate_limited')) return;
+        log('error', 'github_candidate_fetch_failed', {
+          repo_id: this.repoId ?? undefined,
+          tracker_kind: config.tracker.kind,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: 'github_candidate_fetch_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+
+      const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
+      const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
+
+      await this.dispatchReadyRetries(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
+      await this.dispatchNewIssues(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
     } catch (err) {
-      log('error', 'github_candidate_fetch_failed', {
-        repo_id: this.repoId ?? undefined,
-        tracker_kind: config.tracker.kind,
-        owner: config.tracker.owner,
-        repo: config.tracker.repo,
-        event: 'github_candidate_fetch_failed',
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
+      if (this.handleGithubRateLimit(config, err, 'github_rate_limited')) return;
+      throw err;
     }
+  }
 
-    const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
-    const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
+  private isGithubRateLimitBackoffActive(config: WorkflowConfig): boolean {
+    const now = nowMs();
+    if (now >= this.githubRateLimitBackoffUntilMs) return false;
+    log('warn', 'github_rate_limit_backoff_active', {
+      repo_id: this.repoId ?? undefined,
+      tracker_kind: config.tracker.kind,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      event: 'github_rate_limit_backoff_active',
+      retry_in_ms: this.githubRateLimitBackoffUntilMs - now,
+    });
+    return true;
+  }
 
-    await this.dispatchReadyRetries(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
-    await this.dispatchNewIssues(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
+  private handleGithubRateLimit(config: WorkflowConfig, err: unknown, event: string): boolean {
+    if (!isGithubRateLimitError(err)) return false;
+    const now = nowMs();
+    const fallbackMs = Math.max(config.polling.interval_ms, 60_000);
+    const until = err.resetAtMs ?? (err.retryAfterMs !== null ? now + err.retryAfterMs : now + fallbackMs);
+    this.githubRateLimitBackoffUntilMs = Math.max(this.githubRateLimitBackoffUntilMs, until);
+    log('warn', event, {
+      repo_id: this.repoId ?? undefined,
+      tracker_kind: config.tracker.kind,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      event,
+      retry_in_ms: Math.max(0, this.githubRateLimitBackoffUntilMs - now),
+      error: err.message,
+    });
+    return true;
   }
 
   private async loadWorkflowSafe(): Promise<LoadedWorkflow | null> {
@@ -507,6 +549,7 @@ export class Orchestrator {
     try {
       issues = await tracker.fetchIssuesByStates(config.tracker.active_states);
     } catch (err) {
+      if (isGithubRateLimitError(err)) throw err;
       log('error', 'orphaned_claim_reconcile_failed', {
         repo_id: this.repoId ?? undefined,
         tracker_kind: config.tracker.kind,
@@ -597,6 +640,7 @@ export class Orchestrator {
       try {
         issue = await tracker.fetchIssueByNumber(state.issue_number);
       } catch (err) {
+        if (isGithubRateLimitError(err)) throw err;
         log('error', 'terminal_workspace_issue_fetch_failed', {
           repo_id: this.repoId ?? undefined,
           tracker_kind: config.tracker.kind,
@@ -652,6 +696,7 @@ export class Orchestrator {
     try {
       prs = await tracker.listOpenPullRequests();
     } catch (err) {
+      if (isGithubRateLimitError(err)) throw err;
       log('error', 'pr_conflict_scan_failed', {
         repo_id: this.repoId ?? undefined,
         tracker_kind: config.tracker.kind,
@@ -776,6 +821,7 @@ export class Orchestrator {
     try {
       candidates = await tracker.fetchCandidatePullRequestIssues();
     } catch (err) {
+      if (isGithubRateLimitError(err)) throw err;
       log('error', 'pr_review_candidate_fetch_failed', {
         repo_id: this.repoId ?? undefined,
         tracker_kind: config.tracker.kind,
@@ -842,6 +888,7 @@ export class Orchestrator {
         epicParentIds.add(issue.id);
         await this.coordinateEpic(config, tracker, tree);
       } catch (err) {
+        if (isGithubRateLimitError(err)) throw err;
         log('error', 'epic_coordination_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
           event: 'epic_coordination_failed',
@@ -2016,9 +2063,9 @@ ${runContext}`;
       providers.map(async (provider) => {
         const command = provider.usage_limit_check_command!;
         const limitKey = providerLimitKey(provider);
-        const blocked = await new Promise<boolean>((resolve) => {
+        const result = await new Promise<UsageLimitCheckResult>((resolve) => {
           let settled = false;
-          const finalize = (value: boolean) => {
+          const finalize = (value: UsageLimitCheckResult) => {
             if (settled) return;
             settled = true;
             resolve(value);
@@ -2039,7 +2086,7 @@ ${runContext}`;
               agent_provider_group: limitKey,
               check_command: command,
             });
-            finalize(true);
+            finalize('unknown');
           }, 30_000);
           timeout.unref();
           child.on('error', (err) => {
@@ -2052,14 +2099,25 @@ ${runContext}`;
               check_command: command,
               error: err.message,
             });
-            finalize(true);
+            finalize('unknown');
           });
           child.on('exit', (code) => {
             clearTimeout(timeout);
-            finalize(code !== 0);
+            if (code === 0) finalize('allowed');
+            else if (code === 2) finalize('unknown');
+            else finalize('blocked');
           });
         });
-        if (blocked) {
+        if (result === 'unknown') {
+          log('warn', 'provider_usage_limit_check_unknown', {
+            repo_id: this.repoId ?? undefined,
+            event: 'provider_usage_limit_check_unknown',
+            agent_provider: provider.id,
+            agent_provider_group: limitKey,
+            check_command: command,
+          });
+        }
+        if (result === 'blocked') {
           this.providerUsageLimitCheckBlocked.add(limitKey);
           log('warn', 'provider_usage_limit_check_blocked', {
             repo_id: this.repoId ?? undefined,
