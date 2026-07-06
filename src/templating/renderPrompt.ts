@@ -13,8 +13,12 @@ engine.registerFilter('join', (input: unknown, sep: unknown) => {
   return input.join(separator);
 });
 
-export async function renderPrompt(template: string, issue: Issue): Promise<string> {
-  return renderTemplate(template, { issue });
+export async function renderPrompt(
+  template: string,
+  issue: Issue,
+  extraContext: Record<string, unknown> = {},
+): Promise<string> {
+  return renderTemplate(template, { issue, ...extraContext });
 }
 
 export async function renderTemplate(template: string, context: Record<string, unknown>): Promise<string> {

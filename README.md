@@ -77,10 +77,20 @@ tracker:
     relationship_source: native_subissues
     auto_label_children: true
     parent_mode: coordinator_only
+    execution_mode: independent
     max_depth: 8
 ```
 
 When a `ready-for-agent` issue has native sub-issues, Symphony treats it as a coordinator epic instead of an implementation issue. It does not create a parent workspace or run Codex on the parent. It adds `ready-for-agent` to eligible open leaf sub-issues, updates a parent epic status comment, and marks the parent `ready-for-human` once all descendants are terminal.
+
+`execution_mode: independent` keeps the current behavior: each eligible leaf issue runs as its own branch and PR from the repo's normal base branch. `execution_mode: stacked` runs same-repo leaf issues one at a time in native sub-issue order, passes the predecessor branch/thread into the workflow, and is intended for separate stacked PRs rather than one shared PR.
+
+The workflow value is only the default. A parent epic can override it with labels:
+
+- `epic:stacked`: force stacked execution for that epic
+- `epic:independent`: force independent execution for that epic
+
+Only the parent epic label is consulted; child labels do not change execution mode.
 
 ## Priority labels
 

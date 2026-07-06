@@ -111,6 +111,10 @@ function normalizeEpicConfig(value: unknown): WorkflowConfig['tracker']['epics']
   if (parentMode !== 'coordinator_only') {
     throw new SymphonyConfigError('tracker.epics.parent_mode must be coordinator_only');
   }
+  const executionMode = asString(raw.execution_mode, 'tracker.epics.execution_mode') ?? 'independent';
+  if (executionMode !== 'independent' && executionMode !== 'stacked') {
+    throw new SymphonyConfigError('tracker.epics.execution_mode must be independent or stacked');
+  }
   const maxDepth = asNumber(raw.max_depth, 'tracker.epics.max_depth') ?? 8;
   if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 8) {
     throw new SymphonyConfigError('tracker.epics.max_depth must be an integer between 1 and 8');
@@ -121,6 +125,7 @@ function normalizeEpicConfig(value: unknown): WorkflowConfig['tracker']['epics']
     relationship_source: relationshipSource,
     auto_label_children: autoLabelChildren,
     parent_mode: parentMode,
+    execution_mode: executionMode,
     max_depth: maxDepth,
   };
 }

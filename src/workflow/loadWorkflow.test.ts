@@ -107,6 +107,7 @@ tracker:
     relationship_source: native_subissues
     auto_label_children: true
     parent_mode: coordinator_only
+    execution_mode: stacked
     max_depth: 4
 codex:
   command: codex exec -
@@ -118,6 +119,7 @@ codex:
     relationship_source: 'native_subissues',
     auto_label_children: true,
     parent_mode: 'coordinator_only',
+    execution_mode: 'stacked',
     max_depth: 4,
   });
 });
@@ -139,8 +141,26 @@ codex:
     relationship_source: 'native_subissues',
     auto_label_children: true,
     parent_mode: 'coordinator_only',
+    execution_mode: 'independent',
     max_depth: 8,
   });
+});
+
+test('rejects unsupported epic execution mode', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+  epics:
+    enabled: true
+    execution_mode: pipeline
+codex:
+  command: codex exec -
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /tracker.epics.execution_mode must be independent or stacked/);
 });
 
 test('creates a default codex agent provider from legacy codex config', async () => {

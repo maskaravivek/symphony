@@ -1,5 +1,5 @@
 import type { Issue } from '../domain/issue.js';
-import type { EpicTreeNode } from '../domain/epic.js';
+import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
 import { GithubIssueTrackerClient, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
@@ -9,7 +9,7 @@ import { log, type LogFields } from '../utils/log.js';
 import { sleep } from '../utils/sleep.js';
 import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { runHookScript } from '../workspace/hooks.js';
-import { WorkspaceManager } from '../workspace/workspaceManager.js';
+import { WorkspaceManager, workspacePathForIssue } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
@@ -81,6 +81,25 @@ interface RunningSession {
   done: Promise<void> | null;
 }
 
+interface StackContext {
+  root_issue_identifier: string;
+  root_issue_number: number | null;
+  predecessor_issue_identifier: string | null;
+  predecessor_issue_number: number | null;
+  base_branch: string | null;
+  reusable_thread_id: string | null;
+  predecessor_last_message: string | null;
+  position: number;
+  total: number;
+}
+
+interface EpicStackPlanEntry {
+  can_queue: boolean;
+  skipped_reason: string | null;
+}
+
+type EpicExecutionMode = WorkflowConfig['tracker']['epics']['execution_mode'];
+
 const LABEL_READY = 'ready-for-agent';
 const LABEL_RUNNING = 'agent-running';
 const LABEL_INTERACTIVE = 'interactive';
@@ -88,6 +107,8 @@ const LABEL_NEEDS_INFO = 'needs-info';
 const LABEL_READY_FOR_HUMAN = 'ready-for-human';
 const LABEL_PLANNING = 'planning';
 const LABEL_TASK_SPEC = 'task:spec';
+const LABEL_EPIC_STACKED = 'epic:stacked';
+const LABEL_EPIC_INDEPENDENT = 'epic:independent';
 
 function nowMs(): number {
   return Date.now();
@@ -236,6 +257,16 @@ function collectEpicChildren(root: EpicTreeNode): Array<{ node: EpicTreeNode; de
   return out;
 }
 
+function resolveEpicExecutionMode(config: WorkflowConfig, epicIssue: Issue): EpicExecutionMode {
+  const labels = new Set(epicIssue.labels.map((label) => label.trim().toLowerCase()));
+  const wantsStacked = labels.has(LABEL_EPIC_STACKED);
+  const wantsIndependent = labels.has(LABEL_EPIC_INDEPENDENT);
+
+  if (wantsStacked && !wantsIndependent) return 'stacked';
+  if (wantsIndependent && !wantsStacked) return 'independent';
+  return config.tracker.epics.execution_mode;
+}
+
 export class Orchestrator {
   private workflowPath: string;
   private repoId: string | null;
@@ -330,8 +361,8 @@ export class Orchestrator {
     const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
     const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
 
-    await this.dispatchReadyRetries(config, eligibleCandidates, workspaceManager, capacity);
-    await this.dispatchNewIssues(config, eligibleCandidates, workspaceManager, capacity);
+    await this.dispatchReadyRetries(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
+    await this.dispatchNewIssues(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
   }
 
   private async loadWorkflowSafe(): Promise<LoadedWorkflow | null> {
@@ -826,13 +857,15 @@ export class Orchestrator {
     if (!issue.number) return;
 
     const descendants = collectEpicChildren(tree);
+    const executionMode = resolveEpicExecutionMode(config, issue);
+    const stackPlan = this.buildEpicStackPlan(config, tree, executionMode);
     const existingEpic = (await readEpicStates(config.workspace.root)).find(
       (state) => state.issue_id === issue.id || state.issue_identifier === issue.identifier,
     );
     const children: EpicChildState[] = [];
 
     for (const entry of descendants) {
-      children.push(await this.buildEpicChildState(config, entry.node, entry.depth));
+      children.push(await this.buildEpicChildState(config, entry.node, entry.depth, stackPlan.get(entry.node.issue.id) ?? null));
     }
 
     const terminalChildren = descendants.filter((entry) => isTerminalIssue(config, entry.node.issue)).length;
@@ -875,7 +908,36 @@ export class Orchestrator {
     await upsertEpicState(config.workspace.root, { ...state, status_comment_id: result.id, updated_at: new Date().toISOString() });
   }
 
-  private async buildEpicChildState(config: WorkflowConfig, node: EpicTreeNode, depth: number): Promise<EpicChildState> {
+  private buildEpicStackPlan(config: WorkflowConfig, tree: EpicTreeNode, executionMode: EpicExecutionMode): Map<string, EpicStackPlanEntry> {
+    const plan = new Map<string, EpicStackPlanEntry>();
+    if (executionMode !== 'stacked') return plan;
+
+    const orderedLeaves = leafEpicNodes(tree).filter((node) => node.issue.number && isSameTrackerRepo(config, node.issue));
+    let queueUnlocked = true;
+
+    for (const node of orderedLeaves) {
+      const issue = node.issue;
+      if (this.isStackStageComplete(config, issue)) {
+        plan.set(issue.id, { can_queue: false, skipped_reason: null });
+        continue;
+      }
+      if (queueUnlocked) {
+        plan.set(issue.id, { can_queue: true, skipped_reason: null });
+        queueUnlocked = false;
+        continue;
+      }
+      plan.set(issue.id, { can_queue: false, skipped_reason: 'stack_waiting_on_predecessor' });
+    }
+
+    return plan;
+  }
+
+  private async buildEpicChildState(
+    config: WorkflowConfig,
+    node: EpicTreeNode,
+    depth: number,
+    stackPlan: EpicStackPlanEntry | null,
+  ): Promise<EpicChildState> {
     const issue = node.issue;
     const leaf = node.children.length === 0;
     const labels = issue.labels;
@@ -894,6 +956,8 @@ export class Orchestrator {
       skippedReason = 'inactive_state';
     } else if (hasAnyLabel(labels, config.tracker.ignored_labels)) {
       skippedReason = 'ignored_label';
+    } else if (stackPlan && !stackPlan.can_queue) {
+      skippedReason = stackPlan.skipped_reason;
     } else if (labels.includes(LABEL_READY) || labels.includes(LABEL_RUNNING)) {
       queued = true;
     } else if (!config.tracker.epics.auto_label_children) {
@@ -930,6 +994,7 @@ export class Orchestrator {
 
   private async dispatchReadyRetries(
     config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
     candidates: Issue[],
     workspaceManager: WorkspaceManager,
     capacity: DispatchCapacity,
@@ -957,8 +1022,10 @@ export class Orchestrator {
       const blocked = this.dispatchBlockReason(config, candidate, provider, capacity);
       if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
       if (blocked === 'provider_capacity' || blocked === 'usage_limit') continue;
+      const stackContext = await this.resolveStackContext(config, tracker, candidate, provider.id);
+      if (stackContext?.blocked_reason) continue;
       try {
-        await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt, provider });
+        await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt, provider, stackContext: stackContext?.context ?? null });
         if (capacity.remaining !== null) capacity.remaining -= 1;
       } catch (err) {
         log('error', 'issue_dispatch_failed', {
@@ -974,6 +1041,7 @@ export class Orchestrator {
 
   private async dispatchNewIssues(
     config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
     candidates: Issue[],
     workspaceManager: WorkspaceManager,
     capacity: DispatchCapacity,
@@ -984,8 +1052,10 @@ export class Orchestrator {
       if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
       if (blocked === 'provider_capacity' || blocked === 'usage_limit') continue;
       if (this.retries.has(issue.id)) continue;
+      const stackContext = await this.resolveStackContext(config, tracker, issue, provider.id);
+      if (stackContext?.blocked_reason) continue;
       try {
-        await this.dispatchIssue(config, issue, workspaceManager, { attempt: 1, provider });
+        await this.dispatchIssue(config, issue, workspaceManager, { attempt: 1, provider, stackContext: stackContext?.context ?? null });
         if (capacity.remaining !== null) capacity.remaining -= 1;
       } catch (err) {
         log('error', 'issue_dispatch_failed', {
@@ -1002,16 +1072,60 @@ export class Orchestrator {
     config: WorkflowConfig,
     issue: Issue,
     workspaceManager: WorkspaceManager,
-    opts: { attempt: number; mode?: AgentMode; provider?: AgentProviderConfig; conflict?: ConflictDispatchOptions; prReview?: PullRequestReviewDispatchOptions },
+    opts: {
+      attempt: number;
+      mode?: AgentMode;
+      provider?: AgentProviderConfig;
+      conflict?: ConflictDispatchOptions;
+      prReview?: PullRequestReviewDispatchOptions;
+      stackContext?: StackContext | null;
+    },
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
     const provider = opts.provider ?? selectAgentProvider(config, issue);
+    const stackContext = opts.stackContext ?? null;
     const issueFields = getIssueLogFields(config, issue, this.repoId);
 
     log('info', 'issue_claimed', { ...issueFields, event: 'issue_claimed', status: 'claimed', agent_provider: provider.id });
 
     const { workspace_path: workspacePath, is_new: isNew } = await workspaceManager.ensureWorkspace(issue);
     const workspaceFields = { ...issueFields, workspace_path: workspacePath };
+    const hookSymphonyContext = {
+      workspace_path: workspacePath,
+      agent_provider: provider.id,
+      agent_provider_group: provider.provider_group,
+      agent_provider_kind: provider.provider_kind,
+      stack_root_issue_identifier: stackContext?.root_issue_identifier ?? '',
+      stack_root_issue_number: stackContext?.root_issue_number ?? '',
+      stack_predecessor_issue_identifier: stackContext?.predecessor_issue_identifier ?? '',
+      stack_predecessor_issue_number: stackContext?.predecessor_issue_number ?? '',
+      stack_base_branch: stackContext?.base_branch ?? '',
+      stack_predecessor_thread_id: stackContext?.reusable_thread_id ?? '',
+      stack_position: stackContext?.position ?? '',
+      stack_total: stackContext?.total ?? '',
+    };
+    const hookEnv: Record<string, string> = {
+      SYMPHONY_REPO_ID: this.repoId ?? '',
+      SYMPHONY_TRACKER_OWNER: config.tracker.owner,
+      SYMPHONY_TRACKER_REPO: config.tracker.repo,
+      SYMPHONY_ISSUE_ID: issue.id,
+      SYMPHONY_ISSUE_NUMBER: String(issue.number ?? ''),
+      SYMPHONY_ISSUE_IDENTIFIER: issue.identifier,
+      SYMPHONY_ISSUE_URL: issue.url ?? '',
+      SYMPHONY_WORKSPACE_PATH: workspacePath,
+      SYMPHONY_BRANCH_NAME: issue.branch_name ?? '',
+      SYMPHONY_AGENT_PROVIDER: provider.id,
+      SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
+      SYMPHONY_AGENT_PROVIDER_KIND: provider.provider_kind,
+      SYMPHONY_STACK_ROOT_ISSUE_IDENTIFIER: stackContext?.root_issue_identifier ?? '',
+      SYMPHONY_STACK_ROOT_ISSUE_NUMBER: String(stackContext?.root_issue_number ?? ''),
+      SYMPHONY_STACK_PREDECESSOR_ISSUE_IDENTIFIER: stackContext?.predecessor_issue_identifier ?? '',
+      SYMPHONY_STACK_PREDECESSOR_ISSUE_NUMBER: String(stackContext?.predecessor_issue_number ?? ''),
+      SYMPHONY_STACK_BASE_BRANCH: stackContext?.base_branch ?? '',
+      SYMPHONY_STACK_PREDECESSOR_THREAD_ID: stackContext?.reusable_thread_id ?? '',
+      SYMPHONY_STACK_POSITION: String(stackContext?.position ?? ''),
+      SYMPHONY_STACK_TOTAL: String(stackContext?.total ?? ''),
+    };
 
     const hasGitRepo = await workspaceManager.hasGitRepo(workspacePath);
     const shouldRunAfterCreate = Boolean(config.hooks.after_create) && (isNew || !hasGitRepo);
@@ -1031,8 +1145,8 @@ export class Orchestrator {
       }
 
       log('info', 'workspace_after_create_hook_started', { ...workspaceFields, event: 'workspace_after_create_hook_started' });
-      const rendered = await renderTemplate(config.hooks.after_create, { issue });
-      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms);
+      const rendered = await renderTemplate(config.hooks.after_create, { issue, symphony: hookSymphonyContext });
+      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, hookEnv);
       log('info', 'workspace_after_create_hook_completed', { ...workspaceFields, event: 'workspace_after_create_hook_completed' });
     }
 
@@ -1054,8 +1168,8 @@ export class Orchestrator {
 
     if (config.hooks.before_run && !isPausedResume) {
       log('info', 'workspace_before_run_hook_started', { ...workspaceFields, event: 'workspace_before_run_hook_started' });
-      const rendered = await renderTemplate(config.hooks.before_run, { issue });
-      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms);
+      const rendered = await renderTemplate(config.hooks.before_run, { issue, symphony: hookSymphonyContext });
+      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, hookEnv);
       log('info', 'workspace_before_run_hook_completed', { ...workspaceFields, event: 'workspace_before_run_hook_completed' });
     } else if (config.hooks.before_run && isPausedResume) {
       log('info', 'workspace_before_run_hook_skipped', {
@@ -1102,6 +1216,24 @@ export class Orchestrator {
       isPullRequestReview && opts.prReview
         ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- Commit changes to the existing PR branch and push back to origin.\n- Do not open a replacement PR.\n`
         : '';
+    const stackInstructions = stackContext ? this.formatStackInstructions(stackContext) : '';
+    const symphonyContext = {
+      prompt_path: '',
+      workspace_path: workspacePath,
+      agent_provider: provider.id,
+      agent_provider_group: provider.provider_group,
+      agent_provider_kind: provider.provider_kind,
+      agent_thread_id: '',
+      codex_thread_id: '',
+      stack_root_issue_identifier: stackContext?.root_issue_identifier ?? '',
+      stack_root_issue_number: stackContext?.root_issue_number ?? '',
+      stack_predecessor_issue_identifier: stackContext?.predecessor_issue_identifier ?? '',
+      stack_predecessor_issue_number: stackContext?.predecessor_issue_number ?? '',
+      stack_base_branch: stackContext?.base_branch ?? '',
+      stack_predecessor_thread_id: stackContext?.reusable_thread_id ?? '',
+      stack_position: stackContext?.position ?? '',
+      stack_total: stackContext?.total ?? '',
+    };
     const prompt = isConflictResolution && opts.conflict
       ? this.formatConflictResolutionPrompt(
           issue,
@@ -1109,7 +1241,7 @@ export class Orchestrator {
           conflictBriefPath ?? path.join(workspacePath, '.symphony', 'merge-conflict.md'),
           runContext.text,
         )
-      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue)}${runContext.text}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}`;
+      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue, { symphony: symphonyContext })}${runContext.text}${stackInstructions}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}`;
     const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
     const agentLogPath = resolveAgentLogPath(workspacePath, provider);
     await fs.mkdir(path.dirname(agentLogPath), { recursive: true });
@@ -1122,6 +1254,7 @@ export class Orchestrator {
         : provider.id === 'codex'
           ? existingState?.codex_thread_id ?? null
           : null;
+    if (!agentThreadId && codexCompatible) agentThreadId = stackContext?.reusable_thread_id ?? null;
     let codexThreadId = codexCompatible ? agentThreadId : null;
     const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isPullRequestReview ? 'pr-review' : isInteractiveHandoff ? 'interactive-handoff' : isPlanningRun ? 'planning' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
@@ -1130,33 +1263,17 @@ export class Orchestrator {
       : agentThreadId && provider.resume_command
         ? provider.resume_command
         : provider.command;
+    symphonyContext.prompt_path = promptPath;
+    symphonyContext.agent_thread_id = agentThreadId ?? '';
+    symphonyContext.codex_thread_id = codexThreadId ?? '';
     const renderedCommand = await renderTemplate(commandTemplate, {
       issue,
-      symphony: {
-        prompt_path: promptPath,
-        workspace_path: workspacePath,
-        agent_provider: provider.id,
-        agent_provider_group: provider.provider_group,
-        agent_provider_kind: provider.provider_kind,
-        agent_thread_id: agentThreadId ?? '',
-        codex_thread_id: codexThreadId ?? '',
-      },
+      symphony: symphonyContext,
     });
 
     const env: Record<string, string> = {
-      SYMPHONY_REPO_ID: this.repoId ?? '',
-      SYMPHONY_TRACKER_OWNER: config.tracker.owner,
-      SYMPHONY_TRACKER_REPO: config.tracker.repo,
-      SYMPHONY_ISSUE_ID: issue.id,
-      SYMPHONY_ISSUE_NUMBER: String(issue.number ?? ''),
-      SYMPHONY_ISSUE_IDENTIFIER: issue.identifier,
-      SYMPHONY_ISSUE_URL: issue.url ?? '',
-      SYMPHONY_WORKSPACE_PATH: workspacePath,
+      ...hookEnv,
       SYMPHONY_PROMPT_PATH: promptPath,
-      SYMPHONY_BRANCH_NAME: issue.branch_name ?? '',
-      SYMPHONY_AGENT_PROVIDER: provider.id,
-      SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
-      SYMPHONY_AGENT_PROVIDER_KIND: provider.provider_kind,
       SYMPHONY_AGENT_THREAD_ID: agentThreadId ?? '',
       SYMPHONY_CODEX_THREAD_ID: codexThreadId ?? '',
     };
@@ -1392,8 +1509,8 @@ export class Orchestrator {
           if (config.hooks.after_run) {
             log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started' });
             try {
-              const rendered = await renderTemplate(config.hooks.after_run, { issue });
-              await runHookScript(rendered, workspacePath, config.hooks.timeout_ms);
+              const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: hookSymphonyContext });
+              await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, env);
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed' });
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
@@ -1596,6 +1713,120 @@ Rules:
 - If a product or code-ownership decision is needed, use SYMPHONY_PAUSE and list the conflicted files.
 
 ${runContext}`;
+  }
+
+  private formatStackInstructions(stack: StackContext): string {
+    const lines = [
+      '',
+      '---',
+      '',
+      '## Stacked Epic Context',
+      '',
+      `This issue is step ${stack.position} of ${stack.total} in the native sub-issue stack rooted at ${stack.root_issue_identifier}.`,
+      '- Keep this issue in its own commit(s) and its own PR.',
+      '- Do not fold predecessor issue scope into this issue.',
+    ];
+
+    if (stack.base_branch) {
+      lines.push(`- Open this issue's PR against \`${stack.base_branch}\` instead of \`main\`.`);
+    }
+    if (stack.predecessor_issue_identifier) {
+      lines.push(`- The immediate predecessor issue is ${stack.predecessor_issue_identifier}. Reuse that context, but keep the PR separate.`);
+    }
+    if (stack.predecessor_last_message) {
+      lines.push('', 'Previous stack step final message:', '```text', stack.predecessor_last_message.trim(), '```');
+    }
+
+    return `${lines.join('\n')}\n`;
+  }
+
+  private isStackStageComplete(config: WorkflowConfig, issue: Issue): boolean {
+    return isTerminalIssue(config, issue) || issue.labels.includes(LABEL_READY_FOR_HUMAN);
+  }
+
+  private async findEpicRootIssue(
+    tracker: GithubIssueTrackerClient,
+    issue: Issue,
+    maxDepth: number,
+  ): Promise<Issue | null> {
+    if (!issue.number) return null;
+    let current: Issue | null = issue;
+    let root: Issue | null = null;
+
+    for (let depth = 0; depth < maxDepth && current?.number; depth += 1) {
+      const parent: Issue | null = await tracker.getParentIssue(current.number).catch(() => null);
+      if (!parent) break;
+      root = parent;
+      current = parent;
+    }
+
+    return root;
+  }
+
+  private async readRunStateForIssue(config: WorkflowConfig, issue: Issue): Promise<RunState | null> {
+    const workspacePath = workspacePathForIssue(config.workspace.root, issue);
+    return readRunState(workspacePath);
+  }
+
+  private async readTextFile(pathname: string | null | undefined, maxChars: number): Promise<string | null> {
+    if (!pathname) return null;
+    try {
+      const raw = await fs.readFile(pathname, 'utf8');
+      const text = raw.slice(-maxChars).trim();
+      return text || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async resolveStackContext(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    issue: Issue,
+    providerId: string,
+  ): Promise<{ context: StackContext | null; blocked_reason: string | null } | null> {
+    if (!issue.number) return null;
+
+    const root = await this.findEpicRootIssue(tracker, issue, config.tracker.epics.max_depth);
+    if (!root) return null;
+    if (resolveEpicExecutionMode(config, root) !== 'stacked') return null;
+
+    const tree = await tracker.buildEpicTree(root, config.tracker.epics.max_depth);
+    const orderedLeaves = leafEpicNodes(tree).filter((node) => node.issue.number && isSameTrackerRepo(config, node.issue));
+    const position = orderedLeaves.findIndex((node) => node.issue.id === issue.id || node.issue.number === issue.number);
+    if (position === -1) return null;
+
+    for (let index = 0; index < position; index += 1) {
+      if (!this.isStackStageComplete(config, orderedLeaves[index]!.issue)) {
+        return { context: null, blocked_reason: 'stack_waiting_on_predecessor' };
+      }
+    }
+
+    const predecessorIssue = position > 0 ? orderedLeaves[position - 1]!.issue : null;
+    const predecessorState = predecessorIssue ? await this.readRunStateForIssue(config, predecessorIssue) : null;
+    const reusableThreadId =
+      predecessorState && predecessorState.agent_provider === providerId
+        ? predecessorState.agent_thread_id ?? predecessorState.codex_thread_id ?? null
+        : null;
+    const predecessorLastMessage = await this.readTextFile(predecessorState?.last_message_path, 8_000);
+
+    return {
+      blocked_reason: null,
+      context: {
+        root_issue_identifier: root.identifier,
+        root_issue_number: root.number ?? null,
+        predecessor_issue_identifier: predecessorIssue?.identifier ?? null,
+        predecessor_issue_number: predecessorIssue?.number ?? null,
+        base_branch:
+          predecessorIssue && predecessorIssue.number && !isTerminalIssue(config, predecessorIssue)
+            ? predecessorIssue.branch_name ?? null
+            : null,
+        reusable_thread_id: reusableThreadId,
+        predecessor_last_message: predecessorLastMessage,
+        position: position + 1,
+        total: orderedLeaves.length,
+      },
+    };
   }
 
   private async findDirtyPullRequestForIssue(config: WorkflowConfig, issue: Issue): Promise<PullRequestRef | null> {

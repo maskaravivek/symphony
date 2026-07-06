@@ -26,6 +26,7 @@ function trackerConfig(): GithubTrackerConfig {
       relationship_source: 'native_subissues',
       auto_label_children: true,
       parent_mode: 'coordinator_only',
+      execution_mode: 'independent',
       max_depth: 8,
     },
     page_size: 50,

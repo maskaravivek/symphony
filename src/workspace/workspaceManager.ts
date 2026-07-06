@@ -22,6 +22,13 @@ function deriveWorkspaceKey(issue: Issue): string {
   return sanitizeWorkspaceKey(issue.identifier);
 }
 
+export function workspacePathForIssue(workspaceRoot: string, issue: Issue): string {
+  const workspaceKey = deriveWorkspaceKey(issue);
+  const workspacePath = path.join(workspaceRoot, workspaceKey);
+  assertPathWithinRoot(workspaceRoot, workspacePath);
+  return workspacePath;
+}
+
 export class WorkspaceManager {
   private config: WorkspaceConfig;
 
@@ -30,9 +37,7 @@ export class WorkspaceManager {
   }
 
   async ensureWorkspace(issue: Issue): Promise<WorkspaceInfo> {
-    const workspaceKey = deriveWorkspaceKey(issue);
-    const workspacePath = path.join(this.config.root, workspaceKey);
-    assertPathWithinRoot(this.config.root, workspacePath);
+    const workspacePath = workspacePathForIssue(this.config.root, issue);
 
     let isNew = false;
     try {

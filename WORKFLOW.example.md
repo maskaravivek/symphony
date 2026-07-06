@@ -23,6 +23,7 @@ tracker:
     relationship_source: native_subissues
     auto_label_children: true
     parent_mode: coordinator_only
+    execution_mode: independent
     max_depth: 8
   priority_labels:
     "priority:p0": 1
@@ -72,8 +73,9 @@ hooks:
     set -euo pipefail
 
     git fetch origin
-    git checkout main
-    git reset --hard origin/main
+    base_branch="${SYMPHONY_STACK_BASE_BRANCH:-main}"
+    git checkout -B "$base_branch" "origin/$base_branch"
+    git reset --hard "origin/$base_branch"
     git clean -fdx -e .symphony/ -e node_modules/
 
     mkdir -p .git/info
@@ -126,7 +128,8 @@ hooks:
   after_run: |
     set -euo pipefail
 
-    if [ -n "$(git status --porcelain)" ] && [ "$(git rev-list --count origin/main..HEAD)" -eq 0 ]; then
+    base_branch="${SYMPHONY_STACK_BASE_BRANCH:-main}"
+    if [ -n "$(git status --porcelain)" ] && [ "$(git rev-list --count "origin/$base_branch"..HEAD)" -eq 0 ]; then
       echo "WARNING: workspace has uncommitted changes but no commits on branch."
     fi
 
@@ -244,6 +247,7 @@ Description:
 Instructions:
 
 1. Understand the issue and inspect the repository.
+   - If this issue belongs to a native sub-issue epic, check the parent epic labels for execution hints like `epic:stacked` or `epic:independent`.
 2. Read the repo's agent instructions and relevant local docs before editing.
    - For QA, maturity, or follow-up issue work, read `docs/agents/product-priorities.md`, `docs/agents/issue-tracker.md`, and the relevant QA/stewardship docs.
 3. Make the smallest safe change that solves the issue.
@@ -254,6 +258,10 @@ Instructions:
 8. Push the branch to origin.
 9. Open or update a pull request:
    - PR title should match the issue title.
+   {% if symphony.stack_base_branch %}
+   - This issue is in a stacked epic. Open a separate PR against base branch `{{ symphony.stack_base_branch }}`, not `main`.
+   - Do not combine this issue with its predecessor issue.
+   {% endif %}
    - PR body MUST contain `Fixes #{{ issue.number }}` so GitHub auto-closes the issue after the PR is merged.
    - PR body should be comprehensive and include:
      - What changed

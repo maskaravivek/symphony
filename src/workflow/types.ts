@@ -3,6 +3,7 @@ export interface EpicTrackerConfig {
   relationship_source: 'native_subissues';
   auto_label_children: boolean;
   parent_mode: 'coordinator_only';
+  execution_mode: 'independent' | 'stacked';
   max_depth: number;
 }
 

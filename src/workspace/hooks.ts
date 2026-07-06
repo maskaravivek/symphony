@@ -2,13 +2,13 @@ import { spawn } from 'node:child_process';
 
 import { SymphonyRuntimeError } from '../utils/errors.js';
 
-export async function runHookScript(script: string, cwd: string, timeoutMs: number): Promise<void> {
+export async function runHookScript(script: string, cwd: string, timeoutMs: number, env: Record<string, string> = {}): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(script, {
       cwd,
       shell: true,
       stdio: 'inherit',
-      env: process.env,
+      env: { ...process.env, ...env },
       detached: true,
     });
 
