@@ -19,6 +19,7 @@ import { buildRunContext } from './runContext.js';
 import { formatPauseComment, parsePauseRequest } from './pauseProtocol.js';
 import { formatStatusComment, statusMarker } from './statusComment.js';
 import { epicStatusMarker, formatEpicStatusComment } from './epicStatusComment.js';
+import { acquireWorkflowLock, type WorkflowLock } from './workflowLock.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
@@ -80,6 +81,11 @@ interface RunningSession {
   cancelled_reason: string | null;
   cancel: (reason: string) => Promise<void>;
   done: Promise<void> | null;
+}
+
+interface LiveOrphanClaim {
+  issue_state: string;
+  agent_provider_group: string;
 }
 
 interface StackContext {
@@ -281,6 +287,9 @@ export class Orchestrator {
   private providerUsageLimitBackoffUntil = new Map<string, number>();
   private providerUsageLimitCheckBlocked = new Set<string>();
   private githubRateLimitBackoffUntilMs = 0;
+  private workflowLock: WorkflowLock | null = null;
+  private liveOrphanClaims = new Map<string, LiveOrphanClaim>();
+  private liveOrphanLogLastAtMs = new Map<string, number>();
 
   private stopped = false;
 
@@ -291,7 +300,7 @@ export class Orchestrator {
   }
 
   getRunningCount(): number {
-    return this.running.size;
+    return this.running.size + this.liveOrphanClaims.size;
   }
 
   getRepoId(): string | null {
@@ -316,6 +325,7 @@ export class Orchestrator {
         await s.done;
       }),
     );
+    await this.releaseWorkflowLock();
   }
 
   async runForever(): Promise<void> {
@@ -332,6 +342,8 @@ export class Orchestrator {
     const loaded = await this.loadWorkflowSafe();
     if (!loaded) return;
     const { config } = loaded;
+
+    if (!(await this.ensureWorkflowLock(config))) return;
 
     if (this.isGithubRateLimitBackoffActive(config)) return;
 
@@ -373,6 +385,54 @@ export class Orchestrator {
       if (this.handleGithubRateLimit(config, err, 'github_rate_limited')) return;
       throw err;
     }
+  }
+
+  private async ensureWorkflowLock(config: WorkflowConfig): Promise<boolean> {
+    if (this.workflowLock?.workspace_root === config.workspace.root) return true;
+    if (this.workflowLock) await this.releaseWorkflowLock();
+
+    const result = await acquireWorkflowLock({
+      workspaceRoot: config.workspace.root,
+      repoId: this.repoId,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      workflowPath: this.workflowPath,
+    });
+
+    if (result.acquired) {
+      this.workflowLock = result.lock;
+      log('info', 'workflow_lock_acquired', {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'workflow_lock_acquired',
+        workspace_root: config.workspace.root,
+        lock_path: result.lock.lock_path,
+        worker_pid: process.pid,
+      });
+      return true;
+    }
+
+    log('warn', 'workflow_lock_unavailable', {
+      repo_id: this.repoId ?? undefined,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      event: 'workflow_lock_unavailable',
+      workspace_root: config.workspace.root,
+      lock_path: result.lock_path,
+      owner_pid: result.owner?.pid,
+      owner_hostname: result.owner?.hostname,
+      owner_repo_id: result.owner?.repo_id ?? undefined,
+      owner_workflow_path: result.owner?.workflow_path,
+      owner_acquired_at: result.owner?.acquired_at,
+    });
+    return false;
+  }
+
+  private async releaseWorkflowLock(): Promise<void> {
+    const lock = this.workflowLock;
+    this.workflowLock = null;
+    await lock?.release();
   }
 
   private isGithubRateLimitBackoffActive(config: WorkflowConfig): boolean {
@@ -561,6 +621,8 @@ export class Orchestrator {
       return;
     }
 
+    this.liveOrphanClaims.clear();
+
     for (const issue of issues) {
       if (!issue.labels.includes(LABEL_RUNNING)) continue;
       if (this.running.has(issue.id)) continue;
@@ -572,12 +634,19 @@ export class Orchestrator {
       const workspacePath = fallbackWorkspacePath;
       const state = existingState ?? (await readRunState(workspacePath));
       if (state?.status === 'running' && isProcessAlive(state.worker_pid)) {
-        log('info', 'orphaned_claim_still_running', {
-          ...getIssueLogFields(config, issue, this.repoId),
-          workspace_path: workspacePath,
-          event: 'orphaned_claim_still_running',
-          worker_pid: state.worker_pid ?? undefined,
+        const provider = selectAgentProvider(config, issue);
+        this.liveOrphanClaims.set(issue.id, {
+          issue_state: issue.state,
+          agent_provider_group: state.agent_provider_group ?? providerLimitKey(provider),
         });
+        if (this.shouldLogLiveOrphanClaim(issue.id)) {
+          log('info', 'orphaned_claim_still_running', {
+            ...getIssueLogFields(config, issue, this.repoId),
+            workspace_path: workspacePath,
+            event: 'orphaned_claim_still_running',
+            worker_pid: state.worker_pid ?? undefined,
+          });
+        }
         continue;
       }
 
@@ -611,6 +680,14 @@ export class Orchestrator {
           : null,
       );
     }
+  }
+
+  private shouldLogLiveOrphanClaim(issueId: string): boolean {
+    const now = nowMs();
+    const last = this.liveOrphanLogLastAtMs.get(issueId);
+    if (last !== undefined && now - last < 5 * 60_000) return false;
+    this.liveOrphanLogLastAtMs.set(issueId, now);
+    return true;
   }
 
   private async sweepTerminalWorkspaces(
@@ -2188,13 +2265,14 @@ ${runContext}`;
   ): DispatchBlockReason | null {
     if (capacity.remaining !== null && capacity.remaining <= 0) return 'global_capacity';
     const maxConcurrentAgents = this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents;
-    if (this.running.size >= maxConcurrentAgents) return 'global_capacity';
+    if (this.getRunningCount() >= maxConcurrentAgents) return 'global_capacity';
     const byState = config.agent.max_concurrent_agents_by_state;
     if (byState) {
       const limit = byState[issue.state];
       if (typeof limit === 'number') {
         const runningInState = [...this.running.values()].filter((s) => s.issue_state === issue.state).length;
-        if (runningInState >= limit) return 'state_capacity';
+        const orphanedInState = [...this.liveOrphanClaims.values()].filter((s) => s.issue_state === issue.state).length;
+        if (runningInState + orphanedInState >= limit) return 'state_capacity';
       }
     }
     const limitKey = providerLimitKey(provider);
@@ -2203,7 +2281,8 @@ ${runContext}`;
     if (this.providerUsageLimitCheckBlocked.has(limitKey)) return 'usage_limit';
     if (provider.max_concurrent !== null) {
       const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider_group === limitKey).length;
-      if (runningForProvider >= provider.max_concurrent) return 'provider_capacity';
+      const orphanedForProvider = [...this.liveOrphanClaims.values()].filter((s) => s.agent_provider_group === limitKey).length;
+      if (runningForProvider + orphanedForProvider >= provider.max_concurrent) return 'provider_capacity';
     }
     return null;
   }

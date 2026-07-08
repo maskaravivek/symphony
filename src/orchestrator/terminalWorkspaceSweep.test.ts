@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { writeRunState, type RunState } from '../status/runState.js';
 import { Orchestrator } from './orchestrator.js';
+import { acquireWorkflowLock } from './workflowLock.js';
 
 function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(value), {
@@ -225,4 +226,87 @@ test('orphan reconciliation preserves live pooled workspaces', async () => {
   await assert.doesNotReject(fs.access(workspacePath));
   assert.equal(calls.some((call) => call.method === 'DELETE' && call.url.includes('/labels/agent-running')), false);
   assert.equal(calls.some((call) => call.method === 'POST' && call.url.endsWith('/labels')), false);
+});
+
+test('live orphaned workers consume dispatch capacity', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-orphan-capacity-workspace-'));
+  const workflowPath = await writeWorkflow(workspaceRoot);
+  await writeWorkspace(workspaceRoot, 'mangoappstudio_mdedit_42', {
+    status: 'running',
+    labels: ['agent-running'],
+    workflow_state: 'agent-running',
+    finished_at: null,
+    last_exit_code: null,
+    worker_pid: process.pid,
+  });
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&per_page=50') {
+      return jsonResponse([issuePayload(42, 'Live orphan', 'open', ['agent-running'])]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([issuePayload(43, 'Queued issue', 'open', ['ready-for-agent'])]);
+    }
+
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    assert.equal(orchestrator.getRunningCount(), 1);
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' &&
+        call.method === 'POST' &&
+        JSON.stringify(call.body) === JSON.stringify({ labels: ['agent-running'] }),
+    ),
+    false,
+  );
+});
+
+test('workflow lock prevents a duplicate orchestrator tick', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-duplicate-lock-workspace-'));
+  const workflowPath = await writeWorkflow(workspaceRoot);
+  const lock = await acquireWorkflowLock({
+    workspaceRoot,
+    repoId: null,
+    owner: 'mangoappstudio',
+    repo: 'mdedit',
+    workflowPath,
+  });
+  assert.equal(lock.acquired, true);
+
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error('duplicate orchestrator should not fetch');
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (lock.acquired) await lock.lock.release();
+  }
+
+  assert.equal(fetchCalls, 0);
 });
