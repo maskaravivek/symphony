@@ -136,6 +136,23 @@ function nowMs(): number {
   return Date.now();
 }
 
+function humanizeDurationMs(durationMs: number): string {
+  const roundedMs = Math.max(0, Math.round(durationMs));
+  const secondsTotal = Math.floor(roundedMs / 1000);
+  const days = Math.floor(secondsTotal / 86400);
+  const hours = Math.floor((secondsTotal % 86400) / 3600);
+  const minutes = Math.floor((secondsTotal % 3600) / 60);
+  const seconds = secondsTotal % 60;
+
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+
+  return parts.join(' ');
+}
+
 function hasAllLabels(labels: string[], required: string[]): boolean {
   const set = new Set(labels);
   return required.every((l) => set.has(l));
@@ -2223,6 +2240,8 @@ ${runContext}`;
         if (result.decision === 'blocked') {
           if (typeof result.resetsAtMs === 'number' && Number.isFinite(result.resetsAtMs) && result.resetsAtMs > now) {
             this.providerUsageLimitBackoffUntil.set(limitKey, result.resetsAtMs);
+            const resetInMs = result.resetsAtMs - now;
+            const resetDate = new Date(result.resetsAtMs);
             log('info', 'provider_usage_limit_check_backoff_set', {
               repo_id: this.repoId ?? undefined,
               event: 'provider_usage_limit_check_backoff_set',
@@ -2230,7 +2249,10 @@ ${runContext}`;
               agent_provider_group: limitKey,
               check_command: command,
               reset_at_ms: result.resetsAtMs,
-              reset_in_ms: result.resetsAtMs - now,
+              reset_in_ms: resetInMs,
+              reset_in: humanizeDurationMs(resetInMs),
+              reset_at: resetDate.toISOString(),
+              reset_at_local: resetDate.toLocaleString(),
             });
           }
           this.providerUsageLimitCheckBlocked.add(limitKey);
