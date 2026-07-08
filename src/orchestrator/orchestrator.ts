@@ -561,7 +561,7 @@ export class Orchestrator {
 
     if (result.acquired) {
       this.workflowLock = result.lock;
-      log('info', 'workflow_lock_acquired', {
+      log('debug', 'workflow_lock_acquired', {
         repo_id: this.repoId ?? undefined,
         owner: config.tracker.owner,
         repo: config.tracker.repo,

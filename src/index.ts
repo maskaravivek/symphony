@@ -241,11 +241,14 @@ async function main(): Promise<void> {
       const onStdinData = (chunk: Buffer | string) => {
         if (String(chunk).includes('\u0003')) void shutdown('CTRL_C', 130);
       };
+      const stdinWasRaw = process.stdin.isTTY && process.stdin.isRaw;
       const cleanupStdin = () => {
         process.stdin.off('data', onStdinData);
+        if (process.stdin.isTTY) process.stdin.setRawMode(stdinWasRaw);
         process.stdin.pause();
       };
       process.stdin.on('data', onStdinData);
+      if (process.stdin.isTTY) process.stdin.setRawMode(true);
       process.stdin.resume();
 
       if (options.once) {

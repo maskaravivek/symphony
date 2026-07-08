@@ -1,5 +1,6 @@
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type LogFormat = 'pretty' | 'json';
+type LogDetail = 'compact' | 'full';
 
 export interface LogFields {
   [key: string]: unknown;
@@ -41,6 +42,11 @@ function currentLogFormat(): LogFormat {
   return raw === 'json' ? 'json' : 'pretty';
 }
 
+function currentLogDetail(): LogDetail {
+  const raw = process.env.SYMPHONY_LOG_DETAIL?.trim().toLowerCase();
+  return raw === 'full' ? 'full' : 'compact';
+}
+
 function shouldUseColor(): boolean {
   if (process.env.NO_COLOR) return false;
   if (process.env.FORCE_COLOR && process.env.FORCE_COLOR !== '0') return true;
@@ -76,7 +82,8 @@ function truncate(value: string, maxLength: number): string {
 
 function formatFieldValue(key: string, value: unknown): string {
   const formatted = formatValue(value);
-  if (key === 'issue_title') return truncate(formatted, 72);
+  if (key === 'issue_title') return truncate(formatted, 60);
+  if (key === 'head_ref' || key === 'base_ref') return truncate(formatted, 56);
   return formatted;
 }
 
@@ -111,17 +118,29 @@ function fieldLabel(key: string): string {
   }
 }
 
-function shouldOmitField(key: string, fields: LogFields): boolean {
+function shouldOmitField(key: string, fields: LogFields, level: LogLevel, detail: LogDetail): boolean {
   if (key === 'event') return true;
   if (key === 'tracker_kind') return true;
   if (key === 'issue_id') return true;
   if (key === 'issue_url') return true;
   if (key === 'issue_number' && fields.issue_identifier) return true;
   if ((key === 'owner' || key === 'repo') && (fields.issue_identifier || fields.repo_id)) return true;
+  if (detail === 'compact') {
+    if (key === 'workspace_path') return true;
+    if (key === 'workspace_root') return true;
+    if (key === 'lock_path') return true;
+    if (key === 'worker_pid') return true;
+    if (key === 'session_id') return true;
+    if (key === 'owner_acquired_at') return true;
+    if (key === 'owner_hostname') return true;
+    if (key === 'owner_pid') return true;
+    if (key === 'owner_workflow_path') return true;
+    if (key === 'hook_log_path' && level === 'info') return true;
+  }
   return false;
 }
 
-function orderedFieldKeys(fields: LogFields): string[] {
+function orderedFieldKeys(fields: LogFields, level: LogLevel, detail: LogDetail): string[] {
   const preferred = [
     'repo_id',
     'issue_identifier',
@@ -142,11 +161,12 @@ function orderedFieldKeys(fields: LogFields): string[] {
     'config_path',
     'workflow_path',
   ];
-  const keys = Object.keys(fields).filter((key) => !shouldOmitField(key, fields) && fields[key] !== undefined);
+  const keys = Object.keys(fields).filter((key) => !shouldOmitField(key, fields, level, detail) && fields[key] !== undefined);
   return [...preferred.filter((key) => keys.includes(key)), ...keys.filter((key) => !preferred.includes(key)).sort()];
 }
 
 export function formatPrettyLogLine(level: LogLevel, message: string, fields: LogFields = {}, useColor = shouldUseColor()): string {
+  const detail = currentLogDetail();
   const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
   const prefix = [
     colorize(timestamp, COLOR.muted, useColor),
@@ -154,7 +174,7 @@ export function formatPrettyLogLine(level: LogLevel, message: string, fields: Lo
     humanizeMessage(message),
   ].join(' ');
 
-  const details = orderedFieldKeys(fields)
+  const details = orderedFieldKeys(fields, level, detail)
     .map((key) => {
       const value = formatFieldValue(key, fields[key]);
       if (!value) return null;

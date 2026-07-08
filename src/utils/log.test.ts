@@ -77,7 +77,7 @@ test('omits owner and repo when repo id is already displayed', () => {
   assert.doesNotMatch(line, / repo=mdedit .* repo=mdedit/);
 });
 
-test('truncates long issue titles and labels hook logs clearly', () => {
+test('truncates long issue titles and omits path-heavy info fields by default', () => {
   const line = formatPrettyLogLine(
     'info',
     'workspace_before_run_hook_started',
@@ -85,11 +85,59 @@ test('truncates long issue titles and labels hook logs clearly', () => {
       issue_identifier: 'mangoappstudio/mdedit#554',
       issue_title: 'A very long issue title that would otherwise make every terminal log line hard to scan during long-running Symphony sessions',
       hook_log_path: '/Users/example/workspace/.symphony/hooks/2026-07-08T12-00-00-000Z-before_run.log',
+      workspace_path: '/Users/example/workspace',
+      session_id: 'session-123',
     },
     false,
   );
 
   assert.match(line, /issue=mangoappstudio\/mdedit#554/);
-  assert.match(line, /title=A very long issue title that would otherwise make every terminal log \.\.\./);
+  assert.match(line, /title=A very long issue title that would otherwise make every .*\.\.\./);
+  assert.doesNotMatch(line, /hook_log=/);
+  assert.doesNotMatch(line, /workspace=/);
+  assert.doesNotMatch(line, /session_id=/);
+});
+
+test('keeps diagnostic hook log paths on errors', () => {
+  const line = formatPrettyLogLine(
+    'error',
+    'workspace_before_run_hook_failed',
+    {
+      issue_identifier: 'mangoappstudio/mdedit#554',
+      error: 'Hook exited with code 128',
+      hook_log_path: '/Users/example/workspace/.symphony/hooks/2026-07-08T12-00-00-000Z-before_run.log',
+    },
+    false,
+  );
+
+  assert.match(line, /error=Hook exited with code 128/);
   assert.match(line, /hook_log=\/Users\/example\/workspace\/\.symphony\/hooks\/2026-07-08T12-00-00-000Z-before_run\.log/);
+});
+
+test('shows path-heavy fields when full pretty detail is requested', () => {
+  const previous = process.env.SYMPHONY_LOG_DETAIL;
+  process.env.SYMPHONY_LOG_DETAIL = 'full';
+  try {
+    const line = formatPrettyLogLine(
+      'info',
+      'workspace_before_run_hook_started',
+      {
+        issue_identifier: 'mangoappstudio/mdedit#554',
+        hook_log_path: '/Users/example/workspace/.symphony/hooks/2026-07-08T12-00-00-000Z-before_run.log',
+        workspace_path: '/Users/example/workspace',
+        session_id: 'session-123',
+      },
+      false,
+    );
+
+    assert.match(line, /hook_log=\/Users\/example\/workspace\/\.symphony\/hooks\/2026-07-08T12-00-00-000Z-before_run\.log/);
+    assert.match(line, /workspace=\/Users\/example\/workspace/);
+    assert.match(line, /session_id=session-123/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.SYMPHONY_LOG_DETAIL;
+    } else {
+      process.env.SYMPHONY_LOG_DETAIL = previous;
+    }
+  }
 });
