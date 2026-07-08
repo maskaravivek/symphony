@@ -53,6 +53,14 @@ test('includes the hook diagnostic log path on failures', async () => {
   await assert.doesNotReject(() => fs.access(logPath));
 });
 
+test('runs hooks with closed stdin so terminal reads cannot suspend Symphony', async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-hook-stdin-'));
+
+  const result = await runHookScript("if read value; then echo unexpected:$value; exit 1; else echo stdin-closed; fi", cwd, 5_000);
+
+  assert.match(result.stdout, /stdin-closed/);
+});
+
 test('terminates hook subprocesses when aborted', async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-hook-abort-'));
   const logPath = path.join(cwd, '.symphony', 'hooks', 'abort.log');

@@ -116,7 +116,9 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
     const child = spawn(script, {
       cwd,
       shell: true,
-      stdio: ['inherit', 'pipe', 'pipe'],
+      // Hooks are non-interactive. Point stdin at /dev/null so a backgrounded
+      // Symphony process cannot be suspended by hook subprocesses reading TTY input.
+      stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...options.env },
       detached: true,
     });
