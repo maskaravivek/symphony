@@ -30,6 +30,13 @@ interface DispatchCapacity {
 
 type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity' | 'usage_limit';
 type UsageLimitCheckResult = 'allowed' | 'blocked' | 'unknown';
+type UsageLimitCommandResult = {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+const CODEXBAR_USAGE_LIMIT_THRESHOLD = 90;
 
 export interface OrchestratorOptions {
   workflowPath: string;
@@ -2189,51 +2196,7 @@ ${runContext}`;
       providers.map(async (provider) => {
         const command = provider.usage_limit_check_command!;
         const limitKey = providerLimitKey(provider);
-        const result = await new Promise<UsageLimitCheckResult>((resolve) => {
-          let settled = false;
-          const finalize = (value: UsageLimitCheckResult) => {
-            if (settled) return;
-            settled = true;
-            resolve(value);
-          };
-
-          const child = spawn(command, {
-            shell: true,
-            stdio: 'ignore',
-            env: process.env,
-          });
-          const timeout = setTimeout(() => {
-            // Process may have already exited by the time kill() is called; that is harmless.
-            try { child.kill('SIGTERM'); } catch { /* already exited */ }
-            log('warn', 'provider_usage_limit_check_timeout', {
-              repo_id: this.repoId ?? undefined,
-              event: 'provider_usage_limit_check_timeout',
-              agent_provider: provider.id,
-              agent_provider_group: limitKey,
-              check_command: command,
-            });
-            finalize('unknown');
-          }, 30_000);
-          timeout.unref();
-          child.on('error', (err) => {
-            clearTimeout(timeout);
-            log('warn', 'provider_usage_limit_check_error', {
-              repo_id: this.repoId ?? undefined,
-              event: 'provider_usage_limit_check_error',
-              agent_provider: provider.id,
-              agent_provider_group: limitKey,
-              check_command: command,
-              error: err.message,
-            });
-            finalize('unknown');
-          });
-          child.on('exit', (code) => {
-            clearTimeout(timeout);
-            if (code === 0) finalize('allowed');
-            else if (code === 2) finalize('unknown');
-            else finalize('blocked');
-          });
-        });
+        const result = await this.checkUsageLimitCommand(command, provider);
         if (result === 'unknown') {
           log('warn', 'provider_usage_limit_check_unknown', {
             repo_id: this.repoId ?? undefined,
@@ -2255,6 +2218,124 @@ ${runContext}`;
         }
       }),
     );
+  }
+
+  private async checkUsageLimitCommand(command: string, provider: AgentProviderConfig): Promise<UsageLimitCheckResult> {
+    const result = await this.runUsageLimitCommand(command, provider);
+
+    if (this.isCodexBarUsageCheckCommand(command)) {
+      const parsed = this.parseCodexBarUsageLimit(command, result.stdout);
+      if (parsed !== null) return parsed;
+      return result.code === 0 ? 'allowed' : 'unknown';
+    }
+
+    if (result.code === 0) return 'allowed';
+    if (result.code === 2) return 'unknown';
+    return 'blocked';
+  }
+
+  private async runUsageLimitCommand(command: string, provider: AgentProviderConfig): Promise<UsageLimitCommandResult> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let stdout = '';
+      let stderr = '';
+      const limitKey = providerLimitKey(provider);
+
+      const finalize = (value: UsageLimitCommandResult) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+
+      const child = spawn(command, {
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: process.env,
+      });
+      child.stdout?.on('data', (chunk) => {
+        stdout += String(chunk);
+      });
+      child.stderr?.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+
+      const timeout = setTimeout(() => {
+        // Process may have already exited by the time kill() is called; that is harmless.
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // already exited
+        }
+        log('warn', 'provider_usage_limit_check_timeout', {
+          repo_id: this.repoId ?? undefined,
+          event: 'provider_usage_limit_check_timeout',
+          agent_provider: provider.id,
+          agent_provider_group: limitKey,
+          check_command: command,
+        });
+        finalize({ code: null, stdout, stderr });
+      }, 30_000);
+      timeout.unref();
+
+      child.on('error', (err) => {
+        clearTimeout(timeout);
+        log('warn', 'provider_usage_limit_check_error', {
+          repo_id: this.repoId ?? undefined,
+          event: 'provider_usage_limit_check_error',
+          agent_provider: provider.id,
+          agent_provider_group: limitKey,
+          check_command: command,
+          error: err.message,
+        });
+        finalize({ code: null, stdout, stderr: `${stderr}\n${err.message}` });
+      });
+      child.on('exit', (code) => {
+        clearTimeout(timeout);
+        finalize({ code: code ?? null, stdout, stderr });
+      });
+    });
+  }
+
+  private isCodexBarUsageCheckCommand(command: string): boolean {
+    return (
+      /(^|[\s;|&()])codexbar\b/.test(command) &&
+      /--provider(?:=|\s+)/.test(command) &&
+      /--format(?:=|\s+)json\b/.test(command)
+    );
+  }
+
+  private parseCodexBarUsageLimit(command: string, output: string): UsageLimitCheckResult | null {
+    const providerMatch = command.match(/--provider(?:=|\s+)(?:'([^']+)'|"([^"]+)"|([^\s"']+))/);
+    const requestedProvider = providerMatch ? providerMatch[1] || providerMatch[2] || providerMatch[3] : null;
+    let payload: unknown;
+
+    try {
+      payload = JSON.parse(output);
+    } catch {
+      return null;
+    }
+
+    const entries = Array.isArray(payload) ? payload : [payload];
+    const selectedEntries =
+      !requestedProvider || requestedProvider === 'all' || requestedProvider === 'both'
+        ? entries
+        : entries.filter((entry) => entry && typeof entry === 'object' && (entry as { provider?: unknown }).provider === requestedProvider);
+
+    const samples = selectedEntries.length > 0 ? selectedEntries : entries;
+    const usedPercents = samples.flatMap((entry) => {
+      const usage = (entry as { usage?: { primary?: unknown; secondary?: unknown; tertiary?: unknown } }).usage;
+      if (!usage || typeof usage !== 'object') return [];
+      return ['primary', 'secondary', 'tertiary']
+        .map((key) => usage[key as 'primary' | 'secondary' | 'tertiary'])
+        .map((window) => {
+          const percent = typeof window === 'object' && window !== null ? Number((window as { usedPercent?: unknown }).usedPercent) : Number.NaN;
+          return Number.isFinite(percent) ? percent : null;
+        })
+        .filter((value): value is number => value !== null);
+    });
+
+    if (usedPercents.length === 0) return null;
+    return usedPercents.some((percent) => percent >= CODEXBAR_USAGE_LIMIT_THRESHOLD) ? 'blocked' : 'allowed';
   }
 
   private dispatchBlockReason(

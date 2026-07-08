@@ -10,6 +10,18 @@ From repo root (or any directory that contains `WORKFLOW.md`):
 yarn dev
 ```
 
+Before you run Symphony, make sure `codexbar` is installed and on `PATH` (the mdedit workflow checks usage via `codexbar`):
+
+```bash
+codexbar --version
+```
+
+You can install it from the CodexBar app (`Preferences → Advanced → Install CLI`) or with Homebrew:
+
+```bash
+brew install steipete/tap/codexbar
+```
+
 Start by copying `WORKFLOW.example.md` to the target app repo as `WORKFLOW.md` and adjusting hooks/token.
 
 For one server across multiple unrelated repos, create a central `symphony.config.yml` in this repo. If this repo sits beside the app repos, keep paths relative:
@@ -180,7 +192,8 @@ Issues labeled `task:spec` or `planning` run in planning-only mode regardless of
 - `--workflow` is resolved by searching up parent directories when omitted, or can be passed explicitly as a relative path from the Symphony repo.
 - If `tracker.token` resolves to null, Symphony will try `gh auth token` and use that token (and set `GITHUB_TOKEN` for hooks/agent subprocesses for this run).
 - GitHub API rate-limit responses pause repo polling until GitHub's reset/retry window instead of continuing to fan out failed issue fetches.
-- `usage_limit_check_command` is optional and provider-specific: exit `0` allows dispatch, exit `1` blocks dispatch for that provider group, and exit `2` means "unknown" so Symphony logs the check result but does not block. Command errors/timeouts are also treated as unknown. GitHub auth cannot report OpenAI/Anthropic usage; use provider CLIs, local auth, or provider API keys inside the check command when you want proactive model-provider quota checks.
+- `usage_limit_check_command` is optional and provider-specific: exit `0` allows dispatch, exit `1` blocks dispatch for that provider group, and exit `2` means "unknown" so Symphony logs the check result but does not block.
+- `codexbar` commands are supported directly at runtime: when a check command invokes `codexbar` with `--provider` and `--format json`, Symphony parses usage percentages and blocks when any active window is at or above 90% used.
 - `workspace.strategy` is optional and defaults to today's durable per-issue workspace behavior. Supported strategies are `durable_issue_workspace`, `pooled_isolated`, `none_or_readonly`, and `durable_epic_workspace`; hooks and agent commands receive the selected value as `symphony.workspace_strategy` / `SYMPHONY_WORKSPACE_STRATEGY`.
 - Each workflow workspace root has a single-runner lock at `.symphony/orchestrator.lock`; a second Symphony process for the same repo skips dispatch while the live owner is running. Live orphaned workers discovered after a restart count against concurrency until they finish.
 - If a workspace exists but is missing `.git`, Symphony will clear the workspace contents and re-run `hooks.after_create` (to recover from interrupted runs).

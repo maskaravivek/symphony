@@ -169,47 +169,9 @@ agents:
       # Exit non-zero or command failure/timeout → dispatch is skipped for this tick and re-checked next tick.
       # This avoids relying on fixed-duration backoffs when you don't know when a provider's
       # quota window resets (e.g. 5-hour or weekly limits for Codex / Claude).
-      # Example: check remaining Codex requests via the OpenAI API headers.
-      # Keep this command strict-fail; any curl/auth/parse error blocks dispatch.
+      # Uses CodexBar usage snapshots directly.
       usage_limit_check_command: |
-        # Use an endpoint that emits rate-limit headers for actual model requests.
-        # Override with OPENAI_RATE_CHECK_MODEL if needed.
-        rate_check_model="${OPENAI_RATE_CHECK_MODEL:-gpt-4o-mini}"
-        [ -n "${OPENAI_API_KEY:-}" ] || exit 2
-        header_tmp="$(mktemp)"
-        trap 'rm -f "$header_tmp"' EXIT
-        status=$(
-          curl -sS -D "$header_tmp" -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"$rate_check_model\",\"input\":\"ping\",\"max_output_tokens\":16}" \
-            https://api.openai.com/v1/responses
-        ) || status=$?
-        if [ "$status" = "429" ]; then
-          exit 1
-        fi
-        if [ "$status" != "200" ]; then
-          exit 2
-        fi
-
-        remaining_requests=$(
-          awk 'tolower($1)=="x-ratelimit-remaining-requests:" {print $2}' "$header_tmp" \
-            | tr -d '\r' \
-            | head -n1
-        )
-        remaining_tokens=$(
-          awk 'tolower($1)=="x-ratelimit-remaining-tokens:" {print $2}' "$header_tmp" \
-            | tr -d '\r' \
-            | head -n1
-        )
-
-        if [ -n "${remaining_requests}" ] && [ "${remaining_requests}" -le 5 ]; then
-          exit 1
-        fi
-        if [ -n "${remaining_tokens}" ] && [ "${remaining_tokens}" -le 5 ]; then
-          exit 1
-        fi
-        exit 0
+        codexbar --provider codex --format json --json-only --no-color
     codex-spark:
       provider_group: codex
       provider_kind: codex
@@ -226,18 +188,9 @@ agents:
       output_log: .symphony/claude.log
       turn_timeout_ms: 3600000
       max_concurrent: 1
-      # Example: check remaining Claude requests via Anthropic rate-limit headers.
-      # Keep this command strict-fail; any curl/auth/parse error blocks dispatch.
+      # Uses CodexBar usage snapshots directly.
       usage_limit_check_command: |
-        remaining=$(
-          curl -sf -I \
-            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-            -H "anthropic-version: 2023-06-01" \
-            https://api.anthropic.com/v1/models \
-          | awk 'tolower($1)=="anthropic-ratelimit-requests-remaining:" {print $2}' \
-          | tr -d '\r'
-        )
-        [ "${remaining:-0}" -gt 5 ]
+        codexbar --provider claude --format json --json-only --no-color
     claude-fable:
       provider_group: claude
       provider_kind: claude

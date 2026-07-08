@@ -331,6 +331,14 @@ Prompt body
   return workflowPath;
 }
 
+function mockCodexBarCheckCommand(usedPercent: number): string {
+  const payload = JSON.stringify({
+    provider: 'codex',
+    usage: { primary: { usedPercent } },
+  });
+  return `bash -lc "codexbar() { printf '%s' '${payload}'; }; codexbar --provider codex --format json --json-only --no-color"`;
+}
+
 async function writeWorkflowWithGroupedCheckCommand(workspaceRoot: string, checkCommand: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-grouped-check-workflow-'));
   const workflowPath = path.join(dir, 'WORKFLOW.md');
@@ -640,6 +648,46 @@ test('allows dispatch when usage_limit_check_command returns unknown', async () 
   try {
     await orchestrator.tickOnce();
     assert.ok(wasDispatched(calls, 33), 'issue 33 should dispatch when usage check result is unknown');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('blocks dispatch when a codexbar usage payload is at or above 90%', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-codexbar-blocked-workspace-'));
+  const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, mockCodexBarCheckCommand(90));
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([40], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    assert.equal(wasDispatched(calls, 40), false, 'issue should not be dispatched when codexbar reports usage >= 90%');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('allows dispatch when a codexbar usage payload is below 90%', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-codexbar-allowed-workspace-'));
+  const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, mockCodexBarCheckCommand(89));
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([41], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    await orchestrator.tickOnce();
+    assert.ok(wasDispatched(calls, 41), 'issue should be dispatched when codexbar reports usage below 90%');
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;
