@@ -172,13 +172,18 @@ agents:
       # Example: check remaining Codex requests via the OpenAI API headers.
       # Keep this command strict-fail; any curl/auth/parse error blocks dispatch.
       usage_limit_check_command: |
+        # Use an endpoint that emits rate-limit headers for actual model requests.
+        # Override with OPENAI_RATE_CHECK_MODEL if needed.
+        rate_check_model="${OPENAI_RATE_CHECK_MODEL:-gpt-4o-mini}"
         [ -n "${OPENAI_API_KEY:-}" ] || exit 2
         header_tmp="$(mktemp)"
         trap 'rm -f "$header_tmp"' EXIT
         status=$(
           curl -sS -D "$header_tmp" -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            https://api.openai.com/v1/models
+            -H "Content-Type: application/json" \
+            -d "{\"model\":\"$rate_check_model\",\"input\":\"ping\",\"max_output_tokens\":16}" \
+            https://api.openai.com/v1/responses
         ) || status=$?
         if [ "$status" = "429" ]; then
           exit 1
