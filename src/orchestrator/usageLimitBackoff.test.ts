@@ -336,7 +336,44 @@ function mockCodexBarCheckCommand(usedPercent: number): string {
     provider: 'codex',
     usage: { primary: { usedPercent } },
   });
-  return `bash -lc "codexbar() { printf '%s' '${payload}'; }; codexbar --provider codex --format json --json-only --no-color"`;
+  const escapedPayload = payload.replaceAll('"', '\\"');
+  return `bash -lc "codexbar() { printf '%s' '${escapedPayload}'; }; codexbar --provider codex --format json --json-only --no-color"`;
+}
+
+async function writeStatefulCodexBarScript(
+  workspaceRoot: string,
+  stateFilePath: string,
+  resetAtIso: string,
+): Promise<string> {
+  const scriptPath = path.join(workspaceRoot, 'stateful-codexbar.sh');
+  const escapedStateFile = stateFilePath.replaceAll("'", `'\'\''`);
+  await fs.writeFile(
+    scriptPath,
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+count_file='${escapedStateFile}'
+count=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+printf '%s' "$count" > "$count_file"
+
+if [ "$count" -eq 1 ]; then
+  payload='{"provider":"codex","usage":{"primary":{"usedPercent":95,"resetsAt":"${resetAtIso}"}}}'
+else
+  payload='{"provider":"codex","usage":{"primary":{"usedPercent":10}}}'
+fi
+
+codexbar() {
+  printf '%s' "$payload"
+}
+`,
+    'utf8',
+  );
+  await fs.chmod(scriptPath, 0o700);
+  return scriptPath;
+}
+
+function writeStatefulCodexBarCheckCommand(scriptPath: string): string {
+  return `bash -lc "source '${scriptPath}'; codexbar --provider codex --format json --json-only --no-color"`;
 }
 
 async function writeWorkflowWithGroupedCheckCommand(workspaceRoot: string, checkCommand: string): Promise<string> {
@@ -727,6 +764,86 @@ test('backs off GitHub polling after rate limit responses', async () => {
 
     await orchestrator.tickOnce();
     assert.equal(calls.length, afterFirstTick, 'second tick should skip GitHub while rate limit backoff is active');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test('uses codexbar resetsAt to skip usage checks until reset', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-codexbar-resets-at-workspace-'));
+  const stateFilePath = path.join(workspaceRoot, 'codexbar-check-count.txt');
+  const resetAtMs = Date.now() + 500;
+  const resetAtIso = new Date(resetAtMs).toISOString();
+  const statefulScriptPath = await writeStatefulCodexBarScript(workspaceRoot, stateFilePath, resetAtIso);
+  const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, writeStatefulCodexBarCheckCommand(statefulScriptPath));
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  let tickCount = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues?')) {
+      if (tickCount === 0) return jsonResponse([30].map((n) => issuePayload(n, `Issue ${n}`, 'open', ['ready-for-agent'])));
+      if (tickCount === 1) return jsonResponse([31].map((n) => issuePayload(n, `Issue ${n}`, 'open', ['ready-for-agent'])));
+      return jsonResponse([30].map((n) => issuePayload(n, `Issue ${n}`, 'open', ['ready-for-agent'])));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    for (const n of [30, 31]) {
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}`) {
+        return jsonResponse(issuePayload(n, `Issue ${n}`, 'open', ['agent-running']));
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/comments?per_page=50`) {
+        return jsonResponse([]);
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/comments` && method === 'POST') {
+        return jsonResponse({ id: 500 + n, body: String(body), html_url: `https://api.github.test/comment/${500 + n}` });
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/${500 + n}` && method === 'PATCH') {
+        return jsonResponse({ id: 500 + n, body: String(body), html_url: `https://api.github.test/comment/${500 + n}` });
+      }
+      if (url === `https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/labels` && method === 'POST') {
+        return jsonResponse([]);
+      }
+      if (url.startsWith(`https://api.github.test/repos/mangoappstudio/mdedit/issues/${n}/labels/`) && method === 'DELETE') {
+        return new Response(null, { status: 204 });
+      }
+    }
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+
+  try {
+    tickCount = 0;
+    await orchestrator.tickOnce();
+    assert.equal(wasDispatched(calls, 30), false, 'initial check at >=90% should block dispatch');
+    const checksAfterFirstTick = Number((await fs.readFile(stateFilePath, 'utf8')).trim());
+    assert.equal(checksAfterFirstTick, 1, 'usage check should run once on first tick');
+
+    calls.length = 0;
+    tickCount = 1;
+    await orchestrator.tickOnce();
+    assert.equal(wasDispatched(calls, 31), false, 'while reset window is active, dispatch should remain blocked');
+    const checksAfterSecondTick = Number((await fs.readFile(stateFilePath, 'utf8')).trim());
+    assert.equal(checksAfterSecondTick, 1, 'usage check should not run again during resetsAt backoff');
+
+    await new Promise((resolve) => setTimeout(resolve, 650));
+
+    calls.length = 0;
+    tickCount = 2;
+    await orchestrator.tickOnce();
+    const checksAfterThirdTick = Number((await fs.readFile(stateFilePath, 'utf8')).trim());
+    assert.equal(checksAfterThirdTick, 2, 'usage check should rerun after reset');
+    assert.ok(wasDispatched(calls, 30), 'issue should dispatch after backoff resets');
+
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;

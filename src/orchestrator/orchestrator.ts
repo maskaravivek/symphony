@@ -29,7 +29,15 @@ interface DispatchCapacity {
 }
 
 type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity' | 'usage_limit';
-type UsageLimitCheckResult = 'allowed' | 'blocked' | 'unknown';
+type UsageLimitCheckDecision = 'allowed' | 'blocked' | 'unknown';
+type UsageLimitCheckResult = {
+  decision: UsageLimitCheckDecision;
+  resetsAtMs?: number;
+};
+type CodexBarUsageParseResult = {
+  decision: UsageLimitCheckDecision;
+  resetsAtMs?: number;
+};
 type UsageLimitCommandResult = {
   code: number | null;
   stdout: string;
@@ -2196,8 +2204,14 @@ ${runContext}`;
       providers.map(async (provider) => {
         const command = provider.usage_limit_check_command!;
         const limitKey = providerLimitKey(provider);
+        const now = nowMs();
+        const backoffUntil = this.providerUsageLimitBackoffUntil.get(limitKey);
+        if (backoffUntil !== undefined && now < backoffUntil) {
+          this.providerUsageLimitCheckBlocked.add(limitKey);
+          return;
+        }
         const result = await this.checkUsageLimitCommand(command, provider);
-        if (result === 'unknown') {
+        if (result.decision === 'unknown') {
           log('warn', 'provider_usage_limit_check_unknown', {
             repo_id: this.repoId ?? undefined,
             event: 'provider_usage_limit_check_unknown',
@@ -2206,7 +2220,19 @@ ${runContext}`;
             check_command: command,
           });
         }
-        if (result === 'blocked') {
+        if (result.decision === 'blocked') {
+          if (typeof result.resetsAtMs === 'number' && Number.isFinite(result.resetsAtMs) && result.resetsAtMs > now) {
+            this.providerUsageLimitBackoffUntil.set(limitKey, result.resetsAtMs);
+            log('info', 'provider_usage_limit_check_backoff_set', {
+              repo_id: this.repoId ?? undefined,
+              event: 'provider_usage_limit_check_backoff_set',
+              agent_provider: provider.id,
+              agent_provider_group: limitKey,
+              check_command: command,
+              reset_at_ms: result.resetsAtMs,
+              reset_in_ms: result.resetsAtMs - now,
+            });
+          }
           this.providerUsageLimitCheckBlocked.add(limitKey);
           log('warn', 'provider_usage_limit_check_blocked', {
             repo_id: this.repoId ?? undefined,
@@ -2226,12 +2252,12 @@ ${runContext}`;
     if (this.isCodexBarUsageCheckCommand(command)) {
       const parsed = this.parseCodexBarUsageLimit(command, result.stdout);
       if (parsed !== null) return parsed;
-      return result.code === 0 ? 'allowed' : 'unknown';
+      return { decision: result.code === 0 ? 'allowed' : 'unknown' };
     }
 
-    if (result.code === 0) return 'allowed';
-    if (result.code === 2) return 'unknown';
-    return 'blocked';
+    if (result.code === 0) return { decision: 'allowed' };
+    if (result.code === 2) return { decision: 'unknown' };
+    return { decision: 'blocked' };
   }
 
   private async runUsageLimitCommand(command: string, provider: AgentProviderConfig): Promise<UsageLimitCommandResult> {
@@ -2304,7 +2330,7 @@ ${runContext}`;
     );
   }
 
-  private parseCodexBarUsageLimit(command: string, output: string): UsageLimitCheckResult | null {
+  private parseCodexBarUsageLimit(command: string, output: string): CodexBarUsageParseResult | null {
     const providerMatch = command.match(/--provider(?:=|\s+)(?:'([^']+)'|"([^"]+)"|([^\s"']+))/);
     const requestedProvider = providerMatch ? providerMatch[1] || providerMatch[2] || providerMatch[3] : null;
     let payload: unknown;
@@ -2322,20 +2348,34 @@ ${runContext}`;
         : entries.filter((entry) => entry && typeof entry === 'object' && (entry as { provider?: unknown }).provider === requestedProvider);
 
     const samples = selectedEntries.length > 0 ? selectedEntries : entries;
-    const usedPercents = samples.flatMap((entry) => {
+    const usedPercents: number[] = [];
+    const resetTimestamps: number[] = [];
+    for (const entry of samples) {
       const usage = (entry as { usage?: { primary?: unknown; secondary?: unknown; tertiary?: unknown } }).usage;
-      if (!usage || typeof usage !== 'object') return [];
-      return ['primary', 'secondary', 'tertiary']
-        .map((key) => usage[key as 'primary' | 'secondary' | 'tertiary'])
-        .map((window) => {
-          const percent = typeof window === 'object' && window !== null ? Number((window as { usedPercent?: unknown }).usedPercent) : Number.NaN;
-          return Number.isFinite(percent) ? percent : null;
-        })
-        .filter((value): value is number => value !== null);
-    });
+      if (!usage || typeof usage !== 'object') continue;
+      const windows = ['primary', 'secondary', 'tertiary'].map((key) => usage[key as 'primary' | 'secondary' | 'tertiary']);
+      for (const window of windows) {
+        if (!window || typeof window !== 'object') continue;
+        const percent = Number((window as { usedPercent?: unknown }).usedPercent);
+        if (Number.isFinite(percent)) usedPercents.push(percent);
+
+        if (percent >= CODEXBAR_USAGE_LIMIT_THRESHOLD && Number.isFinite(percent)) {
+          const rawResetAt = (window as { resetsAt?: unknown }).resetsAt;
+          let resetAtMs = Number.NaN;
+          if (typeof rawResetAt === 'string') resetAtMs = Date.parse(rawResetAt);
+          if (typeof rawResetAt === 'number') {
+            resetAtMs = rawResetAt > 1e12 ? rawResetAt : rawResetAt * 1000;
+          }
+          if (Number.isFinite(resetAtMs)) resetTimestamps.push(resetAtMs);
+        }
+      }
+    }
 
     if (usedPercents.length === 0) return null;
-    return usedPercents.some((percent) => percent >= CODEXBAR_USAGE_LIMIT_THRESHOLD) ? 'blocked' : 'allowed';
+    const blocked = usedPercents.some((percent) => percent >= CODEXBAR_USAGE_LIMIT_THRESHOLD);
+    if (!blocked) return { decision: 'allowed' };
+    const resetsAtMs = resetTimestamps.length > 0 ? Math.min(...resetTimestamps) : undefined;
+    return { decision: 'blocked', resetsAtMs };
   }
 
   private dispatchBlockReason(
