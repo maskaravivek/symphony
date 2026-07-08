@@ -16,6 +16,8 @@ import { loadServerConfigFromFile } from './server/loadServerConfig.js';
 import { selectRunState } from './status/selectRunState.js';
 import type { RunState } from './status/runState.js';
 import type { LoadedWorkflow } from './workflow/types.js';
+import { startDashboardServer } from './dashboard/server.js';
+import { SymphonyConfigError } from './utils/errors.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -190,6 +192,18 @@ function shortThreadId(threadId: string | null | undefined): string {
   if (!threadId) return '';
   if (threadId.length <= 12) return threadId;
   return `${threadId.slice(0, 12)}...`;
+}
+
+function parsePositiveInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new SymphonyConfigError(`${name} must be a positive integer`);
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new SymphonyConfigError(`${name} must be a non-negative integer`);
+  return parsed;
 }
 
 async function main(): Promise<void> {
@@ -407,6 +421,28 @@ async function main(): Promise<void> {
         child.on('error', reject);
         child.on('exit', () => resolve());
       });
+    });
+
+  program
+    .command('dashboard')
+    .description('Serve a readonly local Kanban dashboard from Symphony run state')
+    .option('-c, --config <path>', 'Path to symphony.config.yml')
+    .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
+    .option('--host <host>', 'Host to bind', '127.0.0.1')
+    .option('--port <port>', 'Port to bind; the next free port is used if occupied', '3766')
+    .option('--refresh-ms <ms>', 'Browser refresh interval in milliseconds', '5000')
+    .action(async (options: { config?: string; workflow: string; host: string; port: string; refreshMs: string }) => {
+      const port = parseNonNegativeInteger(options.port, '--port');
+      const refreshMs = parsePositiveInteger(options.refreshMs, '--refresh-ms');
+      const started = await startDashboardServer({
+        config: options.config,
+        workflow: options.workflow,
+        host: options.host,
+        port,
+        refreshMs,
+      });
+      // eslint-disable-next-line no-console
+      console.log(`Symphony dashboard: ${started.url}`);
     });
 
   program

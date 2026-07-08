@@ -10,6 +10,12 @@ From repo root (or any directory that contains `WORKFLOW.md`):
 yarn dev
 ```
 
+In development, `yarn dev` starts the orchestrator, starts the readonly local dashboard, and opens the dashboard in your default browser. By default it uses `./symphony.config.yml`; pass `run` args to override the target, for example:
+
+```bash
+yarn dev run --workflow ../mdedit/WORKFLOW.md
+```
+
 Before you run Symphony, make sure `codexbar` is installed and on `PATH` (the mdedit workflow checks usage via `codexbar`):
 
 ```bash
@@ -63,6 +69,7 @@ Helper commands:
 yarn cli -- status --workflow ../mdedit/WORKFLOW.md
 yarn cli -- open 264 --workflow ../mdedit/WORKFLOW.md
 yarn cli -- tail 264 --workflow ../mdedit/WORKFLOW.md
+yarn cli -- dashboard --workflow ../mdedit/WORKFLOW.md
 ```
 
 With a multi-repo config, use repo-qualified issue refs when issue numbers are ambiguous:
@@ -71,7 +78,10 @@ With a multi-repo config, use repo-qualified issue refs when issue numbers are a
 yarn cli -- status --config ./symphony.config.yml
 yarn cli -- open mdedit#264 --config ./symphony.config.yml
 yarn cli -- tail mdedit#264 --config ./symphony.config.yml
+yarn cli -- dashboard --config ./symphony.config.yml
 ```
+
+The dashboard is a local readonly Kanban view backed by the same `.symphony/run.json` and epic state files as the CLI helpers. By default it binds to `127.0.0.1:3766` and auto-picks the next available port when needed.
 
 ## When to use Symphony vs Codex app
 

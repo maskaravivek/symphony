@@ -688,6 +688,8 @@ export class Orchestrator {
           return {
             ...cur,
             status: 'cancelled',
+            issue_title: issue.title,
+            issue_state: issue.state,
             labels: (cur.labels ?? issue.labels).filter((label) => label !== LABEL_READY && label !== LABEL_RUNNING),
             workflow_state: null,
             finished_at: new Date().toISOString(),
@@ -708,6 +710,8 @@ export class Orchestrator {
           return {
             ...cur,
             status: 'cancelled',
+            issue_title: issue.title,
+            issue_state: issue.state,
             finished_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           };
@@ -730,6 +734,8 @@ export class Orchestrator {
           return {
             ...cur,
             status: 'cancelled',
+            issue_title: issue.title,
+            issue_state: issue.state,
             finished_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           };
@@ -751,6 +757,8 @@ export class Orchestrator {
           return {
             ...cur,
             status: 'cancelled',
+            issue_title: issue.title,
+            issue_state: issue.state,
             finished_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           };
@@ -830,6 +838,8 @@ export class Orchestrator {
           ? {
               ...cur,
               status: 'cancelled',
+              issue_title: issue.title,
+              issue_state: issue.state,
               labels: ignored
                 ? (cur.labels ?? issue.labels).filter((label) => label !== LABEL_RUNNING)
                 : [...new Set([...(cur.labels ?? issue.labels).filter((label) => label !== LABEL_RUNNING), LABEL_READY])],
@@ -1679,6 +1689,8 @@ export class Orchestrator {
       issue_number: issue.number ?? null,
       issue_identifier: issue.identifier,
       issue_url: issue.url ?? null,
+      issue_title: issue.title,
+      issue_state: issue.state,
       labels: issue.labels,
       workflow_state: issue.workflow_state,
       workspace_path: workspacePath,

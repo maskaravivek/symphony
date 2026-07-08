@@ -24,7 +24,7 @@
   "scripts": {
     "build": "tsup",
     "cli": "tsx src/index.ts",
-    "dev": "bash -lc 'tsx_cmd=\"./node_modules/tsx/dist/cli.mjs\"; if [ \"$1\" = run ]; then shift; exec node --env-file-if-exists=.env \"$tsx_cmd\" src/index.ts run \"$@\"; fi; exec node --env-file-if-exists=.env \"$tsx_cmd\" src/index.ts run --config ./symphony.config.yml \"$@\"' bash",
+    "dev": "node --env-file-if-exists=.env ./node_modules/tsx/dist/cli.mjs src/dev.ts",
     "start": "node bin/symphony.js",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"

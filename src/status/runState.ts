@@ -18,6 +18,8 @@ export interface RunState {
   issue_number: number | null;
   issue_identifier: string;
   issue_url: string | null;
+  issue_title?: string | null;
+  issue_state?: string | null;
   labels?: string[];
   workflow_state?: string | null;
 
