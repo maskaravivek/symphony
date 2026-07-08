@@ -208,25 +208,61 @@ async function main(): Promise<void> {
         ? new MultiRepoOrchestrator({ configPath: resolveConfigPath(options.config) })
         : new Orchestrator({ workflowPath: await resolveWorkflowPath(options.workflow) });
 
-      const shutdown = async (signal: string) => {
+      let shutdownStarted = false;
+      let forceExitTimer: NodeJS.Timeout | null = null;
+      const shutdown = async (signal: string, exitCode: number) => {
+        if (shutdownStarted) {
+          log('warn', 'shutdown_force_requested', { event: 'shutdown_force_requested', signal });
+          process.exit(exitCode);
+        }
+        shutdownStarted = true;
         log('info', 'shutdown_requested', { event: 'shutdown_requested', signal });
-        await orchestrator.shutdown(`signal:${signal}`);
+        forceExitTimer = setTimeout(() => {
+          log('error', 'shutdown_force_exit', { event: 'shutdown_force_exit', signal, reason: 'timeout' });
+          process.exit(exitCode);
+        }, 15_000);
+        forceExitTimer.unref();
+        try {
+          await orchestrator.shutdown(`signal:${signal}`);
+        } catch (err) {
+          log('error', 'shutdown_failed', { event: 'shutdown_failed', signal, error: err instanceof Error ? err.message : String(err) });
+        } finally {
+          if (forceExitTimer) clearTimeout(forceExitTimer);
+          process.exit(exitCode);
+        }
       };
 
       process.on('SIGINT', () => {
-        void shutdown('SIGINT').finally(() => process.exit(0));
+        void shutdown('SIGINT', 130);
       });
       process.on('SIGTERM', () => {
-        void shutdown('SIGTERM').finally(() => process.exit(0));
+        void shutdown('SIGTERM', 143);
       });
+      const onStdinData = (chunk: Buffer | string) => {
+        if (String(chunk).includes('\u0003')) void shutdown('CTRL_C', 130);
+      };
+      const cleanupStdin = () => {
+        process.stdin.off('data', onStdinData);
+        process.stdin.pause();
+      };
+      process.stdin.on('data', onStdinData);
+      process.stdin.resume();
 
       if (options.once) {
-        await orchestrator.tickOnce();
-        await orchestrator.shutdown('once_complete');
+        try {
+          await orchestrator.tickOnce();
+          await orchestrator.shutdown('once_complete');
+        } finally {
+          cleanupStdin();
+        }
         return;
       }
 
-      await orchestrator.runForever();
+      try {
+        await orchestrator.runForever();
+      } finally {
+        cleanupStdin();
+      }
     });
 
   program

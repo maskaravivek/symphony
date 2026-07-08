@@ -20,6 +20,7 @@ export interface HookRunOptions {
   env?: Record<string, string>;
   logPath?: string | null;
   streamOutput?: boolean;
+  signal?: AbortSignal;
 }
 
 export class HookScriptError extends SymphonyRuntimeError {
@@ -68,18 +69,19 @@ function appendCapturedOutput(current: string, chunk: string, limitBytes: number
 }
 
 function isHookRunOptions(value: HookRunOptions | Record<string, string>): value is HookRunOptions {
-  return 'env' in value || 'logPath' in value || 'streamOutput' in value;
+  return 'env' in value || 'logPath' in value || 'streamOutput' in value || 'signal' in value;
 }
 
-function normalizeHookRunOptions(optionsOrEnv: HookRunOptions | Record<string, string> = {}): Required<Pick<HookRunOptions, 'env' | 'streamOutput'>> & Pick<HookRunOptions, 'logPath'> {
+function normalizeHookRunOptions(optionsOrEnv: HookRunOptions | Record<string, string> = {}): Required<Pick<HookRunOptions, 'env' | 'streamOutput'>> & Pick<HookRunOptions, 'logPath' | 'signal'> {
   if (isHookRunOptions(optionsOrEnv)) {
     return {
       env: optionsOrEnv.env ?? {},
       logPath: optionsOrEnv.logPath ?? null,
       streamOutput: optionsOrEnv.streamOutput ?? false,
+      signal: optionsOrEnv.signal,
     };
   }
-  return { env: optionsOrEnv, logPath: null, streamOutput: false };
+  return { env: optionsOrEnv, logPath: null, streamOutput: false, signal: undefined };
 }
 
 function closeLogStream(stream: WriteStream | null): Promise<void> {
@@ -101,6 +103,14 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
       // Hook execution should not fail solely because diagnostics could not be written.
     });
   }
+  if (options.signal?.aborted) {
+    await closeLogStream(logStream);
+    throw new HookScriptError(`Hook cancelled: ${String(options.signal.reason ?? 'aborted')}`, {
+      stdout: '',
+      stderr: '',
+      log_path: logPath,
+    });
+  }
 
   return await new Promise<HookResult>((resolve, reject) => {
     const child = spawn(script, {
@@ -112,6 +122,7 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
     });
 
     let killedByTimeout = false;
+    let killedByAbort = false;
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
@@ -162,15 +173,40 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
       setTimeout(() => signalGroup('SIGKILL'), 5_000).unref();
     }, timeoutMs);
 
+    const abortHook = () => {
+      killedByAbort = true;
+      signalGroup('SIGTERM');
+      setTimeout(() => signalGroup('SIGKILL'), 5_000).unref();
+    };
+    options.signal?.addEventListener('abort', abortHook, { once: true });
+
     child.on('error', (err) => {
+      options.signal?.removeEventListener('abort', abortHook);
       settle(() => reject(err));
     });
 
     child.on('exit', (code, signal) => {
+      options.signal?.removeEventListener('abort', abortHook);
       if (killedByTimeout) {
         settle(() =>
           reject(
             new HookScriptError(`Hook timed out after ${timeoutMs}ms`, {
+              stdout,
+              stderr,
+              log_path: logPath,
+              stdout_truncated: stdoutTruncated,
+              stderr_truncated: stderrTruncated,
+              code,
+              signal,
+            }),
+          ),
+        );
+        return;
+      }
+      if (killedByAbort) {
+        settle(() =>
+          reject(
+            new HookScriptError(`Hook cancelled: ${String(options.signal?.reason ?? 'aborted')}`, {
               stdout,
               stderr,
               log_path: logPath,

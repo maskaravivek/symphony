@@ -51,10 +51,16 @@ async function killProcess(
   fields: LogFields,
 ): Promise<void> {
   log('warn', 'worker_cancel_requested', { ...fields, event: 'worker_cancel_requested', reason });
+  if (child.exitCode !== null || child.signalCode !== null) return;
+
   signalProcessGroup(child, 'SIGTERM');
 
   const killed = await Promise.race([
     new Promise<boolean>((resolve) => {
+      if (child.exitCode !== null || child.signalCode !== null) {
+        resolve(true);
+        return;
+      }
       child.on('exit', () => resolve(true));
     }),
     new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10_000)),

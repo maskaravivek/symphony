@@ -6,7 +6,6 @@ import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
 import { SymphonyConfigError } from '../utils/errors.js';
 import { log, type LogFields } from '../utils/log.js';
-import { sleep } from '../utils/sleep.js';
 import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { HookScriptError, runHookScript } from '../workspace/hooks.js';
 import { WorkspaceManager, workspacePathForIssue } from '../workspace/workspaceManager.js';
@@ -434,6 +433,8 @@ export class Orchestrator {
   private liveOrphanLogLastAtMs = new Map<string, number>();
 
   private stopped = false;
+  private shutdownController = new AbortController();
+  private wakeRunLoop: (() => void) | null = null;
 
   constructor(options: OrchestratorOptions) {
     this.workflowPath = options.workflowPath;
@@ -455,10 +456,13 @@ export class Orchestrator {
 
   stop(): void {
     this.stopped = true;
+    this.wakeRunLoop?.();
   }
 
   async shutdown(reason = 'shutdown'): Promise<void> {
     this.stopped = true;
+    if (!this.shutdownController.signal.aborted) this.shutdownController.abort(reason);
+    this.wakeRunLoop?.();
     const sessions = [...this.running.values()];
     await Promise.allSettled(
       sessions.map(async (s) => {
@@ -476,8 +480,22 @@ export class Orchestrator {
         log('error', 'tick_failed', { event: 'tick_failed', error: err instanceof Error ? err.message : String(err) });
       });
       const interval = this.lastGoodWorkflow?.config.polling.interval_ms ?? 30_000;
-      await sleep(interval);
+      await this.sleepUntilNextTick(interval);
     }
+  }
+
+  private async sleepUntilNextTick(intervalMs: number): Promise<void> {
+    if (this.stopped) return;
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(resolve, intervalMs);
+      const wake = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      this.wakeRunLoop = wake;
+    }).finally(() => {
+      this.wakeRunLoop = null;
+    });
   }
 
   async tickOnce(options: { maxNewDispatches?: number | null } = {}): Promise<void> {
@@ -1488,6 +1506,7 @@ export class Orchestrator {
           env: hookEnv,
           logPath: afterCreateLogPath,
           streamOutput: shouldStreamHookOutput(),
+          signal: this.shutdownController.signal,
         });
       } catch (err) {
         log('error', 'workspace_after_create_hook_failed', {
@@ -1530,6 +1549,7 @@ export class Orchestrator {
           env: hookEnv,
           logPath: beforeRunLogPath,
           streamOutput: shouldStreamHookOutput(),
+          signal: this.shutdownController.signal,
         });
       } catch (err) {
         log('error', 'workspace_before_run_hook_failed', {
@@ -1905,6 +1925,7 @@ export class Orchestrator {
                 env,
                 logPath: afterRunLogPath,
                 streamOutput: shouldStreamHookOutput(),
+                signal: this.shutdownController.signal,
               });
               if (reviewPr) {
                 const verdict = parseReviewVerdict(hookResult.output);

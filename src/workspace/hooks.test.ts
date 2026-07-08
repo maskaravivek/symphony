@@ -52,3 +52,38 @@ test('includes the hook diagnostic log path on failures', async () => {
 
   await assert.doesNotReject(() => fs.access(logPath));
 });
+
+test('terminates hook subprocesses when aborted', async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-hook-abort-'));
+  const logPath = path.join(cwd, '.symphony', 'hooks', 'abort.log');
+  const controller = new AbortController();
+  const startedPath = path.join(cwd, 'started');
+  const childScriptPath = path.join(cwd, 'long-running-hook.js');
+  await fs.writeFile(
+    childScriptPath,
+    `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(startedPath)}, '1');\nsetInterval(() => {}, 1000);\n`,
+  );
+
+  const run = runHookScript(`node ${JSON.stringify(childScriptPath)}`, cwd, 30_000, { logPath, signal: controller.signal });
+
+  while (true) {
+    try {
+      await fs.access(startedPath);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  controller.abort('test shutdown');
+
+  await assert.rejects(
+    run,
+    (err: unknown) => {
+      assert.ok(err instanceof HookScriptError);
+      assert.match(err.message, /Hook cancelled: test shutdown/);
+      assert.equal(err.log_path, logPath);
+      return true;
+    },
+  );
+});
