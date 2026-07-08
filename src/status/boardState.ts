@@ -3,6 +3,7 @@ import path from 'node:path';
 import { readEpicStates, type EpicState } from './epicState.js';
 import { scanRunStates } from './scanRunStates.js';
 import type { RunState } from './runState.js';
+import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubClient.js';
 import { loadServerConfigFromFile } from '../server/loadServerConfig.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import { resolveWorkflowPath } from '../workflow/resolveWorkflowPath.js';
@@ -34,6 +35,7 @@ export interface BoardArtifactPaths {
 export interface BoardCard {
   id: string;
   kind: BoardCardKind;
+  task_key: string;
   column: BoardColumnId;
   repo_id: string | null;
   owner: string | null;
@@ -41,6 +43,8 @@ export interface BoardCard {
   issue_number: number | null;
   issue_identifier: string;
   issue_url: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
   title: string | null;
   labels: string[];
   status: string;
@@ -57,6 +61,7 @@ export interface BoardCard {
   artifacts: BoardArtifactPaths;
   review_auto_fix_iteration: number | null;
   epic_progress: string | null;
+  sources_count: number;
   stale: boolean;
 }
 
@@ -85,6 +90,7 @@ interface BoardRepoSource {
   config: WorkflowConfig;
   runs: RunState[];
   epics: EpicState[];
+  pullRequests: PullRequestRef[];
 }
 
 export interface BuildBoardStateOptions {
@@ -99,6 +105,7 @@ export interface LoadBoardStateOptions {
   config?: string;
   workflow?: string;
   refreshMs: number;
+  liveRefresh?: boolean;
   staleAfterMs?: number;
   now?: Date;
 }
@@ -131,12 +138,19 @@ function isStale(updatedAt: string, now: Date, staleAfterMs: number): boolean {
   return now.getTime() - updatedMs > staleAfterMs;
 }
 
+function issueNumberFromPullRequestBody(body: string | null): number | null {
+  if (!body) return null;
+  const match = /(?:^|[^A-Za-z])Fixes\s+#(\d+)(?:[^0-9]|$)/i.exec(body);
+  return match ? Number(match[1]) : null;
+}
+
 export function classifyRunState(state: RunState, terminalStates: string[]): BoardColumnId {
   const labels = labelsFor(state);
   const workflowState = state.workflow_state?.trim().toLowerCase() ?? null;
   const issueState = state.issue_state?.trim().toLowerCase() ?? null;
   const terminal = new Set(terminalStates.map((value) => value.trim().toLowerCase()));
 
+  if (issueState && terminal.has(issueState)) return 'closed';
   if (state.status === 'running' || workflowState === 'agent-running') return 'active';
   if (state.pause_reason === 'needs-info' || hasLabel(labels, 'needs-info')) return 'needs-info';
   if (hasLabel(labels, 'blocked') || workflowState === 'blocked') return 'blocked';
@@ -148,7 +162,6 @@ export function classifyRunState(state: RunState, terminalStates: string[]): Boa
     return 'waiting-human';
   }
   if (hasLabel(labels, 'ready-for-agent') || workflowState === 'ready-for-agent') return 'queued';
-  if (issueState && terminal.has(issueState)) return 'closed';
   if (state.status === 'failed' || state.status === 'cancelled') return 'failed-cancelled';
   if (state.status === 'completed') return 'waiting-human';
   return 'queued';
@@ -168,16 +181,28 @@ function repoFor(state: RunState, source: BoardRepoSource): string | null {
 
 function runCard(source: BoardRepoSource, state: RunState, now: Date, staleAfterMs: number): BoardCard {
   const labels = labelsFor(state);
+  const prToIssue = new Map(source.pullRequests.map((pr) => [pr.number, issueNumberFromPullRequestBody(pr.body)]));
+  const prForIssue = source.pullRequests.find((pr) => issueNumberFromPullRequestBody(pr.body) === state.issue_number) ?? null;
+  const parentIssueNumber = state.issue_number ? (prToIssue.get(state.issue_number) ?? state.issue_number) : null;
+  const isPullRequestCard = state.issue_number !== null && prToIssue.has(state.issue_number);
+  const prNumber = isPullRequestCard ? state.issue_number : prForIssue?.number ?? null;
+  const prUrl = isPullRequestCard ? state.issue_url : prForIssue?.url ?? null;
+  const owner = ownerFor(state, source);
+  const repo = repoFor(state, source);
+  const repoId = repoIdFor(state, source);
   return {
-    id: `run:${repoIdFor(state, source) ?? ownerFor(state, source) ?? ''}/${repoFor(state, source) ?? ''}:${state.issue_identifier}`,
+    id: `run:${repoId ?? owner ?? ''}/${repo ?? ''}:${parentIssueNumber ?? state.issue_identifier}`,
     kind: 'run',
+    task_key: `task:${repoId ?? owner ?? ''}/${repo ?? ''}:${parentIssueNumber ?? state.issue_identifier}`,
     column: classifyRunState(state, source.config.tracker.terminal_states),
-    repo_id: repoIdFor(state, source),
-    owner: ownerFor(state, source),
-    repo: repoFor(state, source),
+    repo_id: repoId,
+    owner,
+    repo,
     issue_number: state.issue_number,
     issue_identifier: state.issue_identifier,
     issue_url: state.issue_url,
+    pr_number: prNumber,
+    pr_url: prUrl,
     title: state.issue_title ?? null,
     labels,
     status: state.status,
@@ -199,6 +224,7 @@ function runCard(source: BoardRepoSource, state: RunState, now: Date, staleAfter
     },
     review_auto_fix_iteration: reviewAutoFixIteration(labels),
     epic_progress: null,
+    sources_count: 1,
     stale: isStale(state.updated_at, now, staleAfterMs),
   };
 }
@@ -208,6 +234,7 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
   return {
     id: `epic:${state.issue_identifier}`,
     kind: 'epic',
+    task_key: `epic:${state.issue_identifier}`,
     column: state.status === 'completed' ? 'closed' : 'epics',
     repo_id: state.repo_id ?? source.repoId,
     owner: state.owner ?? source.config.tracker.owner,
@@ -215,6 +242,8 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
     issue_number: state.issue_number,
     issue_identifier: state.issue_identifier,
     issue_url: state.issue_url,
+    pr_number: null,
+    pr_url: null,
     title: state.title,
     labels,
     status: `epic:${state.status}`,
@@ -236,8 +265,51 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
     },
     review_auto_fix_iteration: null,
     epic_progress: `${state.terminal_children}/${state.total_children}`,
+    sources_count: 1,
     stale: isStale(state.updated_at, now, staleAfterMs),
   };
+}
+
+function columnPriority(id: BoardColumnId): number {
+  return BOARD_COLUMNS.findIndex((column) => column.id === id);
+}
+
+function mergeCards(a: BoardCard, b: BoardCard): BoardCard {
+  const preferred = columnPriority(a.column) <= columnPriority(b.column) ? a : b;
+  const other = preferred === a ? b : a;
+  const updated_at = a.updated_at >= b.updated_at ? a.updated_at : b.updated_at;
+  return {
+    ...preferred,
+    labels: [...new Set([...a.labels, ...b.labels])].sort(),
+    pr_number: preferred.pr_number ?? other.pr_number,
+    pr_url: preferred.pr_url ?? other.pr_url,
+    last_error: preferred.last_error ?? other.last_error,
+    workspace_path: preferred.workspace_path ?? other.workspace_path,
+    artifacts: {
+      prompt: preferred.artifacts.prompt ?? other.artifacts.prompt,
+      agent_log: preferred.artifacts.agent_log ?? other.artifacts.agent_log,
+      last_message: preferred.artifacts.last_message ?? other.artifacts.last_message,
+      codex_jsonl: preferred.artifacts.codex_jsonl ?? other.artifacts.codex_jsonl,
+    },
+    review_auto_fix_iteration:
+      preferred.review_auto_fix_iteration === null
+        ? other.review_auto_fix_iteration
+        : other.review_auto_fix_iteration === null
+          ? preferred.review_auto_fix_iteration
+          : Math.max(preferred.review_auto_fix_iteration, other.review_auto_fix_iteration),
+    updated_at,
+    sources_count: a.sources_count + b.sources_count,
+    stale: a.stale && b.stale,
+  };
+}
+
+function consolidateCards(cards: BoardCard[]): BoardCard[] {
+  const byTask = new Map<string, BoardCard>();
+  for (const card of cards) {
+    const existing = byTask.get(card.task_key);
+    byTask.set(card.task_key, existing ? mergeCards(existing, card) : card);
+  }
+  return [...byTask.values()];
 }
 
 function cardSort(a: BoardCard, b: BoardCard): number {
@@ -251,10 +323,10 @@ function cardSort(a: BoardCard, b: BoardCard): number {
 export function buildBoardState(options: BuildBoardStateOptions): BoardState {
   const now = options.now ?? new Date();
   const staleAfterMs = options.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
-  const cards = options.repos.flatMap((source) => [
+  const cards = consolidateCards(options.repos.flatMap((source) => [
     ...source.runs.map((state) => runCard(source, state, now, staleAfterMs)),
     ...source.epics.map((state) => epicCard(source, state, now, staleAfterMs)),
-  ]);
+  ]));
   const byColumn = new Map<BoardColumnId, BoardCard[]>();
   for (const card of cards) {
     const column = byColumn.get(card.column) ?? [];
@@ -276,15 +348,43 @@ export function buildBoardState(options: BuildBoardStateOptions): BoardState {
   };
 }
 
-async function loadRepoSource(repoId: string | null, workflowPath: string): Promise<BoardRepoSource> {
+async function refreshRunsFromGithub(config: WorkflowConfig, runs: RunState[]): Promise<{ runs: RunState[]; pullRequests: PullRequestRef[] }> {
+  const client = new GithubIssueTrackerClient(config.tracker);
+  const [pullRequests, refreshed] = await Promise.all([
+    client.listOpenPullRequests().catch(() => []),
+    Promise.all(
+      runs.map(async (state) => {
+        if (!state.issue_number) return state;
+        const issue = await client.fetchIssueOrPullRequestByNumber(state.issue_number).catch(() => null);
+        if (!issue) return state;
+        return {
+          ...state,
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          issue_url: issue.url,
+          issue_title: issue.title,
+          issue_state: issue.state,
+          labels: issue.labels,
+          workflow_state: issue.workflow_state,
+          updated_at: issue.updated_at ?? state.updated_at,
+        };
+      }),
+    ),
+  ]);
+  return { runs: refreshed, pullRequests };
+}
+
+async function loadRepoSource(repoId: string | null, workflowPath: string, liveRefresh: boolean): Promise<BoardRepoSource> {
   const loaded = await loadWorkflowFromFile(workflowPath);
   const [runs, epics] = await Promise.all([scanRunStates(loaded.config.workspace.root), readEpicStates(loaded.config.workspace.root)]);
+  const refreshed = liveRefresh ? await refreshRunsFromGithub(loaded.config, runs) : { runs, pullRequests: [] };
   return {
     repoId,
     workflowPath,
     config: loaded.config,
-    runs,
+    runs: refreshed.runs,
     epics,
+    pullRequests: refreshed.pullRequests,
   };
 }
 
@@ -293,7 +393,7 @@ export async function loadBoardState(options: LoadBoardStateOptions): Promise<Bo
     const configPath = path.resolve(options.config);
     const serverConfig = await loadServerConfigFromFile(configPath);
     const repos = await Promise.all(
-      serverConfig.repos.filter((repo) => repo.enabled).map((repo) => loadRepoSource(repo.id, repo.workflow)),
+      serverConfig.repos.filter((repo) => repo.enabled).map((repo) => loadRepoSource(repo.id, repo.workflow, options.liveRefresh ?? false)),
     );
     return buildBoardState({
       source: { kind: 'config', path: configPath },
@@ -305,7 +405,7 @@ export async function loadBoardState(options: LoadBoardStateOptions): Promise<Bo
   }
 
   const workflowPath = await resolveWorkflowPath(options.workflow ?? 'WORKFLOW.md');
-  const source = await loadRepoSource(null, workflowPath);
+  const source = await loadRepoSource(null, workflowPath, options.liveRefresh ?? false);
   return buildBoardState({
     source: { kind: 'workflow', path: workflowPath },
     repos: [source],

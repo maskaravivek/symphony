@@ -9,6 +9,7 @@ export interface DashboardServerOptions {
   host: string;
   port: number;
   refreshMs: number;
+  liveRefresh?: boolean;
 }
 
 export interface StartedDashboardServer {
@@ -51,7 +52,7 @@ function renderDashboardHtml(refreshMs: number): string {
       --warn: #a86a00;
       --bad: #b42318;
       --review: #6f3cc3;
-      --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -86,14 +87,14 @@ function renderDashboardHtml(refreshMs: number): string {
       gap: 16px;
       align-items: center;
       justify-content: space-between;
-      padding: 14px 18px;
+      padding: 12px 16px;
       border-bottom: 1px solid var(--border);
       background: color-mix(in srgb, var(--panel) 94%, transparent);
       backdrop-filter: blur(10px);
     }
     h1 {
       margin: 0;
-      font-size: 18px;
+      font-size: 17px;
       font-weight: 700;
     }
     .meta {
@@ -127,13 +128,13 @@ function renderDashboardHtml(refreshMs: number): string {
     .stale { color: var(--warn); }
     main {
       overflow-x: auto;
-      padding: 16px 18px 22px;
+      padding: 12px 14px 18px;
     }
     .board {
       display: grid;
-      grid-auto-columns: minmax(280px, 320px);
+      grid-auto-columns: minmax(250px, 290px);
       grid-auto-flow: column;
-      gap: 12px;
+      gap: 10px;
       align-items: start;
       min-height: calc(100vh - 86px);
     }
@@ -148,7 +149,7 @@ function renderDashboardHtml(refreshMs: number): string {
       justify-content: space-between;
       align-items: center;
       gap: 10px;
-      padding: 10px 10px 8px;
+      padding: 8px 9px;
       border-bottom: 1px solid var(--border);
     }
     .column-title {
@@ -163,8 +164,8 @@ function renderDashboardHtml(refreshMs: number): string {
     }
     .cards {
       display: grid;
-      gap: 8px;
-      padding: 10px;
+      gap: 6px;
+      padding: 8px;
     }
     .empty {
       color: var(--muted);
@@ -173,8 +174,8 @@ function renderDashboardHtml(refreshMs: number): string {
     }
     .card {
       display: grid;
-      gap: 8px;
-      padding: 10px;
+      gap: 6px;
+      padding: 8px;
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -188,6 +189,12 @@ function renderDashboardHtml(refreshMs: number): string {
     .card.queued { border-left: 4px solid var(--muted); }
     .card.closed { opacity: 0.72; }
     .card.epics { border-left: 4px solid var(--accent); }
+      cursor: pointer;
+    }
+    .card:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
     .card-top {
       display: flex;
       gap: 8px;
@@ -196,7 +203,7 @@ function renderDashboardHtml(refreshMs: number): string {
     }
     .issue {
       min-width: 0;
-      font-size: 13px;
+      font-size: 12px;
       font-weight: 700;
       overflow-wrap: anywhere;
     }
@@ -212,9 +219,14 @@ function renderDashboardHtml(refreshMs: number): string {
     }
     .title {
       color: var(--text);
-      font-size: 13px;
-      line-height: 1.35;
+      font-size: 12px;
+      line-height: 1.25;
       overflow-wrap: anywhere;
+    }
+    .card-summary {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
     }
     .fields {
       display: grid;
@@ -222,6 +234,7 @@ function renderDashboardHtml(refreshMs: number): string {
       color: var(--muted);
       font-size: 12px;
     }
+    .card:not(.expanded) .details { display: none; }
     .field {
       display: grid;
       grid-template-columns: 70px minmax(0, 1fr);
@@ -261,8 +274,8 @@ function renderDashboardHtml(refreshMs: number): string {
     @media (max-width: 720px) {
       header { align-items: flex-start; flex-direction: column; }
       .source { max-width: 92vw; }
-      main { padding: 12px; }
-      .board { grid-auto-columns: minmax(260px, 86vw); }
+      main { padding: 10px; }
+      .board { grid-auto-columns: minmax(240px, 86vw); }
     }
   </style>
 </head>
@@ -350,16 +363,40 @@ function renderDashboardHtml(refreshMs: number): string {
       }
       top.append(issue, el('div', 'repo', card.repo_id || card.repo || '-'));
       node.append(top);
-      node.append(el('div', 'title', card.title || card.issue_identifier));
+      node.tabIndex = 0;
+      node.setAttribute('role', 'button');
+      node.setAttribute('aria-expanded', 'false');
+      node.addEventListener('click', (event) => {
+        if (event.target.closest('a,input')) return;
+        node.classList.toggle('expanded');
+        node.setAttribute('aria-expanded', node.classList.contains('expanded') ? 'true' : 'false');
+      });
+      node.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        node.click();
+      });
 
-      const fields = el('div', 'fields');
+      node.append(el('div', 'title', card.title || card.issue_identifier));
+      const summary = el('div', 'card-summary');
+      summary.append(el('span', 'pill', card.status));
+      if (card.agent_provider) summary.append(el('span', 'pill', card.agent_provider));
+      if (card.pr_number) summary.append(el('span', 'pill', 'PR #' + card.pr_number));
+      if (card.review_auto_fix_iteration !== null) summary.append(el('span', 'pill', 'auto-fix ' + card.review_auto_fix_iteration));
+      if (card.epic_progress) summary.append(el('span', 'pill', card.epic_progress));
+      if (card.stale) summary.append(el('span', 'pill stale', 'stale'));
+      node.append(summary);
+
+      const fields = el('div', 'fields details');
       fields.append(field('status', card.status));
       fields.append(field('flow', card.workflow_state || card.issue_state || '-'));
       if (card.agent_provider || card.agent_mode) fields.append(field('agent', [card.agent_provider, card.agent_mode].filter(Boolean).join(' / ')));
       if (card.attempt !== null) fields.append(field('attempt', card.attempt));
       if (card.thread_id) fields.append(field('thread', shortThread(card.thread_id)));
+      if (card.pr_number) fields.append(field('pr', '#' + card.pr_number));
       if (card.epic_progress) fields.append(field('progress', card.epic_progress));
       if (card.review_auto_fix_iteration !== null) fields.append(field('auto-fix', card.review_auto_fix_iteration));
+      if (card.sources_count > 1) fields.append(field('sources', card.sources_count));
       fields.append(field('updated', formatDate(card.updated_at), card.stale ? 'stale' : ''));
       if (card.last_error) fields.append(field('error', card.last_error, 'error'));
       const workspace = pathField('workspace', card.workspace_path);
@@ -371,7 +408,7 @@ function renderDashboardHtml(refreshMs: number): string {
       node.append(fields);
 
       if (card.labels && card.labels.length > 0) {
-        const labels = el('div', 'label-list');
+        const labels = el('div', 'label-list details');
         for (const label of card.labels) labels.append(el('span', 'label', label));
         node.append(labels);
       }
@@ -442,6 +479,7 @@ export function createDashboardRequestHandler(options: Omit<DashboardServerOptio
           config: options.config,
           workflow: options.workflow,
           refreshMs: options.refreshMs,
+          liveRefresh: options.liveRefresh ?? true,
         } satisfies LoadBoardStateOptions);
         writeJson(res, 200, method === 'HEAD' ? null : board);
       } catch (err) {

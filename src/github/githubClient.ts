@@ -371,6 +371,12 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
   }
 
+  async fetchIssueOrPullRequestByNumber(number: number): Promise<Issue | null> {
+    const payload = await this.fetchIssueByNumberInRepo(this.tracker.owner, this.tracker.repo, number);
+    if (!payload) return null;
+    return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+  }
+
   async listSubIssues(number: number): Promise<Issue[]> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/sub_issues`, this.tracker.api_base_url);
     url.searchParams.set('per_page', String(this.tracker.page_size));

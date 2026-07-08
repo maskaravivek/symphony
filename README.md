@@ -81,7 +81,7 @@ yarn cli -- tail mdedit#264 --config ./symphony.config.yml
 yarn cli -- dashboard --config ./symphony.config.yml
 ```
 
-The dashboard is a local readonly Kanban view backed by the same `.symphony/run.json` and epic state files as the CLI helpers. By default it binds to `127.0.0.1:3766` and auto-picks the next available port when needed.
+The dashboard is a local readonly Kanban view backed by the same `.symphony/run.json` and epic state files as the CLI helpers, with readonly GitHub refreshes layered on top when available so closed or merged work does not linger in active review columns. By default it binds to `127.0.0.1:3766` and auto-picks the next available port when needed.
 
 ## When to use Symphony vs Codex app
 
@@ -218,7 +218,7 @@ When GitHub rejects a label write because a managed label does not exist yet, Sy
 - `codexbar` commands are supported directly at runtime: when a check command invokes `codexbar` with `--provider` and `--format json`, Symphony parses usage percentages and blocks when any active window is at or above 90% used.
   If it can parse a `resetsAt` value for a blocked window, it uses that as a short-lived block backoff until that window resets.
 - `workspace.strategy` is optional and defaults to today's durable per-issue workspace behavior. Supported strategies are `durable_issue_workspace`, `pooled_isolated`, `none_or_readonly`, and `durable_epic_workspace`; hooks and agent commands receive the selected value as `symphony.workspace_strategy` / `SYMPHONY_WORKSPACE_STRATEGY`.
-- Each workflow workspace root has a single-runner lock at `.symphony/orchestrator.lock`; a second Symphony process for the same repo skips dispatch while the live owner is running. Live orphaned workers discovered after a restart count against concurrency until they finish.
+- Each workflow workspace root has a single-runner lock at `.symphony/orchestrator.lock`; a second Symphony process for the same repo skips dispatch while the live owner is running. After a restart, Symphony recovers orphaned `agent-running` claims from older runs by cancelling the stale worker PID when possible, clearing `agent-running`, and re-queueing the issue unless it now has an ignored label.
 - If a workspace exists but is missing `.git`, Symphony will clear the workspace contents and re-run `hooks.after_create` (to recover from interrupted runs).
 - Hook scripts (`hooks.after_create`, `hooks.before_run`, `hooks.after_run`) are rendered as Liquid templates with `issue.*` available.
 - Agent commands are rendered as Liquid templates with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` / `symphony.agent_provider` / `symphony.agent_thread_id` available.

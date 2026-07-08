@@ -318,6 +318,15 @@ function isProcessAlive(pid: number | null | undefined): boolean {
   }
 }
 
+function terminateOrphanedWorker(pid: number | null | undefined): void {
+  if (!pid || pid <= 0 || pid === process.pid) return;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    // Process may have already exited by the time recovery runs.
+  }
+}
+
 function getIssueLogFields(config: WorkflowConfig, issue: Issue, repoId: string | null = null): LogFields {
   return {
     repo_id: repoId ?? undefined,
@@ -430,7 +439,6 @@ export class Orchestrator {
   private githubRateLimitBackoffUntilMs = 0;
   private workflowLock: WorkflowLock | null = null;
   private liveOrphanClaims = new Map<string, LiveOrphanClaim>();
-  private liveOrphanLogLastAtMs = new Map<string, number>();
 
   private stopped = false;
   private shutdownController = new AbortController();
@@ -801,27 +809,19 @@ export class Orchestrator {
         : await workspaceManager.ensureWorkspace(issue, { strategy: 'durable_issue_workspace' });
       const workspacePath = fallbackWorkspacePath;
       const state = existingState ?? (await readRunState(workspacePath));
+      const liveOrphan = state?.status === 'running' && isProcessAlive(state.worker_pid);
       if (state?.status === 'running' && isProcessAlive(state.worker_pid)) {
-        const provider = selectAgentProvider(config, issue);
-        this.liveOrphanClaims.set(issue.id, {
-          issue_state: issue.state,
-          agent_provider_group: state.agent_provider_group ?? providerLimitKey(provider),
-        });
-        if (this.shouldLogLiveOrphanClaim(issue.id)) {
-          log('info', 'orphaned_claim_still_running', {
-            ...getIssueLogFields(config, issue, this.repoId),
-            workspace_path: workspacePath,
-            event: 'orphaned_claim_still_running',
-            worker_pid: state.worker_pid ?? undefined,
-          });
-        }
-        continue;
+        terminateOrphanedWorker(state.worker_pid);
       }
 
       const ignored = hasAnyLabel(issue.labels, config.tracker.ignored_labels);
       const nextLabels = ignored ? { remove: [LABEL_RUNNING] } : { add: [LABEL_READY], remove: [LABEL_RUNNING] };
       const nextWorkflowState = ignored ? null : LABEL_READY;
-      const reason = state?.status === 'running' ? 'worker_pid_not_alive' : 'agent_running_without_running_state';
+      const reason = liveOrphan
+        ? 'live_orphan_worker_terminated'
+        : state?.status === 'running'
+          ? 'worker_pid_not_alive'
+          : 'agent_running_without_running_state';
 
       log('warn', 'orphaned_claim_recovered', {
         ...getIssueLogFields(config, issue, this.repoId),
@@ -850,14 +850,6 @@ export class Orchestrator {
           : null,
       );
     }
-  }
-
-  private shouldLogLiveOrphanClaim(issueId: string): boolean {
-    const now = nowMs();
-    const last = this.liveOrphanLogLastAtMs.get(issueId);
-    if (last !== undefined && now - last < 5 * 60_000) return false;
-    this.liveOrphanLogLastAtMs.set(issueId, now);
-    return true;
   }
 
   private async sweepTerminalWorkspaces(
@@ -1344,6 +1336,7 @@ export class Orchestrator {
       try {
         await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt, provider, stackContext: stackContext?.context ?? null });
         if (capacity.remaining !== null) capacity.remaining -= 1;
+        if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, candidate, this.repoId),
@@ -1374,6 +1367,7 @@ export class Orchestrator {
       try {
         await this.dispatchIssue(config, issue, workspaceManager, { attempt: 1, provider, stackContext: stackContext?.context ?? null });
         if (capacity.remaining !== null) capacity.remaining -= 1;
+        if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, issue, this.repoId),

@@ -90,18 +90,35 @@ async function main(): Promise<void> {
   openBrowser(dashboard.url);
 
   const runProcess = startRunProcess(config.runArgs);
-  let shuttingDown = false;
+  let interruptCount = 0;
+  let forceExitTimer: NodeJS.Timeout | null = null;
 
   const shutdown = (signal: NodeJS.Signals) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    runProcess.kill(signal);
+    interruptCount += 1;
+    if (interruptCount === 1) {
+      // eslint-disable-next-line no-console
+      console.log(`Shutting down Symphony (${signal}). Press Ctrl+C again to force.`);
+      runProcess.kill(signal);
+      forceExitTimer = setTimeout(() => {
+        // eslint-disable-next-line no-console
+        console.error('Force exiting Symphony dev server after shutdown timeout.');
+        runProcess.kill('SIGKILL');
+        void closeDashboard(dashboard).finally(() => process.exit(1));
+      }, 10_000);
+      forceExitTimer.unref();
+      return;
+    }
+
+    // eslint-disable-next-line no-console
+    console.error('Force killing Symphony dev server.');
+    runProcess.kill('SIGKILL');
+    void closeDashboard(dashboard).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
   };
 
-  process.once('SIGINT', () => {
+  process.on('SIGINT', () => {
     shutdown('SIGINT');
   });
-  process.once('SIGTERM', () => {
+  process.on('SIGTERM', () => {
     shutdown('SIGTERM');
   });
 
@@ -113,6 +130,7 @@ async function main(): Promise<void> {
     });
   });
 
+  if (forceExitTimer) clearTimeout(forceExitTimer);
   await closeDashboard(dashboard);
   process.exitCode = exitCode;
 }

@@ -201,7 +201,7 @@ test('classifies local run states into dashboard columns by priority', () => {
     ['ready review mode', makeRunState({ agent_mode: 'pr-review', workflow_state: 'ready-for-human' }), 'ready-for-review'],
     ['waiting human', makeRunState({ labels: ['ready-for-human'] }), 'waiting-human'],
     ['queued', makeRunState({ labels: ['ready-for-agent'] }), 'queued'],
-    ['closed', makeRunState({ issue_state: 'closed', status: 'cancelled' }), 'closed'],
+    ['closed', makeRunState({ issue_state: 'closed', labels: ['symphony-review:passed', 'ready-for-human'], status: 'cancelled' }), 'closed'],
     ['failed', makeRunState({ status: 'failed' }), 'failed-cancelled'],
     ['cancelled', makeRunState({ status: 'cancelled' }), 'failed-cancelled'],
   ];
@@ -209,6 +209,54 @@ test('classifies local run states into dashboard columns by priority', () => {
   for (const [name, state, expected] of cases) {
     assert.equal(classifyRunState(state, terminalStates), expected, name);
   }
+});
+
+test('collapses issue and pull request run states into one task card', () => {
+  const board = buildBoardState({
+    source: { kind: 'workflow', path: '/tmp/WORKFLOW.md' },
+    refreshMs: 5000,
+    now: NOW,
+    repos: [
+      {
+        repoId: 'mdedit',
+        workflowPath: '/tmp/WORKFLOW.md',
+        config: makeWorkflowConfig('/tmp/workspace'),
+        runs: [
+          makeRunState({ issue_number: 42, issue_identifier: 'mangoappstudio/mdedit#42', labels: ['ready-for-human'] }),
+          makeRunState({
+            issue_id: 'pr-77',
+            issue_number: 77,
+            issue_identifier: 'mangoappstudio/mdedit#77',
+            issue_url: 'https://github.test/mangoappstudio/mdedit/pull/77',
+            labels: ['symphony-review:passed', 'ready-for-human'],
+            agent_mode: 'pr-review',
+          }),
+        ],
+        epics: [],
+        pullRequests: [
+          {
+            number: 77,
+            title: 'Implementation PR',
+            body: 'Fixes #42',
+            state: 'open',
+            labels: ['ready-for-human'],
+            is_draft: false,
+            url: 'https://github.test/mangoappstudio/mdedit/pull/77',
+            head_ref: 'symphony-42-work',
+            head_sha: 'abc123',
+            base_ref: 'main',
+            merge_state_status: 'clean',
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(board.total_cards, 1);
+  const card = board.columns.flatMap((column) => column.cards)[0];
+  assert.equal(card?.sources_count, 2);
+  assert.equal(card?.pr_number, 77);
+  assert.equal(card?.column, 'ready-for-review');
 });
 
 test('builds epic cards with coordinating and completed columns', () => {
@@ -223,6 +271,7 @@ test('builds epic cards with coordinating and completed columns', () => {
         config: makeWorkflowConfig('/tmp/workspace'),
         runs: [],
         epics: [makeEpic(), makeEpic({ issue_id: 'epic-2', issue_number: 101, issue_identifier: 'mangoappstudio/mdedit#101', status: 'completed' })],
+        pullRequests: [],
       },
     ],
   });

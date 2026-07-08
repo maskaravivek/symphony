@@ -87,6 +87,7 @@ test('serves readonly dashboard HTML and board JSON', async () => {
     host: '127.0.0.1',
     port: 0,
     refreshMs: 1000,
+    liveRefresh: false,
   });
 
   try {

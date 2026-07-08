@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { writeRunState, type RunState } from '../status/runState.js';
+import { readRunState, writeRunState, type RunState } from '../status/runState.js';
 import { Orchestrator } from './orchestrator.js';
 import { acquireWorkflowLock } from './workflowLock.js';
 
@@ -128,6 +128,9 @@ function installFetchMock(issueState: string, calls: { url: string; method: stri
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
       return jsonResponse([]);
     }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42') {
+      return jsonResponse(issuePayload(42, 'Pooled live issue', 'open', ['ready-for-agent']));
+    }
 
     throw new Error(`Unexpected fetch ${method} ${url}`);
   };
@@ -183,7 +186,7 @@ test('keeps live running workspaces during terminal sweeps', async () => {
   assert.equal(calls.some((call) => call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42'), false);
 });
 
-test('orphan reconciliation preserves live pooled workspaces', async () => {
+test('orphan reconciliation recovers live pooled workspaces', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pooled-orphan-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot);
   const workspacePath = await writeWorkspace(workspaceRoot, '_pool_1', {
@@ -211,6 +214,12 @@ test('orphan reconciliation preserves live pooled workspaces', async () => {
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
       return jsonResponse([]);
     }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels' && method === 'POST') {
+      return jsonResponse([{ name: 'ready-for-agent' }]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels/agent-running' && method === 'DELETE') {
+      return new Response(null, { status: 204 });
+    }
 
     throw new Error(`Unexpected fetch ${method} ${url}`);
   };
@@ -224,11 +233,14 @@ test('orphan reconciliation preserves live pooled workspaces', async () => {
   }
 
   await assert.doesNotReject(fs.access(workspacePath));
-  assert.equal(calls.some((call) => call.method === 'DELETE' && call.url.includes('/labels/agent-running')), false);
-  assert.equal(calls.some((call) => call.method === 'POST' && call.url.endsWith('/labels')), false);
+  const state = await readRunState(workspacePath);
+  assert.equal(state?.status, 'cancelled');
+  assert.equal(state?.workflow_state, 'ready-for-agent');
+  assert.equal(calls.some((call) => call.method === 'DELETE' && call.url.includes('/labels/agent-running')), true);
+  assert.equal(calls.some((call) => call.method === 'POST' && call.url.endsWith('/labels')), true);
 });
 
-test('live orphaned workers consume dispatch capacity', async () => {
+test('live orphaned workers are recovered before dispatch capacity is checked', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-orphan-capacity-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot);
   await writeWorkspace(workspaceRoot, 'mangoappstudio_mdedit_42', {
@@ -256,6 +268,21 @@ test('live orphaned workers consume dispatch capacity', async () => {
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
       return jsonResponse([issuePayload(43, 'Queued issue', 'open', ['ready-for-agent'])]);
     }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42') {
+      return jsonResponse(issuePayload(42, 'Live orphan', 'open', ['ready-for-agent']));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels' && method === 'POST') {
+      return jsonResponse([{ name: 'ready-for-agent' }]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels/agent-running' && method === 'DELETE') {
+      return new Response(null, { status: 204 });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' && method === 'POST') {
+      return jsonResponse([{ name: 'agent-running' }]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels/ready-for-agent' && method === 'DELETE') {
+      return new Response(null, { status: 204 });
+    }
 
     throw new Error(`Unexpected fetch ${method} ${url}`);
   };
@@ -263,7 +290,6 @@ test('live orphaned workers consume dispatch capacity', async () => {
   try {
     const orchestrator = new Orchestrator({ workflowPath });
     await orchestrator.tickOnce();
-    assert.equal(orchestrator.getRunningCount(), 1);
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;
@@ -272,11 +298,10 @@ test('live orphaned workers consume dispatch capacity', async () => {
   assert.equal(
     calls.some(
       (call) =>
-        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' &&
-        call.method === 'POST' &&
-        JSON.stringify(call.body) === JSON.stringify({ labels: ['agent-running'] }),
+        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/comments?per_page=50' &&
+        call.method === 'GET',
     ),
-    false,
+    true,
   );
 });
 
