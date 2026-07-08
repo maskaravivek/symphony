@@ -187,11 +187,15 @@ Issues labeled `task:spec` or `planning` run in planning-only mode regardless of
 
 ## Post-Run PR Review
 
-When an autonomous run produces a PR, Symphony writes a staff-engineer review prompt to `.symphony/review_prompt.md` and exposes it to `hooks.after_run` as `SYMPHONY_REVIEW_PROMPT_PATH` plus PR metadata such as `SYMPHONY_REVIEW_PR_NUMBER`. The prompt asks the review agent to prefer `/code-review` when the target repo has that skill installed, and to fall back to a manual review otherwise.
+When an autonomous run produces a PR, Symphony writes a staff-engineer review prompt to `.symphony/review_prompt.md` and exposes it to `hooks.after_run` as `SYMPHONY_REVIEW_PROMPT_PATH` plus PR metadata such as `SYMPHONY_REVIEW_PR_NUMBER`, `SYMPHONY_REVIEW_PR_HEAD_REF`, and `SYMPHONY_REVIEW_PR_HEAD_SHA`. The prompt asks the review agent to prefer `/code-review` when the target repo has that skill installed, and to fall back to a manual review otherwise.
 
 Review hooks should end with `REVIEW_VERDICT: PASS` or `REVIEW_VERDICT: BLOCK`. Passing reviews label the PR `symphony-review:passed` and `ready-for-human`. Blocking reviews label the PR `symphony-review:blocking`.
 
-If `review.auto_fix_review_comments` is true, blocking reviews remove `ready-for-human`, add `ready-for-agent`, and add `symphony-review:auto-fix-N` until `review.number_of_auto_fix_iterations` is exhausted. Once exhausted, Symphony leaves the PR `ready-for-human` instead of reviewing or fixing the same PR forever.
+Labels are not the source of truth for whether a PR has already been reviewed. Symphony also maintains a hidden PR comment marked `symphony-review-state:v1` with the reviewed head SHA, verdict, and auto-fix iteration count. A PR is skipped only when that durable state says the current head SHA already passed review. If new commits are pushed, the SHA changes and Symphony can review the PR again.
+
+If `review.auto_fix_review_comments` is true, blocking reviews remove `ready-for-human`, add `ready-for-agent`, and add `symphony-review:auto-fix-N` until `review.number_of_auto_fix_iterations` is exhausted. If a blocking review repeats on the same head SHA, Symphony waits for a human immediately instead of spending more iterations on a PR that did not change. Once exhausted, Symphony leaves the PR `ready-for-human` instead of reviewing or fixing the same PR forever.
+
+When GitHub rejects a label write because a managed label does not exist yet, Symphony creates the missing label and retries the write. Hook output is streamed live, but Symphony only retains a bounded tail in memory for verdict parsing and error messages; override the default with `SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES` if needed.
 
 ## Notes
 

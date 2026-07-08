@@ -150,6 +150,54 @@ test('writes GitHub labels through REST endpoints', async () => {
   ]);
 });
 
+test('creates missing labels and retries label writes', async () => {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  let addAttempt = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels' && method === 'POST') {
+      addAttempt += 1;
+      if (addAttempt === 1) {
+        return new Response(JSON.stringify({ message: 'Validation Failed', errors: [{ code: 'missing_label', field: 'labels' }] }), {
+          status: 422,
+          statusText: 'Unprocessable Entity',
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return jsonResponse([]);
+    }
+
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/labels' && method === 'POST') {
+      return jsonResponse({ name: 'symphony-review:passed' }, { status: 201 });
+    }
+
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    await client.addLabels(42, ['symphony-review:passed']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(calls.map((call) => [call.method, call.url]), [
+    ['POST', 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels'],
+    ['POST', 'https://api.github.test/repos/mangoappstudio/mdedit/labels'],
+    ['POST', 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/labels'],
+  ]);
+  assert.deepEqual(calls[1]?.body, {
+    name: 'symphony-review:passed',
+    color: '5319e7',
+    description: 'Managed by Symphony PR review workflow.',
+  });
+});
+
 test('creates sticky status comment when marker is missing', async () => {
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;
@@ -288,6 +336,7 @@ test('lists open pull requests with merge state fields', async () => {
       is_draft: false,
       url: 'https://github.test/pr/353',
       head_ref: 'codex-339-migrate-frontend',
+      head_sha: null,
       base_ref: 'main',
       merge_state_status: 'dirty',
     },

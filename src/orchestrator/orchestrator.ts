@@ -79,6 +79,7 @@ interface PullRequestReviewDispatchOptions {
   pr_number: number;
   pr_url: string | null;
   head_ref: string;
+  head_sha: string | null;
   base_ref: string;
 }
 
@@ -120,6 +121,21 @@ interface EpicStackPlanEntry {
   skipped_reason: string | null;
 }
 
+type PullRequestReviewVerdict = 'pass' | 'block';
+
+interface PullRequestReviewState {
+  version: 1;
+  pr_number: number;
+  issue_number: number | null;
+  head_ref: string;
+  head_sha: string | null;
+  base_ref: string;
+  verdict: PullRequestReviewVerdict;
+  auto_fix_iterations: number;
+  reviewed_at: string;
+  reason: string;
+}
+
 type EpicExecutionMode = WorkflowConfig['tracker']['epics']['execution_mode'];
 
 const LABEL_READY = 'ready-for-agent';
@@ -134,6 +150,7 @@ const LABEL_EPIC_INDEPENDENT = 'epic:independent';
 const LABEL_REVIEW_PASSED = 'symphony-review:passed';
 const LABEL_REVIEW_BLOCKING = 'symphony-review:blocking';
 const LABEL_REVIEW_AUTO_FIX_PREFIX = 'symphony-review:auto-fix-';
+const REVIEW_STATE_MARKER = '<!-- symphony-review-state:v1 -->';
 
 function nowMs(): number {
   return Date.now();
@@ -229,6 +246,49 @@ function parseReviewVerdict(output: string): 'pass' | 'block' | null {
 function hookOutputFromError(err: unknown): string {
   if (err instanceof HookScriptError) return err.output;
   return '';
+}
+
+function parsePullRequestReviewStateComment(body: string): PullRequestReviewState | null {
+  if (!body.includes(REVIEW_STATE_MARKER)) return null;
+  const match = /```json\s*([\s\S]*?)```/i.exec(body);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<PullRequestReviewState>;
+    if (parsed.version !== 1) return null;
+    if (typeof parsed.pr_number !== 'number') return null;
+    if (parsed.verdict !== 'pass' && parsed.verdict !== 'block') return null;
+    return {
+      version: 1,
+      pr_number: parsed.pr_number,
+      issue_number: typeof parsed.issue_number === 'number' ? parsed.issue_number : null,
+      head_ref: typeof parsed.head_ref === 'string' ? parsed.head_ref : '',
+      head_sha: typeof parsed.head_sha === 'string' ? parsed.head_sha : null,
+      base_ref: typeof parsed.base_ref === 'string' ? parsed.base_ref : 'main',
+      verdict: parsed.verdict,
+      auto_fix_iterations: Number.isInteger(parsed.auto_fix_iterations) && parsed.auto_fix_iterations! >= 0 ? parsed.auto_fix_iterations! : 0,
+      reviewed_at: typeof parsed.reviewed_at === 'string' ? parsed.reviewed_at : '',
+      reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatPullRequestReviewStateComment(state: PullRequestReviewState): string {
+  return `${REVIEW_STATE_MARKER}
+### Symphony PR Review State
+
+This comment is managed by Symphony. It records the PR head SHA that was reviewed so Symphony can avoid duplicate reviews without relying on mutable labels.
+
+\`\`\`json
+${JSON.stringify(state, null, 2)}
+\`\`\`
+`;
+}
+
+function pullRequestHeadMatchesState(pr: PullRequestRef, state: PullRequestReviewState | null): boolean {
+  if (!state?.head_sha || !pr.head_sha) return false;
+  return state.head_sha === pr.head_sha;
 }
 
 function shouldWaitForMergeState(value: string | null): boolean {
@@ -980,11 +1040,27 @@ export class Orchestrator {
       if (capacity.remaining !== null && capacity.remaining <= 0) return;
       if (!issue.number) continue;
       if (this.running.has(issue.id)) continue;
-      if (issue.labels.includes(LABEL_REVIEW_PASSED)) continue;
 
       const pr = await tracker.fetchPullRequest(issue.number).catch(() => null);
       if (!pr || pr.is_draft || !pr.head_ref) continue;
-      if (pr.labels.includes(LABEL_REVIEW_PASSED)) continue;
+      const reviewState = await this.readPullRequestReviewState(config, pr.number).catch((err) => {
+        log('warn', 'pr_review_state_read_failed', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'pr_review_state_read_failed',
+          pr_number: pr.number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      });
+      if (reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
+        log('info', 'pr_review_skipped_already_passed_for_head', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'pr_review_skipped_already_passed_for_head',
+          pr_number: pr.number,
+          head_sha: pr.head_sha ?? '',
+        });
+        continue;
+      }
 
       const provider = selectAgentProvider(config, issue);
       if (this.dispatchBlockReason(config, issue, provider, capacity)) continue;
@@ -998,6 +1074,7 @@ export class Orchestrator {
             pr_number: pr.number,
             pr_url: pr.url,
             head_ref: pr.head_ref,
+            head_sha: pr.head_sha,
             base_ref: pr.base_ref || 'main',
           },
         });
@@ -1332,6 +1409,7 @@ export class Orchestrator {
       review_pr_number: '',
       review_pr_url: '',
       review_pr_head_ref: '',
+      review_pr_head_sha: '',
       review_pr_base_ref: '',
     };
     const hookEnv: Record<string, string> = {
@@ -1360,6 +1438,7 @@ export class Orchestrator {
       SYMPHONY_REVIEW_PR_NUMBER: '',
       SYMPHONY_REVIEW_PR_URL: '',
       SYMPHONY_REVIEW_PR_HEAD_REF: '',
+      SYMPHONY_REVIEW_PR_HEAD_SHA: '',
       SYMPHONY_REVIEW_PR_BASE_REF: '',
     };
 
@@ -1457,7 +1536,7 @@ export class Orchestrator {
       : '';
     const pullRequestReviewInstructions =
       isPullRequestReview && opts.prReview
-        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- Commit changes to the existing PR branch and push back to origin.\n- Do not open a replacement PR.\n`
+        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- Commit changes to the existing PR branch and push back to origin.\n- Do not open a replacement PR.\n`
         : '';
     const stackInstructions = stackContext ? this.formatStackInstructions(stackContext) : '';
     const symphonyContext = {
@@ -1757,11 +1836,13 @@ export class Orchestrator {
             hookSymphonyContext.review_pr_number = String(reviewPr.number);
             hookSymphonyContext.review_pr_url = reviewPr.url ?? '';
             hookSymphonyContext.review_pr_head_ref = reviewPr.head_ref;
+            hookSymphonyContext.review_pr_head_sha = reviewPr.head_sha ?? '';
             hookSymphonyContext.review_pr_base_ref = reviewPr.base_ref || 'main';
             env.SYMPHONY_REVIEW_PROMPT_PATH = reviewPromptPath;
             env.SYMPHONY_REVIEW_PR_NUMBER = String(reviewPr.number);
             env.SYMPHONY_REVIEW_PR_URL = reviewPr.url ?? '';
             env.SYMPHONY_REVIEW_PR_HEAD_REF = reviewPr.head_ref;
+            env.SYMPHONY_REVIEW_PR_HEAD_SHA = reviewPr.head_sha ?? '';
             env.SYMPHONY_REVIEW_PR_BASE_REF = reviewPr.base_ref || 'main';
           }
 
@@ -1770,12 +1851,15 @@ export class Orchestrator {
             try {
               const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: hookSymphonyContext });
               const hookResult = await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, env);
-              if (reviewPr && parseReviewVerdict(hookResult.output) === 'block') {
-                await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, 'Review hook returned REVIEW_VERDICT: BLOCK');
-                return;
-              }
               if (reviewPr) {
-                await this.applyPullRequestReviewPassedLabels(config, reviewPr);
+                const verdict = parseReviewVerdict(hookResult.output);
+                if (verdict === 'block') {
+                  await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, 'Review hook returned REVIEW_VERDICT: BLOCK');
+                  return;
+                }
+                if (verdict === 'pass') {
+                  await this.handlePassingPullRequestReview(config, issue, reviewPr, 'Review hook returned REVIEW_VERDICT: PASS');
+                }
               }
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed' });
             } catch (err) {
@@ -1934,6 +2018,7 @@ export class Orchestrator {
         is_draft: false,
         url: prReview.pr_url,
         head_ref: prReview.head_ref,
+        head_sha: prReview.head_sha,
         base_ref: prReview.base_ref,
         merge_state_status: null,
       };
@@ -1942,7 +2027,21 @@ export class Orchestrator {
     return await this.findPullRequestForIssue(config, issue).catch(() => null);
   }
 
-  private async applyPullRequestReviewPassedLabels(config: WorkflowConfig, pr: PullRequestRef): Promise<void> {
+  private async handlePassingPullRequestReview(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, reason: string): Promise<void> {
+    const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+    await this.writePullRequestReviewState(config, {
+      version: 1,
+      pr_number: pr.number,
+      issue_number: issue.number ?? previousState?.issue_number ?? null,
+      head_ref: pr.head_ref,
+      head_sha: pr.head_sha,
+      base_ref: pr.base_ref || 'main',
+      verdict: 'pass',
+      auto_fix_iterations: previousState?.auto_fix_iterations ?? reviewAutoFixIteration(pr.labels),
+      reviewed_at: new Date().toISOString(),
+      reason,
+    });
+
     await this.applyLabels(config, pr.number, {
       add: [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN],
       remove: [
@@ -1961,12 +2060,28 @@ export class Orchestrator {
     workspacePath: string,
     reason: string,
   ): Promise<void> {
-    const currentIteration = reviewAutoFixIteration(pr.labels);
+    const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+    const previousIteration = Math.max(previousState?.auto_fix_iterations ?? 0, reviewAutoFixIteration(pr.labels));
+    const sameHeadAlreadyBlocked = previousState?.verdict === 'block' && pullRequestHeadMatchesState(pr, previousState);
     const canAutoFix =
       config.review.auto_fix_review_comments &&
-      currentIteration < config.review.number_of_auto_fix_iterations;
-    const nextIteration = currentIteration + 1;
+      !sameHeadAlreadyBlocked &&
+      previousIteration < config.review.number_of_auto_fix_iterations;
+    const nextIteration = canAutoFix ? previousIteration + 1 : previousIteration;
     const autoFixLabel = `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`;
+
+    await this.writePullRequestReviewState(config, {
+      version: 1,
+      pr_number: pr.number,
+      issue_number: issue.number ?? previousState?.issue_number ?? null,
+      head_ref: pr.head_ref,
+      head_sha: pr.head_sha,
+      base_ref: pr.base_ref || 'main',
+      verdict: 'block',
+      auto_fix_iterations: nextIteration,
+      reviewed_at: new Date().toISOString(),
+      reason,
+    });
 
     await this.applyLabels(config, pr.number, {
       add: canAutoFix ? [LABEL_REVIEW_BLOCKING, LABEL_READY, autoFixLabel] : [LABEL_REVIEW_BLOCKING, LABEL_READY_FOR_HUMAN],
@@ -1995,11 +2110,31 @@ export class Orchestrator {
       workflowState: issue.number === pr.number && canAutoFix ? LABEL_READY : LABEL_READY_FOR_HUMAN,
     });
 
-    const status = canAutoFix
-      ? `Post-run review found blocking issues on PR #${pr.number}. Symphony queued auto-fix iteration ${nextIteration}/${config.review.number_of_auto_fix_iterations}.`
-      : `Post-run review found blocking issues on PR #${pr.number}. Auto-fix is ${config.review.auto_fix_review_comments ? 'exhausted' : 'disabled'}, so the PR is waiting for human review.`;
+    let status: string;
+    if (canAutoFix) {
+      status = `Post-run review found blocking issues on PR #${pr.number}. Symphony queued auto-fix iteration ${nextIteration}/${config.review.number_of_auto_fix_iterations}.`;
+    } else if (sameHeadAlreadyBlocked) {
+      status = `Post-run review found blocking issues on PR #${pr.number} again, but the PR head did not change since the previous blocking review. Symphony is waiting for human review instead of looping.`;
+    } else {
+      status = `Post-run review found blocking issues on PR #${pr.number}. Auto-fix is ${config.review.auto_fix_review_comments ? 'exhausted' : 'disabled'}, so the PR is waiting for human review.`;
+    }
 
     await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `${status} (${reason})`);
+  }
+
+  private async readPullRequestReviewState(config: WorkflowConfig, prNumber: number): Promise<PullRequestReviewState | null> {
+    const client = new GithubIssueTrackerClient(config.tracker);
+    const comments = await client.listIssueComments(prNumber);
+    for (const comment of comments) {
+      const state = parsePullRequestReviewStateComment(comment.body);
+      if (state) return state;
+    }
+    return null;
+  }
+
+  private async writePullRequestReviewState(config: WorkflowConfig, state: PullRequestReviewState): Promise<void> {
+    const client = new GithubIssueTrackerClient(config.tracker);
+    await client.upsertStatusComment(state.pr_number, REVIEW_STATE_MARKER, formatPullRequestReviewStateComment(state));
   }
 
   private async writePullRequestReviewPrompt(workspacePath: string, issue: Issue, pr: PullRequestRef): Promise<string> {
@@ -2026,6 +2161,7 @@ Pull request:
 - PR: #${pr.number}
 - URL: ${pr.url ?? '(none)'}
 - Head branch: ${pr.head_ref}
+- Head SHA: ${pr.head_sha ?? '(unknown)'}
 - Base branch: ${baseRef}
 
 Final response requirements:

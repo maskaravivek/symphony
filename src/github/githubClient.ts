@@ -48,7 +48,7 @@ type GithubPullRequestPayload = {
   draft?: boolean;
   labels?: GithubLabel[];
   html_url?: string;
-  head?: { ref?: string; repo?: { full_name?: string } | null } | null;
+  head?: { ref?: string; sha?: string; repo?: { full_name?: string } | null } | null;
   base?: { ref?: string; repo?: { full_name?: string } | null } | null;
   mergeable_state?: string | null;
 };
@@ -89,6 +89,7 @@ export interface PullRequestRef {
   is_draft: boolean;
   url: string | null;
   head_ref: string;
+  head_sha: string | null;
   base_ref: string;
   merge_state_status: string | null;
 }
@@ -244,9 +245,38 @@ function normalizePullRequestPayload(payload: GithubPullRequestPayload): PullReq
     is_draft: Boolean(payload.draft),
     url: typeof payload.html_url === 'string' ? payload.html_url : null,
     head_ref: typeof payload.head?.ref === 'string' ? payload.head.ref : '',
+    head_sha: typeof payload.head?.sha === 'string' ? payload.head.sha : null,
     base_ref: typeof payload.base?.ref === 'string' ? payload.base.ref : 'main',
     merge_state_status: typeof payload.mergeable_state === 'string' ? payload.mergeable_state : null,
   };
+}
+
+function labelDescription(name: string): string {
+  if (name === 'ready-for-agent') return 'Symphony may claim this issue or PR for autonomous work.';
+  if (name === 'agent-running') return 'Symphony has claimed this issue or PR and an agent is running.';
+  if (name === 'ready-for-human') return 'Symphony is done; this issue or PR is waiting for a human.';
+  if (name === 'needs-info') return 'Symphony paused because it needs input.';
+  if (name.startsWith('symphony-review:')) return 'Managed by Symphony PR review workflow.';
+  return 'Managed by Symphony.';
+}
+
+function labelColor(name: string): string {
+  if (name === 'ready-for-agent') return '0e8a16';
+  if (name === 'agent-running') return '1d76db';
+  if (name === 'ready-for-human') return 'fbca04';
+  if (name === 'needs-info') return 'd93f0b';
+  if (name.startsWith('symphony-review:')) return '5319e7';
+  return 'ededed';
+}
+
+function isMissingLabelWriteError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /GitHub request failed 422\b/i.test(message) && /label/i.test(message);
+}
+
+function isLabelAlreadyExistsError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /GitHub request failed 422\b/i.test(message) && /already_exists|already exists/i.test(message);
 }
 
 function parseLinkHeader(linkHeader: string | null): Map<string, string> {
@@ -461,10 +491,36 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
   async addLabels(number: number, labels: string[]): Promise<void> {
     if (labels.length === 0) return;
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/labels`, this.tracker.api_base_url);
-    await this.fetchJson(url.toString(), {
-      method: 'POST',
-      body: { labels },
-    });
+    try {
+      await this.fetchJson(url.toString(), {
+        method: 'POST',
+        body: { labels },
+      });
+    } catch (err) {
+      if (!isMissingLabelWriteError(err)) throw err;
+      await Promise.all(labels.map((label) => this.createLabelIfMissing(label)));
+      await this.fetchJson(url.toString(), {
+        method: 'POST',
+        body: { labels },
+      });
+    }
+  }
+
+  async createLabelIfMissing(name: string): Promise<void> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/labels`, this.tracker.api_base_url);
+    try {
+      await this.fetchJson(url.toString(), {
+        method: 'POST',
+        body: {
+          name,
+          color: labelColor(name),
+          description: labelDescription(name),
+        },
+      });
+    } catch (err) {
+      if (isLabelAlreadyExistsError(err)) return;
+      throw err;
+    }
   }
 
   async removeLabel(number: number, label: string): Promise<void> {
