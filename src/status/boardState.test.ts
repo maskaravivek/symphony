@@ -259,7 +259,7 @@ test('collapses issue and pull request run states into one task card', () => {
   assert.equal(card?.column, 'ready-for-review');
 });
 
-test('builds epic cards with coordinating and completed columns', () => {
+test('builds epic cards without a separate epics column', () => {
   const board = buildBoardState({
     source: { kind: 'workflow', path: '/tmp/WORKFLOW.md' },
     refreshMs: 5000,
@@ -276,7 +276,8 @@ test('builds epic cards with coordinating and completed columns', () => {
     ],
   });
 
-  assert.equal(board.columns.find((column) => column.id === 'epics')?.cards[0]?.epic_progress, '2/3');
+  assert.equal(board.columns.some((column) => (column.id as string) === 'epics'), false);
+  assert.equal(board.columns.find((column) => column.id === 'active')?.cards[0]?.epic_progress, '2/3');
   assert.equal(board.columns.find((column) => column.id === 'closed')?.cards[0]?.status, 'epic:completed');
 });
 

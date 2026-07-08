@@ -83,14 +83,18 @@ function renderDashboardHtml(refreshMs: number): string {
       position: sticky;
       top: 0;
       z-index: 2;
-      display: flex;
-      gap: 16px;
-      align-items: center;
-      justify-content: space-between;
+      display: grid;
+      gap: 10px;
       padding: 12px 16px;
       border-bottom: 1px solid var(--border);
       background: color-mix(in srgb, var(--panel) 94%, transparent);
       backdrop-filter: blur(10px);
+    }
+    .header-row {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
     }
     h1 {
       margin: 0;
@@ -126,6 +130,31 @@ function renderDashboardHtml(refreshMs: number): string {
       white-space: nowrap;
     }
     .stale { color: var(--warn); }
+    .filters {
+      display: grid;
+      grid-template-columns: minmax(180px, 1.4fr) repeat(4, minmax(120px, 0.6fr)) auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .filter-control {
+      width: 100%;
+      min-height: 30px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      padding: 4px 8px;
+    }
+    .check-filter {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
     main {
       overflow-x: auto;
       padding: 12px 14px 18px;
@@ -180,6 +209,7 @@ function renderDashboardHtml(refreshMs: number): string {
       border: 1px solid var(--border);
       border-radius: 8px;
       box-shadow: var(--shadow);
+      cursor: pointer;
     }
     .card.active { border-left: 4px solid var(--accent); }
     .card.needs-info { border-left: 4px solid var(--warn); }
@@ -188,9 +218,6 @@ function renderDashboardHtml(refreshMs: number): string {
     .card.waiting-human { border-left: 4px solid var(--good); }
     .card.queued { border-left: 4px solid var(--muted); }
     .card.closed { opacity: 0.72; }
-    .card.epics { border-left: 4px solid var(--accent); }
-      cursor: pointer;
-    }
     .card:focus {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
@@ -256,6 +283,13 @@ function renderDashboardHtml(refreshMs: number): string {
       line-height: 1.4;
       overflow-wrap: anywhere;
     }
+    .pill-link {
+      text-decoration: none;
+    }
+    .pill-link:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
     .path {
       width: 100%;
       min-height: 26px;
@@ -272,7 +306,8 @@ function renderDashboardHtml(refreshMs: number): string {
       overflow-wrap: anywhere;
     }
     @media (max-width: 720px) {
-      header { align-items: flex-start; flex-direction: column; }
+      .header-row { align-items: flex-start; flex-direction: column; }
+      .filters { grid-template-columns: 1fr; }
       .source { max-width: 92vw; }
       main { padding: 10px; }
       .board { grid-auto-columns: minmax(240px, 86vw); }
@@ -281,16 +316,26 @@ function renderDashboardHtml(refreshMs: number): string {
 </head>
 <body>
   <header>
-    <div>
-      <h1>Symphony Dashboard</h1>
+    <div class="header-row">
+      <div>
+        <h1>Symphony Dashboard</h1>
+        <div class="meta">
+          <span id="source" class="source">Loading...</span>
+        </div>
+      </div>
       <div class="meta">
-        <span id="source" class="source">Loading...</span>
+        <span class="pill"><span id="total">0</span>&nbsp;cards</span>
+        <span id="stale" class="pill stale" hidden>0 stale</span>
+        <span id="updated">Refreshing...</span>
       </div>
     </div>
-    <div class="meta">
-      <span class="pill"><span id="total">0</span>&nbsp;cards</span>
-      <span id="stale" class="pill stale" hidden>0 stale</span>
-      <span id="updated">Refreshing...</span>
+    <div class="filters">
+      <input id="searchFilter" class="filter-control" type="search" placeholder="Search tasks">
+      <select id="repoFilter" class="filter-control" aria-label="Filter by repo"></select>
+      <select id="columnFilter" class="filter-control" aria-label="Filter by status"></select>
+      <select id="labelFilter" class="filter-control" aria-label="Filter by label"></select>
+      <select id="agentFilter" class="filter-control" aria-label="Filter by agent"></select>
+      <label class="check-filter"><input id="staleFilter" type="checkbox"> stale only</label>
     </div>
   </header>
   <main id="scroller">
@@ -304,6 +349,13 @@ function renderDashboardHtml(refreshMs: number): string {
     const totalEl = document.getElementById('total');
     const staleEl = document.getElementById('stale');
     const updatedEl = document.getElementById('updated');
+    const searchFilter = document.getElementById('searchFilter');
+    const repoFilter = document.getElementById('repoFilter');
+    const columnFilter = document.getElementById('columnFilter');
+    const labelFilter = document.getElementById('labelFilter');
+    const agentFilter = document.getElementById('agentFilter');
+    const staleFilter = document.getElementById('staleFilter');
+    let currentBoard = null;
 
     function text(value) {
       return value === null || value === undefined || value === '' ? '-' : String(value);
@@ -331,6 +383,19 @@ function renderDashboardHtml(refreshMs: number): string {
       const row = el('div', 'field');
       row.append(el('span', '', label));
       row.append(el('span', className || '', text(value)));
+      return row;
+    }
+
+    function linkField(label, textValue, href) {
+      if (!href) return field(label, textValue);
+      const row = el('div', 'field');
+      row.append(el('span', '', label));
+      const link = document.createElement('a');
+      link.href = href;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = text(textValue);
+      row.append(link);
       return row;
     }
 
@@ -379,9 +444,18 @@ function renderDashboardHtml(refreshMs: number): string {
 
       node.append(el('div', 'title', card.title || card.issue_identifier));
       const summary = el('div', 'card-summary');
-      summary.append(el('span', 'pill', card.status));
-      if (card.agent_provider) summary.append(el('span', 'pill', card.agent_provider));
-      if (card.pr_number) summary.append(el('span', 'pill', 'PR #' + card.pr_number));
+      for (const label of (card.feature_labels || []).slice(0, 3)) summary.append(el('span', 'pill', label));
+      if (card.pr_number && card.pr_url) {
+        const prLink = document.createElement('a');
+        prLink.href = card.pr_url;
+        prLink.target = '_blank';
+        prLink.rel = 'noreferrer';
+        prLink.className = 'pill pill-link';
+        prLink.textContent = 'PR #' + card.pr_number;
+        summary.append(prLink);
+      } else if (card.pr_number) {
+        summary.append(el('span', 'pill', 'PR #' + card.pr_number));
+      }
       if (card.review_auto_fix_iteration !== null) summary.append(el('span', 'pill', 'auto-fix ' + card.review_auto_fix_iteration));
       if (card.epic_progress) summary.append(el('span', 'pill', card.epic_progress));
       if (card.stale) summary.append(el('span', 'pill stale', 'stale'));
@@ -393,7 +467,7 @@ function renderDashboardHtml(refreshMs: number): string {
       if (card.agent_provider || card.agent_mode) fields.append(field('agent', [card.agent_provider, card.agent_mode].filter(Boolean).join(' / ')));
       if (card.attempt !== null) fields.append(field('attempt', card.attempt));
       if (card.thread_id) fields.append(field('thread', shortThread(card.thread_id)));
-      if (card.pr_number) fields.append(field('pr', '#' + card.pr_number));
+      if (card.pr_number) fields.append(linkField('pr', '#' + card.pr_number, card.pr_url));
       if (card.epic_progress) fields.append(field('progress', card.epic_progress));
       if (card.review_auto_fix_iteration !== null) fields.append(field('auto-fix', card.review_auto_fix_iteration));
       if (card.sources_count > 1) fields.append(field('sources', card.sources_count));
@@ -415,6 +489,68 @@ function renderDashboardHtml(refreshMs: number): string {
       return node;
     }
 
+    function uniqueSorted(values) {
+      return [...new Set(values.filter(Boolean))].sort((a, b) => String(a).localeCompare(String(b)));
+    }
+
+    function setSelectOptions(select, values, allLabel, labelForValue) {
+      const previous = select.value;
+      select.replaceChildren();
+      const all = document.createElement('option');
+      all.value = '';
+      all.textContent = allLabel;
+      select.append(all);
+      for (const value of values) {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = labelForValue ? labelForValue(value) : value;
+        select.append(option);
+      }
+      select.value = values.includes(previous) ? previous : '';
+    }
+
+    function allCards(board) {
+      return board.columns.flatMap((column) => column.cards);
+    }
+
+    function syncFilters(board) {
+      const cards = allCards(board);
+      const columnTitles = new Map(board.columns.map((column) => [column.id, column.title]));
+      setSelectOptions(repoFilter, uniqueSorted(cards.map((card) => card.repo_id || card.repo)), 'All repos');
+      setSelectOptions(
+        columnFilter,
+        board.columns.filter((column) => column.cards.length > 0).map((column) => column.id),
+        'All statuses',
+        (value) => columnTitles.get(value) || value,
+      );
+      setSelectOptions(labelFilter, uniqueSorted(cards.flatMap((card) => card.labels || [])), 'All labels');
+      setSelectOptions(agentFilter, uniqueSorted(cards.map((card) => card.agent_provider)), 'All agents');
+    }
+
+    function cardMatches(card) {
+      const query = searchFilter.value.trim().toLowerCase();
+      const repo = repoFilter.value;
+      const column = columnFilter.value;
+      const label = labelFilter.value;
+      const agent = agentFilter.value;
+      if (repo && (card.repo_id || card.repo) !== repo) return false;
+      if (column && card.column !== column) return false;
+      if (label && !(card.labels || []).includes(label)) return false;
+      if (agent && card.agent_provider !== agent) return false;
+      if (staleFilter.checked && !card.stale) return false;
+      if (!query) return true;
+      const haystack = [
+        card.title,
+        card.issue_identifier,
+        card.issue_number ? '#' + card.issue_number : '',
+        card.pr_number ? 'pr #' + card.pr_number : '',
+        card.repo_id,
+        card.repo,
+        ...(card.labels || []),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(query);
+    }
+
     function renderBoard(board) {
       const scrollLeft = scroller.scrollLeft;
       sourceEl.textContent = board.source.kind + ': ' + board.source.path;
@@ -424,18 +560,19 @@ function renderDashboardHtml(refreshMs: number): string {
       updatedEl.textContent = 'Updated ' + formatDate(board.generated_at);
       boardEl.replaceChildren();
       for (const column of board.columns) {
+        const visibleCards = column.cards.filter(cardMatches);
+        if (visibleCards.length === 0) continue;
         const section = el('section', 'column');
         const header = el('div', 'column-header');
-        header.append(el('h2', 'column-title', column.title), el('span', 'count', column.cards.length));
+        header.append(el('h2', 'column-title', column.title), el('span', 'count', visibleCards.length));
         section.append(header);
         const cards = el('div', 'cards');
-        if (column.cards.length === 0) {
-          cards.append(el('div', 'empty', 'No cards'));
-        } else {
-          for (const card of column.cards) cards.append(renderCard(card));
-        }
+        for (const card of visibleCards) cards.append(renderCard(card));
         section.append(cards);
         boardEl.append(section);
+      }
+      if (boardEl.childElementCount === 0) {
+        boardEl.append(el('div', 'empty', 'No matching cards'));
       }
       scroller.scrollLeft = scrollLeft;
     }
@@ -444,11 +581,19 @@ function renderDashboardHtml(refreshMs: number): string {
       try {
         const response = await fetch('/api/board', { cache: 'no-store' });
         if (!response.ok) throw new Error(await response.text());
-        renderBoard(await response.json());
+        currentBoard = await response.json();
+        syncFilters(currentBoard);
+        renderBoard(currentBoard);
       } catch (error) {
         updatedEl.textContent = 'Refresh failed';
         sourceEl.textContent = error instanceof Error ? error.message : String(error);
       }
+    }
+
+    for (const control of [searchFilter, repoFilter, columnFilter, labelFilter, agentFilter, staleFilter]) {
+      control.addEventListener('input', () => {
+        if (currentBoard) renderBoard(currentBoard);
+      });
     }
 
     refresh();

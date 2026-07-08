@@ -19,7 +19,6 @@ export const BOARD_COLUMNS = [
   { id: 'queued', title: 'Queued' },
   { id: 'closed', title: 'Closed' },
   { id: 'failed-cancelled', title: 'Failed / Cancelled' },
-  { id: 'epics', title: 'Epics' },
 ] as const;
 
 export type BoardColumnId = (typeof BOARD_COLUMNS)[number]['id'];
@@ -47,6 +46,7 @@ export interface BoardCard {
   pr_url: string | null;
   title: string | null;
   labels: string[];
+  feature_labels: string[];
   status: string;
   workflow_state: string | null;
   issue_state: string | null;
@@ -111,6 +111,21 @@ export interface LoadBoardStateOptions {
 }
 
 const DEFAULT_STALE_AFTER_MS = 30 * 60 * 1000;
+const SYSTEM_LABELS = new Set([
+  'agent-running',
+  'blocked',
+  'codex',
+  'completed',
+  'interactive',
+  'needs-info',
+  'open',
+  'planning',
+  'ready-for-agent',
+  'ready-for-human',
+  'task:spec',
+  'wontfix',
+]);
+const SYSTEM_LABEL_PREFIXES = ['symphony-review:', 'agent:', 'epic:', 'priority:', 'complexity:', 'status:'];
 
 function labelsFor(state: { labels?: string[] | null }): string[] {
   return [...new Set((state.labels ?? []).map((label) => label.trim().toLowerCase()).filter(Boolean))].sort();
@@ -118,6 +133,10 @@ function labelsFor(state: { labels?: string[] | null }): string[] {
 
 function hasLabel(labels: string[], label: string): boolean {
   return labels.includes(label);
+}
+
+function featureLabels(labels: string[]): string[] {
+  return labels.filter((label) => !SYSTEM_LABELS.has(label) && !SYSTEM_LABEL_PREFIXES.some((prefix) => label.startsWith(prefix)));
 }
 
 function reviewAutoFixIteration(labels: string[]): number | null {
@@ -205,6 +224,7 @@ function runCard(source: BoardRepoSource, state: RunState, now: Date, staleAfter
     pr_url: prUrl,
     title: state.issue_title ?? null,
     labels,
+    feature_labels: featureLabels(labels),
     status: state.status,
     workflow_state: state.workflow_state ?? null,
     issue_state: state.issue_state ?? null,
@@ -235,7 +255,7 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
     id: `epic:${state.issue_identifier}`,
     kind: 'epic',
     task_key: `epic:${state.issue_identifier}`,
-    column: state.status === 'completed' ? 'closed' : 'epics',
+    column: state.status === 'completed' ? 'closed' : 'active',
     repo_id: state.repo_id ?? source.repoId,
     owner: state.owner ?? source.config.tracker.owner,
     repo: state.repo ?? source.config.tracker.repo,
@@ -246,6 +266,7 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
     pr_url: null,
     title: state.title,
     labels,
+    feature_labels: featureLabels(labels),
     status: `epic:${state.status}`,
     workflow_state: state.status,
     issue_state: state.status === 'completed' ? 'closed' : null,
@@ -281,6 +302,7 @@ function mergeCards(a: BoardCard, b: BoardCard): BoardCard {
   return {
     ...preferred,
     labels: [...new Set([...a.labels, ...b.labels])].sort(),
+    feature_labels: [...new Set([...a.feature_labels, ...b.feature_labels])].sort(),
     pr_number: preferred.pr_number ?? other.pr_number,
     pr_url: preferred.pr_url ?? other.pr_url,
     last_error: preferred.last_error ?? other.last_error,
