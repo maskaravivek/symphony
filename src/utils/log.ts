@@ -69,16 +69,35 @@ function formatValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatFieldValue(key: string, value: unknown): string {
+  const formatted = formatValue(value);
+  if (key === 'issue_title') return truncate(formatted, 72);
+  return formatted;
+}
+
 function fieldLabel(key: string): string {
   switch (key) {
     case 'repo_id':
       return 'repo';
     case 'issue_identifier':
       return 'issue';
+    case 'issue_number':
+      return 'issue';
+    case 'issue_title':
+      return 'title';
     case 'pr_number':
       return 'pr';
+    case 'agent_provider':
+      return 'agent';
     case 'merge_state_status':
       return 'merge';
+    case 'hook_log_path':
+      return 'hook_log';
     case 'workspace_path':
       return 'workspace';
     case 'config_path':
@@ -97,6 +116,7 @@ function shouldOmitField(key: string, fields: LogFields): boolean {
   if (key === 'tracker_kind') return true;
   if (key === 'issue_id') return true;
   if (key === 'issue_url') return true;
+  if (key === 'issue_number' && fields.issue_identifier) return true;
   if ((key === 'owner' || key === 'repo') && (fields.issue_identifier || fields.repo_id)) return true;
   return false;
 }
@@ -105,9 +125,11 @@ function orderedFieldKeys(fields: LogFields): string[] {
   const preferred = [
     'repo_id',
     'issue_identifier',
+    'issue_title',
     'pr_number',
     'status',
     'reason',
+    'agent_provider',
     'merge_state_status',
     'head_ref',
     'base_ref',
@@ -115,6 +137,7 @@ function orderedFieldKeys(fields: LogFields): string[] {
     'signal',
     'code',
     'unmerged_files',
+    'hook_log_path',
     'workspace_path',
     'config_path',
     'workflow_path',
@@ -133,7 +156,7 @@ export function formatPrettyLogLine(level: LogLevel, message: string, fields: Lo
 
   const details = orderedFieldKeys(fields)
     .map((key) => {
-      const value = formatValue(fields[key]);
+      const value = formatFieldValue(key, fields[key]);
       if (!value) return null;
       const renderedValue = key === 'pr_number' ? `#${value}` : value;
       return `${colorize(`${fieldLabel(key)}=`, COLOR.field, useColor)}${renderedValue}`;

@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { createWriteStream, type WriteStream } from 'node:fs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import { SymphonyRuntimeError } from '../utils/errors.js';
 
@@ -8,14 +11,22 @@ export interface HookResult {
   stdout: string;
   stderr: string;
   output: string;
+  log_path: string | null;
   stdout_truncated: boolean;
   stderr_truncated: boolean;
+}
+
+export interface HookRunOptions {
+  env?: Record<string, string>;
+  logPath?: string | null;
+  streamOutput?: boolean;
 }
 
 export class HookScriptError extends SymphonyRuntimeError {
   readonly stdout: string;
   readonly stderr: string;
   readonly output: string;
+  readonly log_path: string | null;
   readonly stdout_truncated: boolean;
   readonly stderr_truncated: boolean;
   readonly code: number | null;
@@ -26,6 +37,7 @@ export class HookScriptError extends SymphonyRuntimeError {
     opts: {
       stdout: string;
       stderr: string;
+      log_path?: string | null;
       stdout_truncated?: boolean;
       stderr_truncated?: boolean;
       code?: number | null;
@@ -36,6 +48,7 @@ export class HookScriptError extends SymphonyRuntimeError {
     this.stdout = opts.stdout;
     this.stderr = opts.stderr;
     this.output = [opts.stdout, opts.stderr].filter(Boolean).join('\n');
+    this.log_path = opts.log_path ?? null;
     this.stdout_truncated = opts.stdout_truncated ?? false;
     this.stderr_truncated = opts.stderr_truncated ?? false;
     this.code = opts.code ?? null;
@@ -54,13 +67,47 @@ function appendCapturedOutput(current: string, chunk: string, limitBytes: number
   return { value, truncated: true };
 }
 
-export async function runHookScript(script: string, cwd: string, timeoutMs: number, env: Record<string, string> = {}): Promise<HookResult> {
+function isHookRunOptions(value: HookRunOptions | Record<string, string>): value is HookRunOptions {
+  return 'env' in value || 'logPath' in value || 'streamOutput' in value;
+}
+
+function normalizeHookRunOptions(optionsOrEnv: HookRunOptions | Record<string, string> = {}): Required<Pick<HookRunOptions, 'env' | 'streamOutput'>> & Pick<HookRunOptions, 'logPath'> {
+  if (isHookRunOptions(optionsOrEnv)) {
+    return {
+      env: optionsOrEnv.env ?? {},
+      logPath: optionsOrEnv.logPath ?? null,
+      streamOutput: optionsOrEnv.streamOutput ?? false,
+    };
+  }
+  return { env: optionsOrEnv, logPath: null, streamOutput: false };
+}
+
+function closeLogStream(stream: WriteStream | null): Promise<void> {
+  if (!stream || stream.closed || stream.destroyed) return Promise.resolve();
+  return new Promise((resolve) => {
+    stream.once('error', () => resolve());
+    stream.end(() => resolve());
+  });
+}
+
+export async function runHookScript(script: string, cwd: string, timeoutMs: number, optionsOrEnv: HookRunOptions | Record<string, string> = {}): Promise<HookResult> {
+  const options = normalizeHookRunOptions(optionsOrEnv);
+  const logPath = options.logPath ?? null;
+  let logStream: WriteStream | null = null;
+  if (logPath) {
+    await fs.mkdir(path.dirname(logPath), { recursive: true });
+    logStream = createWriteStream(logPath, { flags: 'a' });
+    logStream.on('error', () => {
+      // Hook execution should not fail solely because diagnostics could not be written.
+    });
+  }
+
   return await new Promise<HookResult>((resolve, reject) => {
     const child = spawn(script, {
       cwd,
       shell: true,
       stdio: ['inherit', 'pipe', 'pipe'],
-      env: { ...process.env, ...env },
+      env: { ...process.env, ...options.env },
       detached: true,
     });
 
@@ -80,12 +127,24 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
       }
     };
 
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      void (async () => {
+        clearTimeout(timeout);
+        await closeLogStream(logStream);
+        fn();
+      })();
+    };
+
     child.stdout?.on('data', (chunk: Buffer | string) => {
       const text = String(chunk);
       const captured = appendCapturedOutput(stdout, text, captureLimitBytes);
       stdout = captured.value;
       stdoutTruncated = stdoutTruncated || captured.truncated;
-      process.stdout.write(text);
+      if (logStream) logStream.write(text);
+      if (options.streamOutput) process.stdout.write(text);
     });
 
     child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -93,7 +152,8 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
       const captured = appendCapturedOutput(stderr, text, captureLimitBytes);
       stderr = captured.value;
       stderrTruncated = stderrTruncated || captured.truncated;
-      process.stderr.write(text);
+      if (logStream) logStream.write(text);
+      if (options.streamOutput) process.stderr.write(text);
     });
 
     const timeout = setTimeout(() => {
@@ -103,25 +163,68 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
     }, timeoutMs);
 
     child.on('error', (err) => {
-      clearTimeout(timeout);
-      reject(err);
+      settle(() => reject(err));
     });
 
     child.on('exit', (code, signal) => {
-      clearTimeout(timeout);
       if (killedByTimeout) {
-        reject(new HookScriptError(`Hook timed out after ${timeoutMs}ms`, { stdout, stderr, stdout_truncated: stdoutTruncated, stderr_truncated: stderrTruncated, code, signal }));
+        settle(() =>
+          reject(
+            new HookScriptError(`Hook timed out after ${timeoutMs}ms`, {
+              stdout,
+              stderr,
+              log_path: logPath,
+              stdout_truncated: stdoutTruncated,
+              stderr_truncated: stderrTruncated,
+              code,
+              signal,
+            }),
+          ),
+        );
         return;
       }
       if (signal) {
-        reject(new HookScriptError(`Hook terminated by signal ${signal}`, { stdout, stderr, stdout_truncated: stdoutTruncated, stderr_truncated: stderrTruncated, code, signal }));
+        settle(() =>
+          reject(
+            new HookScriptError(`Hook terminated by signal ${signal}`, {
+              stdout,
+              stderr,
+              log_path: logPath,
+              stdout_truncated: stdoutTruncated,
+              stderr_truncated: stderrTruncated,
+              code,
+              signal,
+            }),
+          ),
+        );
         return;
       }
       if (code !== 0) {
-        reject(new HookScriptError(`Hook exited with code ${code}`, { stdout, stderr, stdout_truncated: stdoutTruncated, stderr_truncated: stderrTruncated, code, signal: null }));
+        settle(() =>
+          reject(
+            new HookScriptError(`Hook exited with code ${code}`, {
+              stdout,
+              stderr,
+              log_path: logPath,
+              stdout_truncated: stdoutTruncated,
+              stderr_truncated: stderrTruncated,
+              code,
+              signal: null,
+            }),
+          ),
+        );
         return;
       }
-      resolve({ stdout, stderr, output: [stdout, stderr].filter(Boolean).join('\n'), stdout_truncated: stdoutTruncated, stderr_truncated: stderrTruncated });
+      settle(() =>
+        resolve({
+          stdout,
+          stderr,
+          output: [stdout, stderr].filter(Boolean).join('\n'),
+          log_path: logPath,
+          stdout_truncated: stdoutTruncated,
+          stderr_truncated: stderrTruncated,
+        }),
+      );
     });
   });
 }

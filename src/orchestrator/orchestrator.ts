@@ -328,8 +328,28 @@ function getIssueLogFields(config: WorkflowConfig, issue: Issue, repoId: string 
     issue_id: issue.id,
     issue_number: issue.number,
     issue_identifier: issue.identifier,
+    issue_title: issue.title,
     issue_url: issue.url,
   };
+}
+
+function hookLogPath(workspacePath: string, hookName: string): string {
+  const safeHookName = hookName
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return path.join(
+    path.dirname(workspacePath),
+    '.symphony',
+    'hooks',
+    path.basename(workspacePath),
+    `${timestamp}-${safeHookName || 'hook'}.log`,
+  );
+}
+
+function shouldStreamHookOutput(): boolean {
+  return process.env.SYMPHONY_STREAM_HOOK_OUTPUT === '1';
 }
 
 function issueRepoParts(issue: Issue): { owner: string; repo: string; number: number } | null {
@@ -1460,10 +1480,25 @@ export class Orchestrator {
         }
       }
 
-      log('info', 'workspace_after_create_hook_started', { ...workspaceFields, event: 'workspace_after_create_hook_started' });
       const rendered = await renderTemplate(config.hooks.after_create, { issue, symphony: hookSymphonyContext });
-      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, hookEnv);
-      log('info', 'workspace_after_create_hook_completed', { ...workspaceFields, event: 'workspace_after_create_hook_completed' });
+      const afterCreateLogPath = hookLogPath(workspacePath, 'after_create');
+      log('info', 'workspace_after_create_hook_started', { ...workspaceFields, event: 'workspace_after_create_hook_started', hook_log_path: afterCreateLogPath });
+      try {
+        await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
+          env: hookEnv,
+          logPath: afterCreateLogPath,
+          streamOutput: shouldStreamHookOutput(),
+        });
+      } catch (err) {
+        log('error', 'workspace_after_create_hook_failed', {
+          ...workspaceFields,
+          event: 'workspace_after_create_hook_failed',
+          hook_log_path: afterCreateLogPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+      log('info', 'workspace_after_create_hook_completed', { ...workspaceFields, event: 'workspace_after_create_hook_completed', hook_log_path: afterCreateLogPath });
     }
 
     const previousWorkspaceState = await readRunState(workspacePath);
@@ -1487,10 +1522,25 @@ export class Orchestrator {
     }
 
     if (config.hooks.before_run && !isPausedResume && !skipsWorkspaceHooks) {
-      log('info', 'workspace_before_run_hook_started', { ...workspaceFields, event: 'workspace_before_run_hook_started' });
       const rendered = await renderTemplate(config.hooks.before_run, { issue, symphony: hookSymphonyContext });
-      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, hookEnv);
-      log('info', 'workspace_before_run_hook_completed', { ...workspaceFields, event: 'workspace_before_run_hook_completed' });
+      const beforeRunLogPath = hookLogPath(workspacePath, 'before_run');
+      log('info', 'workspace_before_run_hook_started', { ...workspaceFields, event: 'workspace_before_run_hook_started', hook_log_path: beforeRunLogPath });
+      try {
+        await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
+          env: hookEnv,
+          logPath: beforeRunLogPath,
+          streamOutput: shouldStreamHookOutput(),
+        });
+      } catch (err) {
+        log('error', 'workspace_before_run_hook_failed', {
+          ...workspaceFields,
+          event: 'workspace_before_run_hook_failed',
+          hook_log_path: beforeRunLogPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+      log('info', 'workspace_before_run_hook_completed', { ...workspaceFields, event: 'workspace_before_run_hook_completed', hook_log_path: beforeRunLogPath });
     } else if (config.hooks.before_run && isPausedResume) {
       log('info', 'workspace_before_run_hook_skipped', {
         ...workspaceFields,
@@ -1847,10 +1897,15 @@ export class Orchestrator {
           }
 
           if (config.hooks.after_run) {
-            log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started' });
+            const afterRunLogPath = hookLogPath(workspacePath, 'after_run');
+            log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started', hook_log_path: afterRunLogPath });
             try {
               const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: hookSymphonyContext });
-              const hookResult = await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, env);
+              const hookResult = await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
+                env,
+                logPath: afterRunLogPath,
+                streamOutput: shouldStreamHookOutput(),
+              });
               if (reviewPr) {
                 const verdict = parseReviewVerdict(hookResult.output);
                 if (verdict === 'block') {
@@ -1861,7 +1916,7 @@ export class Orchestrator {
                   await this.handlePassingPullRequestReview(config, issue, reviewPr, 'Review hook returned REVIEW_VERDICT: PASS');
                 }
               }
-              log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed' });
+              log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed', hook_log_path: afterRunLogPath });
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
               if (reviewPr && parseReviewVerdict(hookOutputFromError(err)) === 'block') {
@@ -1869,6 +1924,7 @@ export class Orchestrator {
                   ...endFields,
                   event: 'workspace_after_run_hook_review_blocked',
                   pr_number: reviewPr.number,
+                  hook_log_path: afterRunLogPath,
                   error,
                 });
                 await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, error);
@@ -1877,6 +1933,7 @@ export class Orchestrator {
               log('error', 'workspace_after_run_hook_failed', {
                 ...endFields,
                 event: 'workspace_after_run_hook_failed',
+                hook_log_path: afterRunLogPath,
                 error,
               });
               await updateRunState(workspacePath, (cur) =>

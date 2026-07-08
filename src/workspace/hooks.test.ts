@@ -4,10 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { runHookScript } from './hooks.js';
+import { HookScriptError, runHookScript } from './hooks.js';
 
-test('captures a bounded hook output tail while preserving streamed verdicts', async () => {
+test('captures a bounded hook output tail while writing full diagnostics to a log file', async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-hook-capture-'));
+  const logPath = path.join(cwd, '.symphony', 'hooks', 'after-run.log');
   const previousLimit = process.env.SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES;
   process.env.SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES = '128';
 
@@ -16,11 +17,15 @@ test('captures a bounded hook output tail while preserving streamed verdicts', a
       "node -e \"process.stdout.write('x'.repeat(512)); console.log('REVIEW_VERDICT: PASS')\"",
       cwd,
       5_000,
+      { logPath },
     );
 
+    assert.equal(result.log_path, logPath);
     assert.equal(result.stdout_truncated, true);
     assert.ok(result.stdout.length <= 128);
     assert.match(result.output, /REVIEW_VERDICT: PASS/);
+    const fullLog = await fs.readFile(logPath, 'utf8');
+    assert.match(fullLog, /^x{512}REVIEW_VERDICT: PASS\n$/);
   } finally {
     if (previousLimit === undefined) {
       delete process.env.SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES;
@@ -28,4 +33,22 @@ test('captures a bounded hook output tail while preserving streamed verdicts', a
       process.env.SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES = previousLimit;
     }
   }
+});
+
+test('includes the hook diagnostic log path on failures', async () => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-hook-failure-'));
+  const logPath = path.join(cwd, '.symphony', 'hooks', 'before-run.log');
+
+  await assert.rejects(
+    () => runHookScript("node -e \"console.error('checkout failed'); process.exit(2)\"", cwd, 5_000, { logPath }),
+    (err: unknown) => {
+      assert.ok(err instanceof HookScriptError);
+      assert.equal(err.code, 2);
+      assert.equal(err.log_path, logPath);
+      assert.match(err.stderr, /checkout failed/);
+      return true;
+    },
+  );
+
+  await assert.doesNotReject(() => fs.access(logPath));
 });
