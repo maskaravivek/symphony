@@ -22,6 +22,7 @@ export interface RunState {
   workflow_state?: string | null;
 
   workspace_path: string;
+  workspace_strategy?: string | null;
 
   attempt: number;
   session_id: string | null;

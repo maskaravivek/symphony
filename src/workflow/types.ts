@@ -35,6 +35,18 @@ export interface PollingConfig {
 export interface WorkspaceConfig {
   root: string;
   clean_on_terminal: boolean;
+  strategy: WorkspaceStrategyConfig;
+}
+
+export type WorkspaceStrategy = 'durable_issue_workspace' | 'pooled_isolated' | 'none_or_readonly' | 'durable_epic_workspace';
+
+export interface WorkspaceStrategyConfig {
+  implementation: WorkspaceStrategy;
+  planning: WorkspaceStrategy;
+  epic: {
+    stacked: WorkspaceStrategy;
+    independent: WorkspaceStrategy;
+  };
 }
 
 export interface HooksConfig {

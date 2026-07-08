@@ -4,7 +4,16 @@ import { parse as parseYaml } from 'yaml';
 import { getGhAuthToken } from '../github/ghAuth.js';
 import { SymphonyConfigError } from '../utils/errors.js';
 import { expandHomeDir } from '../utils/fs.js';
-import type { AgentProviderConfig, AgentRouteConfig, AgentsConfig, CodexConfig, LoadedWorkflow, WorkflowConfig } from './types.js';
+import type {
+  AgentProviderConfig,
+  AgentRouteConfig,
+  AgentsConfig,
+  CodexConfig,
+  LoadedWorkflow,
+  WorkflowConfig,
+  WorkspaceStrategy,
+  WorkspaceStrategyConfig,
+} from './types.js';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -97,6 +106,46 @@ function normalizeCandidateOrder(value: unknown): WorkflowConfig['tracker']['can
     throw new SymphonyConfigError('tracker.candidate_order must be priority_then_created_at or ready_for_agent_labeled_at');
   }
   return raw;
+}
+
+const WORKSPACE_STRATEGIES = new Set<WorkspaceStrategy>([
+  'durable_issue_workspace',
+  'pooled_isolated',
+  'none_or_readonly',
+  'durable_epic_workspace',
+]);
+
+function normalizeWorkspaceStrategyValue(value: unknown, keyPath: string, fallback: WorkspaceStrategy): WorkspaceStrategy {
+  if (value === undefined || value === null) return fallback;
+  const raw = asString(value, keyPath);
+  if (!raw || !WORKSPACE_STRATEGIES.has(raw as WorkspaceStrategy)) {
+    throw new SymphonyConfigError(
+      `${keyPath} must be durable_issue_workspace, pooled_isolated, none_or_readonly, or durable_epic_workspace`,
+    );
+  }
+  return raw as WorkspaceStrategy;
+}
+
+function normalizeWorkspaceStrategy(value: unknown): WorkspaceStrategyConfig {
+  const fallback: WorkspaceStrategyConfig = {
+    implementation: 'durable_issue_workspace',
+    planning: 'durable_issue_workspace',
+    epic: {
+      stacked: 'durable_issue_workspace',
+      independent: 'durable_issue_workspace',
+    },
+  };
+  if (!isRecord(value)) return fallback;
+
+  const epicRaw = isRecord(value.epic) ? value.epic : {};
+  return {
+    implementation: normalizeWorkspaceStrategyValue(value.implementation, 'workspace.strategy.implementation', fallback.implementation),
+    planning: normalizeWorkspaceStrategyValue(value.planning, 'workspace.strategy.planning', fallback.planning),
+    epic: {
+      stacked: normalizeWorkspaceStrategyValue(epicRaw.stacked, 'workspace.strategy.epic.stacked', fallback.epic.stacked),
+      independent: normalizeWorkspaceStrategyValue(epicRaw.independent, 'workspace.strategy.epic.independent', fallback.epic.independent),
+    },
+  };
 }
 
 function normalizeEpicConfig(value: unknown): WorkflowConfig['tracker']['epics'] {
@@ -320,6 +369,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   const defaultWorkspaceRoot = `~/.symphony/workspaces/${owner}_${repo}`;
   const workspaceRoot = expandHomeDir(asString(workspaceRaw.root, 'workspace.root') ?? defaultWorkspaceRoot);
   const cleanOnTerminal = asBoolean(workspaceRaw.clean_on_terminal, 'workspace.clean_on_terminal') ?? false;
+  const workspaceStrategy = normalizeWorkspaceStrategy(workspaceRaw.strategy);
 
   const hooksRaw = isRecord(raw.hooks) ? raw.hooks : {};
   const hooksTimeout = asNumber(hooksRaw.timeout_ms, 'hooks.timeout_ms') ?? 120000;
@@ -387,7 +437,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       request_timeout_ms: requestTimeoutMs,
     },
     polling: { interval_ms: pollingInterval },
-    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal },
+    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy },
     hooks: {
       after_create: afterCreate ?? null,
       before_run: beforeRun ?? null,

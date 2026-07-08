@@ -40,6 +40,12 @@ polling:
 workspace:
   root: ~/.symphony/workspaces/mdedit
   clean_on_terminal: false
+  strategy:
+    implementation: pooled_isolated
+    planning: none_or_readonly
+    epic:
+      stacked: durable_epic_workspace
+      independent: pooled_isolated
 
 hooks:
   after_create: |

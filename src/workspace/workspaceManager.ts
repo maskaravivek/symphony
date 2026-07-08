@@ -2,12 +2,15 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import type { Issue } from '../domain/issue.js';
-import type { WorkspaceConfig } from '../workflow/types.js';
+import { readRunState } from '../status/runState.js';
+import { SymphonyConfigError } from '../utils/errors.js';
+import type { WorkspaceConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { assertPathWithinRoot } from '../utils/fs.js';
 
 export interface WorkspaceInfo {
   workspace_path: string;
   is_new: boolean;
+  strategy: WorkspaceStrategy;
 }
 
 function sanitizeWorkspaceKey(input: string): string {
@@ -29,15 +32,48 @@ export function workspacePathForIssue(workspaceRoot: string, issue: Issue): stri
   return workspacePath;
 }
 
+export function workspacePathForEpic(workspaceRoot: string, rootIssueIdentifier: string): string {
+  const workspaceKey = sanitizeWorkspaceKey(`epic_${rootIssueIdentifier}`);
+  const workspacePath = path.join(workspaceRoot, workspaceKey);
+  assertPathWithinRoot(workspaceRoot, workspacePath);
+  return workspacePath;
+}
+
+export function workspacePathForReadonlyIssue(workspaceRoot: string, issue: Issue): string {
+  const workspaceKey = sanitizeWorkspaceKey(`readonly_${deriveWorkspaceKey(issue)}`);
+  const workspacePath = path.join(workspaceRoot, workspaceKey);
+  assertPathWithinRoot(workspaceRoot, workspacePath);
+  return workspacePath;
+}
+
+export function workspacePathForPoolSlot(workspaceRoot: string, slot: number): string {
+  const workspacePath = path.join(workspaceRoot, `_pool_${slot}`);
+  assertPathWithinRoot(workspaceRoot, workspacePath);
+  return workspacePath;
+}
+
 export class WorkspaceManager {
   private config: WorkspaceConfig;
+  private poolSize: number;
 
-  constructor(config: WorkspaceConfig) {
+  constructor(config: WorkspaceConfig, poolSize = 1) {
     this.config = config;
+    this.poolSize = Math.max(1, Math.floor(poolSize));
   }
 
-  async ensureWorkspace(issue: Issue): Promise<WorkspaceInfo> {
-    const workspacePath = workspacePathForIssue(this.config.root, issue);
+  async ensureWorkspace(
+    issue: Issue,
+    options: { strategy?: WorkspaceStrategy; epicRootIssueIdentifier?: string | null } = {},
+  ): Promise<WorkspaceInfo> {
+    const strategy = options.strategy ?? 'durable_issue_workspace';
+    const workspacePath =
+      strategy === 'pooled_isolated'
+        ? await this.acquirePoolWorkspace()
+        : strategy === 'none_or_readonly'
+          ? workspacePathForReadonlyIssue(this.config.root, issue)
+          : strategy === 'durable_epic_workspace'
+            ? workspacePathForEpic(this.config.root, options.epicRootIssueIdentifier ?? issue.identifier)
+            : workspacePathForIssue(this.config.root, issue);
 
     let isNew = false;
     try {
@@ -46,7 +82,16 @@ export class WorkspaceManager {
       isNew = true;
       await fs.mkdir(workspacePath, { recursive: true });
     }
-    return { workspace_path: workspacePath, is_new: isNew };
+    return { workspace_path: workspacePath, is_new: isNew, strategy };
+  }
+
+  private async acquirePoolWorkspace(): Promise<string> {
+    for (let slot = 1; slot <= this.poolSize; slot += 1) {
+      const workspacePath = workspacePathForPoolSlot(this.config.root, slot);
+      const state = await readRunState(workspacePath);
+      if (!state || (state.status !== 'running' && state.status !== 'paused')) return workspacePath;
+    }
+    throw new SymphonyConfigError(`No pooled workspace slots are available under ${this.config.root}`);
   }
 
   async hasGitRepo(workspacePath: string): Promise<boolean> {

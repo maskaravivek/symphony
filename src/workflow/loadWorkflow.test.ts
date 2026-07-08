@@ -45,6 +45,74 @@ codex:
   assert.equal(loaded.config.tracker.candidate_order, 'priority_then_created_at');
 });
 
+test('defaults workspace strategies to durable issue workspaces', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.workspace.strategy, {
+    implementation: 'durable_issue_workspace',
+    planning: 'durable_issue_workspace',
+    epic: {
+      stacked: 'durable_issue_workspace',
+      independent: 'durable_issue_workspace',
+    },
+  });
+});
+
+test('loads workspace strategies', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+workspace:
+  strategy:
+    implementation: pooled_isolated
+    planning: none_or_readonly
+    epic:
+      stacked: durable_epic_workspace
+      independent: pooled_isolated
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.workspace.strategy, {
+    implementation: 'pooled_isolated',
+    planning: 'none_or_readonly',
+    epic: {
+      stacked: 'durable_epic_workspace',
+      independent: 'pooled_isolated',
+    },
+  });
+});
+
+test('rejects unsupported workspace strategy', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+workspace:
+  strategy:
+    implementation: shared_checkout
+codex:
+  command: codex exec -
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /workspace.strategy.implementation must be/);
+});
+
 test('loads ready_for_agent_labeled_at candidate ordering', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:

@@ -181,3 +181,48 @@ test('keeps live running workspaces during terminal sweeps', async () => {
   await assert.doesNotReject(fs.access(workspacePath));
   assert.equal(calls.some((call) => call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42'), false);
 });
+
+test('orphan reconciliation preserves live pooled workspaces', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pooled-orphan-workspace-'));
+  const workflowPath = await writeWorkflow(workspaceRoot);
+  const workspacePath = await writeWorkspace(workspaceRoot, '_pool_1', {
+    status: 'running',
+    labels: ['agent-running'],
+    workflow_state: 'agent-running',
+    finished_at: null,
+    last_exit_code: null,
+    worker_pid: process.pid,
+    workspace_strategy: 'pooled_isolated',
+  });
+  const calls: { url: string; method: string }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ url, method });
+
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&per_page=50') {
+      return jsonResponse([issuePayload(42, 'Pooled live issue', 'open', ['agent-running'])]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([]);
+    }
+
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  await assert.doesNotReject(fs.access(workspacePath));
+  assert.equal(calls.some((call) => call.method === 'DELETE' && call.url.includes('/labels/agent-running')), false);
+  assert.equal(calls.some((call) => call.method === 'POST' && call.url.endsWith('/labels')), false);
+});

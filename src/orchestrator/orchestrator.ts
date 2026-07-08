@@ -11,7 +11,7 @@ import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { runHookScript } from '../workspace/hooks.js';
 import { WorkspaceManager, workspacePathForIssue } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
-import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig } from '../workflow/types.js';
+import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
 import { scanRunStates } from '../status/scanRunStates.js';
 import { readEpicStates, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
@@ -336,7 +336,7 @@ export class Orchestrator {
     if (this.isGithubRateLimitBackoffActive(config)) return;
 
     const trackerClient = new GithubIssueTrackerClient(config.tracker);
-    const workspaceManager = new WorkspaceManager(config.workspace);
+    const workspaceManager = new WorkspaceManager(config.workspace, this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents);
 
     try {
       await this.reconcileRunning(config, trackerClient, workspaceManager);
@@ -565,8 +565,12 @@ export class Orchestrator {
       if (!issue.labels.includes(LABEL_RUNNING)) continue;
       if (this.running.has(issue.id)) continue;
 
-      const { workspace_path: workspacePath } = await workspaceManager.ensureWorkspace(issue);
-      const state = await readRunState(workspacePath);
+      const existingState = await this.readRunStateForIssue(config, issue);
+      const { workspace_path: fallbackWorkspacePath } = existingState
+        ? { workspace_path: existingState.workspace_path }
+        : await workspaceManager.ensureWorkspace(issue, { strategy: 'durable_issue_workspace' });
+      const workspacePath = fallbackWorkspacePath;
+      const state = existingState ?? (await readRunState(workspacePath));
       if (state?.status === 'running' && isProcessAlive(state.worker_pid)) {
         log('info', 'orphaned_claim_still_running', {
           ...getIssueLogFields(config, issue, this.repoId),
@@ -1115,6 +1119,18 @@ export class Orchestrator {
     }
   }
 
+  private selectWorkspaceStrategy(
+    config: WorkflowConfig,
+    options: { mode: AgentMode; stackContext: StackContext | null },
+  ): WorkspaceStrategy {
+    if (options.mode === 'planning') return config.workspace.strategy.planning;
+    if (options.mode === 'resolve-conflicts' || options.mode === 'pr-review' || options.mode === 'interactive-handoff') {
+      return 'durable_issue_workspace';
+    }
+    if (options.stackContext) return config.workspace.strategy.epic.stacked;
+    return config.workspace.strategy.implementation;
+  }
+
   private async dispatchIssue(
     config: WorkflowConfig,
     issue: Issue,
@@ -1132,13 +1148,34 @@ export class Orchestrator {
     const provider = opts.provider ?? selectAgentProvider(config, issue);
     const stackContext = opts.stackContext ?? null;
     const issueFields = getIssueLogFields(config, issue, this.repoId);
+    const isConflictResolution = opts.mode === 'resolve-conflicts';
+    const isPullRequestReview = opts.mode === 'pr-review';
+    const isInteractiveHandoff = !isConflictResolution && !isPullRequestReview && issue.labels.includes(LABEL_INTERACTIVE);
+    const isPlanningRun = !isConflictResolution && !isPullRequestReview && !isInteractiveHandoff && isPlanningIssue(issue.labels);
+    const agentMode: AgentMode = isConflictResolution
+      ? 'resolve-conflicts'
+      : isPullRequestReview
+        ? 'pr-review'
+        : isInteractiveHandoff
+          ? 'interactive-handoff'
+          : isPlanningRun
+            ? 'planning'
+            : 'autonomous';
+    const workspaceStrategy = this.selectWorkspaceStrategy(config, {
+      mode: agentMode,
+      stackContext,
+    });
 
     log('info', 'issue_claimed', { ...issueFields, event: 'issue_claimed', status: 'claimed', agent_provider: provider.id });
 
-    const { workspace_path: workspacePath, is_new: isNew } = await workspaceManager.ensureWorkspace(issue);
+    const { workspace_path: workspacePath, is_new: isNew } = await workspaceManager.ensureWorkspace(issue, {
+      strategy: workspaceStrategy,
+      epicRootIssueIdentifier: stackContext?.root_issue_identifier ?? null,
+    });
     const workspaceFields = { ...issueFields, workspace_path: workspacePath };
     const hookSymphonyContext = {
       workspace_path: workspacePath,
+      workspace_strategy: workspaceStrategy,
       agent_provider: provider.id,
       agent_provider_group: provider.provider_group,
       agent_provider_kind: provider.provider_kind,
@@ -1160,6 +1197,7 @@ export class Orchestrator {
       SYMPHONY_ISSUE_IDENTIFIER: issue.identifier,
       SYMPHONY_ISSUE_URL: issue.url ?? '',
       SYMPHONY_WORKSPACE_PATH: workspacePath,
+      SYMPHONY_WORKSPACE_STRATEGY: workspaceStrategy,
       SYMPHONY_BRANCH_NAME: issue.branch_name ?? '',
       SYMPHONY_AGENT_PROVIDER: provider.id,
       SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
@@ -1174,8 +1212,9 @@ export class Orchestrator {
       SYMPHONY_STACK_TOTAL: String(stackContext?.total ?? ''),
     };
 
-    const hasGitRepo = await workspaceManager.hasGitRepo(workspacePath);
-    const shouldRunAfterCreate = Boolean(config.hooks.after_create) && (isNew || !hasGitRepo);
+    const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
+    const hasGitRepo = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
+    const shouldRunAfterCreate = !skipsWorkspaceHooks && Boolean(config.hooks.after_create) && (isNew || !hasGitRepo);
 
     if (shouldRunAfterCreate && config.hooks.after_create) {
       if (!isNew && !hasGitRepo) {
@@ -1197,10 +1236,14 @@ export class Orchestrator {
       log('info', 'workspace_after_create_hook_completed', { ...workspaceFields, event: 'workspace_after_create_hook_completed' });
     }
 
-    const existingState = await readRunState(workspacePath);
+    const previousWorkspaceState = await readRunState(workspacePath);
+    const existingState =
+      previousWorkspaceState?.issue_id === issue.id || previousWorkspaceState?.issue_number === issue.number
+        ? previousWorkspaceState
+        : null;
     const isPausedResume = existingState?.status === 'paused';
 
-    const hasGitRepoBeforeRun = await workspaceManager.hasGitRepo(workspacePath);
+    const hasGitRepoBeforeRun = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
     if (hasGitRepoBeforeRun && !isPausedResume) {
       const recovery = await recoverFreshRunGitState(workspacePath);
       if (recovery.recovered) {
@@ -1213,7 +1256,7 @@ export class Orchestrator {
       }
     }
 
-    if (config.hooks.before_run && !isPausedResume) {
+    if (config.hooks.before_run && !isPausedResume && !skipsWorkspaceHooks) {
       log('info', 'workspace_before_run_hook_started', { ...workspaceFields, event: 'workspace_before_run_hook_started' });
       const rendered = await renderTemplate(config.hooks.before_run, { issue, symphony: hookSymphonyContext });
       await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, hookEnv);
@@ -1223,6 +1266,12 @@ export class Orchestrator {
         ...workspaceFields,
         event: 'workspace_before_run_hook_skipped',
         reason: 'paused_resume_preserves_workspace',
+      });
+    } else if (config.hooks.before_run && skipsWorkspaceHooks) {
+      log('info', 'workspace_before_run_hook_skipped', {
+        ...workspaceFields,
+        event: 'workspace_before_run_hook_skipped',
+        reason: 'workspace_strategy_none_or_readonly',
       });
     }
 
@@ -1249,10 +1298,6 @@ export class Orchestrator {
       lastMessagePath: existingState?.last_message_path ?? lastMessagePath,
     });
 
-    const isConflictResolution = opts.mode === 'resolve-conflicts';
-    const isPullRequestReview = opts.mode === 'pr-review';
-    const isInteractiveHandoff = !isConflictResolution && !isPullRequestReview && issue.labels.includes(LABEL_INTERACTIVE);
-    const isPlanningRun = !isConflictResolution && !isPullRequestReview && !isInteractiveHandoff && isPlanningIssue(issue.labels);
     const handoffInstructions = isInteractiveHandoff
       ? '\n\n---\n\n## Interactive Handoff Instructions\n\nCreate a concise orientation summary for the user to continue this issue interactively. Do not edit files, run write commands, commit, push, or open a PR in this handoff pass.\n'
       : '';
@@ -1267,6 +1312,7 @@ export class Orchestrator {
     const symphonyContext = {
       prompt_path: '',
       workspace_path: workspacePath,
+      workspace_strategy: workspaceStrategy,
       agent_provider: provider.id,
       agent_provider_group: provider.provider_group,
       agent_provider_kind: provider.provider_kind,
@@ -1303,7 +1349,6 @@ export class Orchestrator {
           : null;
     if (!agentThreadId && codexCompatible) agentThreadId = stackContext?.reusable_thread_id ?? null;
     let codexThreadId = codexCompatible ? agentThreadId : null;
-    const agentMode: AgentMode = isConflictResolution ? 'resolve-conflicts' : isPullRequestReview ? 'pr-review' : isInteractiveHandoff ? 'interactive-handoff' : isPlanningRun ? 'planning' : 'autonomous';
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
     const commandTemplate = isInteractiveHandoff || isPlanningRun
       ? provider.handoff_command ?? provider.command
@@ -1337,6 +1382,7 @@ export class Orchestrator {
       labels: issue.labels,
       workflow_state: issue.workflow_state,
       workspace_path: workspacePath,
+      workspace_strategy: workspaceStrategy,
       attempt: opts.attempt,
       session_id: null,
       agent_provider: provider.id,
@@ -1812,7 +1858,10 @@ ${runContext}`;
 
   private async readRunStateForIssue(config: WorkflowConfig, issue: Issue): Promise<RunState | null> {
     const workspacePath = workspacePathForIssue(config.workspace.root, issue);
-    return readRunState(workspacePath);
+    const state = await readRunState(workspacePath);
+    if (state) return state;
+    const states = await scanRunStates(config.workspace.root);
+    return states.find((candidate) => candidate.issue_id === issue.id || candidate.issue_number === issue.number) ?? null;
   }
 
   private async readTextFile(pathname: string | null | undefined, maxChars: number): Promise<string | null> {
