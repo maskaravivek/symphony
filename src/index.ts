@@ -238,34 +238,13 @@ async function main(): Promise<void> {
       process.on('SIGTERM', () => {
         void shutdown('SIGTERM', 143);
       });
-      const onStdinData = (chunk: Buffer | string) => {
-        if (String(chunk).includes('\u0003')) void shutdown('CTRL_C', 130);
-      };
-      const stdinWasRaw = process.stdin.isTTY && process.stdin.isRaw;
-      const cleanupStdin = () => {
-        process.stdin.off('data', onStdinData);
-        if (process.stdin.isTTY) process.stdin.setRawMode(stdinWasRaw);
-        process.stdin.pause();
-      };
-      process.stdin.on('data', onStdinData);
-      if (process.stdin.isTTY) process.stdin.setRawMode(true);
-      process.stdin.resume();
-
       if (options.once) {
-        try {
-          await orchestrator.tickOnce();
-          await orchestrator.shutdown('once_complete');
-        } finally {
-          cleanupStdin();
-        }
+        await orchestrator.tickOnce();
+        await orchestrator.shutdown('once_complete');
         return;
       }
 
-      try {
-        await orchestrator.runForever();
-      } finally {
-        cleanupStdin();
-      }
+      await orchestrator.runForever();
     });
 
   program
