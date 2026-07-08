@@ -8,7 +8,7 @@ import { SymphonyConfigError } from '../utils/errors.js';
 import { log, type LogFields } from '../utils/log.js';
 import { sleep } from '../utils/sleep.js';
 import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
-import { runHookScript } from '../workspace/hooks.js';
+import { HookScriptError, runHookScript } from '../workspace/hooks.js';
 import { WorkspaceManager, workspacePathForIssue } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig, WorkspaceStrategy } from '../workflow/types.js';
@@ -131,6 +131,9 @@ const LABEL_PLANNING = 'planning';
 const LABEL_TASK_SPEC = 'task:spec';
 const LABEL_EPIC_STACKED = 'epic:stacked';
 const LABEL_EPIC_INDEPENDENT = 'epic:independent';
+const LABEL_REVIEW_PASSED = 'symphony-review:passed';
+const LABEL_REVIEW_BLOCKING = 'symphony-review:blocking';
+const LABEL_REVIEW_AUTO_FIX_PREFIX = 'symphony-review:auto-fix-';
 
 function nowMs(): number {
   return Date.now();
@@ -199,6 +202,33 @@ function issueNumberFromPullRequestBody(body: string | null): number | null {
 
 function isDirtyMergeState(value: string | null): boolean {
   return value?.toLowerCase() === 'dirty';
+}
+
+function isReviewAutoFixLabel(label: string): boolean {
+  return label.startsWith(LABEL_REVIEW_AUTO_FIX_PREFIX);
+}
+
+function reviewAutoFixIteration(labels: string[]): number {
+  let max = 0;
+  for (const label of labels) {
+    if (!isReviewAutoFixLabel(label)) continue;
+    const value = Number(label.slice(LABEL_REVIEW_AUTO_FIX_PREFIX.length));
+    if (Number.isInteger(value) && value > max) max = value;
+  }
+  return max;
+}
+
+function parseReviewVerdict(output: string): 'pass' | 'block' | null {
+  const matches = [...output.matchAll(/REVIEW_VERDICT:\s*(PASS|BLOCK)\b/gi)];
+  const last = matches.at(-1)?.[1]?.toUpperCase();
+  if (last === 'PASS') return 'pass';
+  if (last === 'BLOCK') return 'block';
+  return null;
+}
+
+function hookOutputFromError(err: unknown): string {
+  if (err instanceof HookScriptError) return err.output;
+  return '';
 }
 
 function shouldWaitForMergeState(value: string | null): boolean {
@@ -950,9 +980,11 @@ export class Orchestrator {
       if (capacity.remaining !== null && capacity.remaining <= 0) return;
       if (!issue.number) continue;
       if (this.running.has(issue.id)) continue;
+      if (issue.labels.includes(LABEL_REVIEW_PASSED)) continue;
 
       const pr = await tracker.fetchPullRequest(issue.number).catch(() => null);
       if (!pr || pr.is_draft || !pr.head_ref) continue;
+      if (pr.labels.includes(LABEL_REVIEW_PASSED)) continue;
 
       const provider = selectAgentProvider(config, issue);
       if (this.dispatchBlockReason(config, issue, provider, capacity)) continue;
@@ -1296,6 +1328,11 @@ export class Orchestrator {
       stack_predecessor_thread_id: stackContext?.reusable_thread_id ?? '',
       stack_position: stackContext?.position ?? '',
       stack_total: stackContext?.total ?? '',
+      review_prompt_path: '',
+      review_pr_number: '',
+      review_pr_url: '',
+      review_pr_head_ref: '',
+      review_pr_base_ref: '',
     };
     const hookEnv: Record<string, string> = {
       SYMPHONY_REPO_ID: this.repoId ?? '',
@@ -1319,6 +1356,11 @@ export class Orchestrator {
       SYMPHONY_STACK_PREDECESSOR_THREAD_ID: stackContext?.reusable_thread_id ?? '',
       SYMPHONY_STACK_POSITION: String(stackContext?.position ?? ''),
       SYMPHONY_STACK_TOTAL: String(stackContext?.total ?? ''),
+      SYMPHONY_REVIEW_PROMPT_PATH: '',
+      SYMPHONY_REVIEW_PR_NUMBER: '',
+      SYMPHONY_REVIEW_PR_URL: '',
+      SYMPHONY_REVIEW_PR_HEAD_REF: '',
+      SYMPHONY_REVIEW_PR_BASE_REF: '',
     };
 
     const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
@@ -1708,14 +1750,46 @@ export class Orchestrator {
             return;
           }
 
+          const reviewPr = await this.findReviewPullRequest(config, issue, opts.prReview);
+          if (reviewPr) {
+            const reviewPromptPath = await this.writePullRequestReviewPrompt(workspacePath, issue, reviewPr);
+            hookSymphonyContext.review_prompt_path = reviewPromptPath;
+            hookSymphonyContext.review_pr_number = String(reviewPr.number);
+            hookSymphonyContext.review_pr_url = reviewPr.url ?? '';
+            hookSymphonyContext.review_pr_head_ref = reviewPr.head_ref;
+            hookSymphonyContext.review_pr_base_ref = reviewPr.base_ref || 'main';
+            env.SYMPHONY_REVIEW_PROMPT_PATH = reviewPromptPath;
+            env.SYMPHONY_REVIEW_PR_NUMBER = String(reviewPr.number);
+            env.SYMPHONY_REVIEW_PR_URL = reviewPr.url ?? '';
+            env.SYMPHONY_REVIEW_PR_HEAD_REF = reviewPr.head_ref;
+            env.SYMPHONY_REVIEW_PR_BASE_REF = reviewPr.base_ref || 'main';
+          }
+
           if (config.hooks.after_run) {
             log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started' });
             try {
               const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: hookSymphonyContext });
-              await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, env);
+              const hookResult = await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, env);
+              if (reviewPr && parseReviewVerdict(hookResult.output) === 'block') {
+                await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, 'Review hook returned REVIEW_VERDICT: BLOCK');
+                return;
+              }
+              if (reviewPr) {
+                await this.applyPullRequestReviewPassedLabels(config, reviewPr);
+              }
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed' });
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
+              if (reviewPr && parseReviewVerdict(hookOutputFromError(err)) === 'block') {
+                log('info', 'workspace_after_run_hook_review_blocked', {
+                  ...endFields,
+                  event: 'workspace_after_run_hook_review_blocked',
+                  pr_number: reviewPr.number,
+                  error,
+                });
+                await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, error);
+                return;
+              }
               log('error', 'workspace_after_run_hook_failed', {
                 ...endFields,
                 event: 'workspace_after_run_hook_failed',
@@ -1840,6 +1914,127 @@ export class Orchestrator {
       });
 
     session.done = done;
+  }
+
+  private async findReviewPullRequest(
+    config: WorkflowConfig,
+    issue: Issue,
+    prReview: PullRequestReviewDispatchOptions | undefined,
+  ): Promise<PullRequestRef | null> {
+    if (prReview) {
+      const client = new GithubIssueTrackerClient(config.tracker);
+      const fetched = await client.fetchPullRequest(prReview.pr_number).catch(() => null);
+      if (fetched) return fetched;
+      return {
+        number: prReview.pr_number,
+        title: issue.title,
+        body: issue.description,
+        state: issue.state,
+        labels: issue.labels,
+        is_draft: false,
+        url: prReview.pr_url,
+        head_ref: prReview.head_ref,
+        base_ref: prReview.base_ref,
+        merge_state_status: null,
+      };
+    }
+
+    return await this.findPullRequestForIssue(config, issue).catch(() => null);
+  }
+
+  private async applyPullRequestReviewPassedLabels(config: WorkflowConfig, pr: PullRequestRef): Promise<void> {
+    await this.applyLabels(config, pr.number, {
+      add: [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN],
+      remove: [
+        LABEL_REVIEW_BLOCKING,
+        LABEL_READY,
+        LABEL_RUNNING,
+        ...pr.labels.filter(isReviewAutoFixLabel),
+      ],
+    });
+  }
+
+  private async handleBlockingPullRequestReview(
+    config: WorkflowConfig,
+    issue: Issue,
+    pr: PullRequestRef,
+    workspacePath: string,
+    reason: string,
+  ): Promise<void> {
+    const currentIteration = reviewAutoFixIteration(pr.labels);
+    const canAutoFix =
+      config.review.auto_fix_review_comments &&
+      currentIteration < config.review.number_of_auto_fix_iterations;
+    const nextIteration = currentIteration + 1;
+    const autoFixLabel = `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`;
+
+    await this.applyLabels(config, pr.number, {
+      add: canAutoFix ? [LABEL_REVIEW_BLOCKING, LABEL_READY, autoFixLabel] : [LABEL_REVIEW_BLOCKING, LABEL_READY_FOR_HUMAN],
+      remove: canAutoFix
+        ? [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN, LABEL_RUNNING]
+        : [LABEL_REVIEW_PASSED, LABEL_READY, LABEL_RUNNING],
+    });
+
+    if (issue.number && issue.number !== pr.number) {
+      await this.applyLabels(config, issue.number, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] }).catch(() => {});
+    }
+
+    await this.updateLifecycleState(workspacePath, {
+      add:
+        issue.number === pr.number
+          ? canAutoFix
+            ? [LABEL_REVIEW_BLOCKING, LABEL_READY, autoFixLabel]
+            : [LABEL_REVIEW_BLOCKING, LABEL_READY_FOR_HUMAN]
+          : [LABEL_READY_FOR_HUMAN],
+      remove:
+        issue.number === pr.number
+          ? canAutoFix
+            ? [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN, LABEL_RUNNING]
+            : [LABEL_REVIEW_PASSED, LABEL_READY, LABEL_RUNNING]
+          : [LABEL_READY, LABEL_RUNNING],
+      workflowState: issue.number === pr.number && canAutoFix ? LABEL_READY : LABEL_READY_FOR_HUMAN,
+    });
+
+    const status = canAutoFix
+      ? `Post-run review found blocking issues on PR #${pr.number}. Symphony queued auto-fix iteration ${nextIteration}/${config.review.number_of_auto_fix_iterations}.`
+      : `Post-run review found blocking issues on PR #${pr.number}. Auto-fix is ${config.review.auto_fix_review_comments ? 'exhausted' : 'disabled'}, so the PR is waiting for human review.`;
+
+    await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `${status} (${reason})`);
+  }
+
+  private async writePullRequestReviewPrompt(workspacePath: string, issue: Issue, pr: PullRequestRef): Promise<string> {
+    const symphonyDir = path.join(workspacePath, '.symphony');
+    await fs.mkdir(symphonyDir, { recursive: true });
+    const reviewPromptPath = path.join(symphonyDir, 'review_prompt.md');
+    const baseRef = pr.base_ref || 'main';
+    const prompt = `You are performing Symphony's post-run review for PR #${pr.number}${pr.url ? ` (${pr.url})` : ''}.
+
+Review from the perspective of a staff engineer. Prioritize actionable issues that matter before merge: correctness bugs, regressions, incomplete requirements, missing or weak tests, maintainability risks, code quality gaps, security or data-safety issues, and avoidable architectural complexity.
+
+Preferred flow:
+- If this repository has the \`/code-review\` skill installed, use it to review \`origin/${baseRef}...HEAD\`.
+- If \`/code-review\` is unavailable or cannot run in this repo, fall back to a manual review of \`origin/${baseRef}...HEAD\`.
+- Treat the issue and PR body as the spec source when no separate spec is available.
+- Keep findings concise, ranked by severity, and cite file/line references when possible.
+
+Issue:
+- Identifier: ${issue.identifier}
+- Title: ${issue.title}
+- URL: ${issue.url ?? '(none)'}
+
+Pull request:
+- PR: #${pr.number}
+- URL: ${pr.url ?? '(none)'}
+- Head branch: ${pr.head_ref}
+- Base branch: ${baseRef}
+
+Final response requirements:
+- End with exactly one verdict line: \`REVIEW_VERDICT: PASS\` or \`REVIEW_VERDICT: BLOCK\`.
+- Use \`REVIEW_VERDICT: BLOCK\` only when there are actionable blockers Symphony should send back to an agent or human before merge.
+- Use \`REVIEW_VERDICT: PASS\` when there are no blocking findings. Non-blocking notes are fine, but keep them clearly labeled.
+`;
+    await fs.writeFile(reviewPromptPath, prompt, 'utf8');
+    return reviewPromptPath;
   }
 
   private async prepareConflictResolutionWorkspace(workspacePath: string, conflict: ConflictDispatchOptions): Promise<string> {

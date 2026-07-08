@@ -396,6 +396,17 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       )
     : null;
 
+  const reviewRaw = isRecord(raw.review) ? raw.review : {};
+  const autoFixReviewComments = asBoolean(reviewRaw.auto_fix_review_comments, 'review.auto_fix_review_comments') ?? false;
+  const numberOfAutoFixIterations = asNumber(reviewRaw.number_of_auto_fix_iterations, 'review.number_of_auto_fix_iterations') ?? 1;
+  if (
+    !Number.isFinite(numberOfAutoFixIterations) ||
+    numberOfAutoFixIterations < 0 ||
+    Math.floor(numberOfAutoFixIterations) !== numberOfAutoFixIterations
+  ) {
+    throw new SymphonyConfigError('review.number_of_auto_fix_iterations must be a non-negative integer');
+  }
+
   const codexRaw = isRecord(raw.codex) ? raw.codex : {};
   const codexCommand = asString(codexRaw.command, 'codex.command') ?? 'codex app-server';
   const codexResumeCommand =
@@ -449,6 +460,10 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       max_retry_backoff_ms: maxRetryBackoffMs,
       max_attempts: maxAttempts === null ? null : Math.floor(maxAttempts),
       max_concurrent_agents_by_state: maxConcurrentAgentsByState,
+    },
+    review: {
+      auto_fix_review_comments: autoFixReviewComments,
+      number_of_auto_fix_iterations: numberOfAutoFixIterations,
     },
     codex,
     agents,

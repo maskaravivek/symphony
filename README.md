@@ -185,6 +185,14 @@ Routes are evaluated in order. A route can use `any_labels`, `all_labels`, `none
 
 Issues labeled `task:spec` or `planning` run in planning-only mode regardless of provider route. Symphony uses the provider's `handoff_command` when available, appends spec-writing instructions to the prompt, posts the captured final message back to the issue as a technical specification comment, skips `after_run` PR validation, and marks the issue `ready-for-human` without expecting a branch or pull request.
 
+## Post-Run PR Review
+
+When an autonomous run produces a PR, Symphony writes a staff-engineer review prompt to `.symphony/review_prompt.md` and exposes it to `hooks.after_run` as `SYMPHONY_REVIEW_PROMPT_PATH` plus PR metadata such as `SYMPHONY_REVIEW_PR_NUMBER`. The prompt asks the review agent to prefer `/code-review` when the target repo has that skill installed, and to fall back to a manual review otherwise.
+
+Review hooks should end with `REVIEW_VERDICT: PASS` or `REVIEW_VERDICT: BLOCK`. Passing reviews label the PR `symphony-review:passed` and `ready-for-human`. Blocking reviews label the PR `symphony-review:blocking`.
+
+If `review.auto_fix_review_comments` is true, blocking reviews remove `ready-for-human`, add `ready-for-agent`, and add `symphony-review:auto-fix-N` until `review.number_of_auto_fix_iterations` is exhausted. Once exhausted, Symphony leaves the PR `ready-for-human` instead of reviewing or fixing the same PR forever.
+
 ## Notes
 
 - `WORKFLOW.md` contains YAML front matter for config + a Markdown prompt template body.

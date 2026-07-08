@@ -30,6 +30,61 @@ codex:
   assert.equal(loaded.config.agent.max_attempts, 3);
 });
 
+test('loads review auto-fix config', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+review:
+  auto_fix_review_comments: true
+  number_of_auto_fix_iterations: 2
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.review, {
+    auto_fix_review_comments: true,
+    number_of_auto_fix_iterations: 2,
+  });
+});
+
+test('defaults review auto-fix config conservatively', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.review, {
+    auto_fix_review_comments: false,
+    number_of_auto_fix_iterations: 1,
+  });
+});
+
+test('rejects invalid review auto-fix iterations', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+review:
+  number_of_auto_fix_iterations: -1
+codex:
+  command: codex exec -
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /review.number_of_auto_fix_iterations must be a non-negative integer/);
+});
+
 test('defaults candidate ordering to priority then created_at', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:

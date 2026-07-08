@@ -63,6 +63,11 @@ export interface AgentConfig {
   max_concurrent_agents_by_state: Record<string, number> | null;
 }
 
+export interface ReviewConfig {
+  auto_fix_review_comments: boolean;
+  number_of_auto_fix_iterations: number;
+}
+
 export interface CodexConfig {
   command: string;
   resume_command: string;
@@ -106,6 +111,7 @@ export interface WorkflowConfig {
   workspace: WorkspaceConfig;
   hooks: HooksConfig;
   agent: AgentConfig;
+  review: ReviewConfig;
   codex: CodexConfig;
   agents: AgentsConfig;
 }

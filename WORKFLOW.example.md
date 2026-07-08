@@ -145,7 +145,16 @@ hooks:
     echo "  last:   .symphony/last_message.md"
 
     git status
+
+    if [ -n "${SYMPHONY_REVIEW_PROMPT_PATH:-}" ] && [ -f "$SYMPHONY_REVIEW_PROMPT_PATH" ]; then
+      echo "Review prompt: $SYMPHONY_REVIEW_PROMPT_PATH"
+      echo "Run your review agent with this prompt and end with REVIEW_VERDICT: PASS or REVIEW_VERDICT: BLOCK."
+    fi
   timeout_ms: 120000
+
+review:
+  auto_fix_review_comments: false
+  number_of_auto_fix_iterations: 1
 
 agent:
   max_concurrent_agents: 2

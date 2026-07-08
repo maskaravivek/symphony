@@ -70,6 +70,7 @@ function config(): WorkflowConfig {
     },
     hooks: { after_create: null, before_run: null, after_run: null, timeout_ms: 120000 },
     agent: { max_concurrent_agents: 1, max_retry_backoff_ms: 300000, max_attempts: null, max_concurrent_agents_by_state: null },
+    review: { auto_fix_review_comments: false, number_of_auto_fix_iterations: 1 },
     codex: { command: 'codex exec -', resume_command: 'codex exec resume thread -', handoff_command: 'codex exec -', turn_timeout_ms: 3600000 },
     agents: {
       default: 'codex',
