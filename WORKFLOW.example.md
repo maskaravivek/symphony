@@ -172,14 +172,39 @@ agents:
       # Example: check remaining Codex requests via the OpenAI API headers.
       # Keep this command strict-fail; any curl/auth/parse error blocks dispatch.
       usage_limit_check_command: |
-        remaining=$(
-          curl -sf -I \
+        [ -n "${OPENAI_API_KEY:-}" ] || exit 2
+        header_tmp="$(mktemp)"
+        trap 'rm -f "$header_tmp"' EXIT
+        status=$(
+          curl -sS -D "$header_tmp" -o /dev/null -w "%{http_code}" \
             -H "Authorization: Bearer ${OPENAI_API_KEY}" \
-            https://api.openai.com/v1/models \
-          | awk 'tolower($1)=="x-ratelimit-remaining-requests:" {print $2}' \
-          | tr -d '\r'
+            https://api.openai.com/v1/models
+        ) || status=$?
+        if [ "$status" = "429" ]; then
+          exit 1
+        fi
+        if [ "$status" != "200" ]; then
+          exit 2
+        fi
+
+        remaining_requests=$(
+          awk 'tolower($1)=="x-ratelimit-remaining-requests:" {print $2}' "$header_tmp" \
+            | tr -d '\r' \
+            | head -n1
         )
-        [ "${remaining:-0}" -gt 5 ]
+        remaining_tokens=$(
+          awk 'tolower($1)=="x-ratelimit-remaining-tokens:" {print $2}' "$header_tmp" \
+            | tr -d '\r' \
+            | head -n1
+        )
+
+        if [ -n "${remaining_requests}" ] && [ "${remaining_requests}" -le 5 ]; then
+          exit 1
+        fi
+        if [ -n "${remaining_tokens}" ] && [ "${remaining_tokens}" -le 5 ]; then
+          exit 1
+        fi
+        exit 0
     codex-spark:
       provider_group: codex
       provider_kind: codex
