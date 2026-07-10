@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { readEpicStates, type EpicState } from './epicState.js';
+import { readEpicStates, reconcileEpicStateWithIssue, type EpicState } from './epicState.js';
 import { scanRunStates } from './scanRunStates.js';
 import type { RunState } from './runState.js';
 import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubClient.js';
@@ -372,9 +372,13 @@ export function buildBoardState(options: BuildBoardStateOptions): BoardState {
   };
 }
 
-async function refreshRunsFromGithub(config: WorkflowConfig, runs: RunState[]): Promise<{ runs: RunState[]; pullRequests: PullRequestRef[] }> {
+async function refreshRepoFromGithub(
+  config: WorkflowConfig,
+  runs: RunState[],
+  epics: EpicState[],
+): Promise<{ runs: RunState[]; epics: EpicState[]; pullRequests: PullRequestRef[] }> {
   const client = new GithubIssueTrackerClient(config.tracker);
-  const [pullRequests, refreshed] = await Promise.all([
+  const [pullRequests, refreshedRuns, refreshedEpics] = await Promise.all([
     client.listOpenPullRequests().catch(() => []),
     Promise.all(
       runs.map(async (state) => {
@@ -394,20 +398,27 @@ async function refreshRunsFromGithub(config: WorkflowConfig, runs: RunState[]): 
         };
       }),
     ),
+    Promise.all(
+      epics.map(async (state) => {
+        if (state.status === 'completed' || !state.issue_number) return state;
+        const issue = await client.fetchIssueByNumber(state.issue_number).catch(() => null);
+        return issue ? reconcileEpicStateWithIssue(state, issue, config.tracker.terminal_states) : state;
+      }),
+    ),
   ]);
-  return { runs: refreshed, pullRequests };
+  return { runs: refreshedRuns, epics: refreshedEpics, pullRequests };
 }
 
 async function loadRepoSource(repoId: string | null, workflowPath: string, liveRefresh: boolean): Promise<BoardRepoSource> {
   const loaded = await loadWorkflowFromFile(workflowPath);
   const [runs, epics] = await Promise.all([scanRunStates(loaded.config.workspace.root), readEpicStates(loaded.config.workspace.root)]);
-  const refreshed = liveRefresh ? await refreshRunsFromGithub(loaded.config, runs) : { runs, pullRequests: [] };
+  const refreshed = liveRefresh ? await refreshRepoFromGithub(loaded.config, runs, epics) : { runs, epics, pullRequests: [] };
   return {
     repoId,
     workflowPath,
     config: loaded.config,
     runs: refreshed.runs,
-    epics,
+    epics: refreshed.epics,
     pullRequests: refreshed.pullRequests,
   };
 }

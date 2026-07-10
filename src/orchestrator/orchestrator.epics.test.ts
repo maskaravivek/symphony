@@ -135,6 +135,59 @@ test('coordinates native sub-issue parent without dispatching parent workspace',
   assert.equal(epics[0]?.status_comment_id, 500);
 });
 
+test('reconciles a persisted coordinating epic when its parent is closed between polls', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-closed-epic-workspace-'));
+  const workflowPath = await writeWorkflow(workspaceRoot);
+  const originalFetch = globalThis.fetch;
+  let parentClosed = false;
+
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+
+    if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues?')) {
+      return jsonResponse(parentClosed ? [] : [issuePayload(42, 'Epic parent', 'open', ['ready-for-agent'])]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42') {
+      return jsonResponse(issuePayload(42, 'Epic parent', 'closed', ['ready-for-human']));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/sub_issues?per_page=50') {
+      return jsonResponse([issuePayload(43, 'Leaf child', 'open')]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/sub_issues?per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' && method === 'POST') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/comments?per_page=50' && method === 'GET') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/comments' && method === 'POST') {
+      return jsonResponse({ id: 500, body: String(body), html_url: 'https://github.test/comment/500' });
+    }
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    parentClosed = true;
+    await orchestrator.tickOnce();
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const epics = await readEpicStates(workspaceRoot);
+  assert.equal(epics[0]?.status, 'completed');
+  assert.deepEqual(epics[0]?.labels, ['ready-for-human']);
+});
+
 test('parent epic label can switch execution mode to stacked', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-stacked-epic-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot, { executionMode: 'independent' });

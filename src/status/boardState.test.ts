@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { buildBoardState, classifyRunState, loadBoardState } from './boardState.js';
-import type { EpicState } from './epicState.js';
+import { writeEpicStates, type EpicState } from './epicState.js';
 import { writeRunState, type RunState } from './runState.js';
 import type { WorkflowConfig } from '../workflow/types.js';
 
@@ -177,6 +177,7 @@ tracker:
   owner: mangoappstudio
   repo: ${repo}
   token: test
+  api_base_url: https://api.github.test
   terminal_states: [closed]
   required_labels: [ready-for-agent]
   ignored_labels: [blocked, ready-for-human, wontfix]
@@ -304,6 +305,43 @@ test('does not flag terminal history as stale', () => {
 
   assert.equal(board.stale_cards, 0);
   assert.ok(board.columns.find((column) => column.id === 'closed')?.cards.every((card) => card.stale === false));
+});
+
+test('live refresh moves a locally coordinating epic to closed when its GitHub parent is closed', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-board-closed-epic-'));
+  const workspaceRoot = path.join(root, 'workspace');
+  const workflowPath = await writeWorkflow(root, workspaceRoot, 'mdedit');
+  await writeEpicStates(workspaceRoot, [makeEpic({ updated_at: '2026-07-01T00:00:00.000Z' })]);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/100') {
+      return new Response(JSON.stringify({
+        id: 100,
+        node_id: 'epic-1',
+        number: 100,
+        title: 'Epic parent',
+        state: 'closed',
+        labels: [{ name: 'ready-for-human' }],
+        html_url: 'https://github.test/mangoappstudio/mdedit/issues/100',
+        updated_at: '2026-07-08T11:00:00.000Z',
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`Unexpected fetch GET ${url}`);
+  };
+
+  try {
+    const board = await loadBoardState({ workflow: workflowPath, refreshMs: 5000, liveRefresh: true, now: NOW });
+    assert.equal(board.columns.find((column) => column.id === 'active')?.cards.length, 0);
+    assert.equal(board.columns.find((column) => column.id === 'closed')?.cards[0]?.status, 'epic:completed');
+    assert.equal(board.columns.find((column) => column.id === 'closed')?.cards[0]?.issue_state, 'closed');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('loads board state from multi-repo server config and preserves repo ids', async () => {

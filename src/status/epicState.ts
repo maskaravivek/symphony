@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import type { Issue } from '../domain/issue.js';
+
 export type EpicStatus = 'coordinating' | 'completed';
 
 export interface EpicChildState {
@@ -35,6 +37,21 @@ export interface EpicState {
   children: EpicChildState[];
   status_comment_id: number | null;
   updated_at: string;
+}
+
+export function reconcileEpicStateWithIssue(state: EpicState, issue: Issue, terminalStates: string[]): EpicState {
+  const parentIsTerminal = terminalStates.includes(issue.state);
+  return {
+    ...state,
+    issue_id: issue.id,
+    issue_number: issue.number,
+    issue_identifier: issue.identifier,
+    issue_url: issue.url,
+    title: issue.title,
+    labels: issue.labels,
+    status: parentIsTerminal ? 'completed' : state.status,
+    updated_at: issue.updated_at ?? state.updated_at,
+  };
 }
 
 function epicStatePath(workspaceRoot: string): string {

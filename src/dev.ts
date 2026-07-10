@@ -1,7 +1,8 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 
 import { startDashboardServer, type StartedDashboardServer } from './dashboard/server.js';
+import { signalRunProcess, spawnRunProcess } from './devProcess.js';
 
 interface DevRunConfig {
   runArgs: string[];
@@ -65,7 +66,7 @@ function openBrowser(url: string): void {
 
 function startRunProcess(runArgs: string[]): ChildProcess {
   const tsxPath = path.resolve('node_modules/tsx/dist/cli.mjs');
-  return spawn(process.execPath, [tsxPath, 'src/index.ts', 'run', ...runArgs], {
+  return spawnRunProcess(process.execPath, [tsxPath, 'src/index.ts', 'run', ...runArgs], {
     stdio: 'inherit',
     env: process.env,
   });
@@ -98,11 +99,11 @@ async function main(): Promise<void> {
     if (interruptCount === 1) {
       // eslint-disable-next-line no-console
       console.log(`Shutting down Symphony (${signal}). Press Ctrl+C again to force.`);
-      runProcess.kill(signal);
+      signalRunProcess(runProcess, signal);
       forceExitTimer = setTimeout(() => {
         // eslint-disable-next-line no-console
         console.error('Force exiting Symphony dev server after shutdown timeout.');
-        runProcess.kill('SIGKILL');
+        signalRunProcess(runProcess, 'SIGKILL');
         void closeDashboard(dashboard).finally(() => process.exit(1));
       }, 10_000);
       forceExitTimer.unref();
@@ -111,7 +112,7 @@ async function main(): Promise<void> {
 
     // eslint-disable-next-line no-console
     console.error('Force killing Symphony dev server.');
-    runProcess.kill('SIGKILL');
+    signalRunProcess(runProcess, 'SIGKILL');
     void closeDashboard(dashboard).finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
   };
 

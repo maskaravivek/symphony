@@ -18,7 +18,7 @@ import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { AgentProviderConfig, LoadedWorkflow, ScheduledLoopConfig, WorkflowConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
 import { scanRunStates } from '../status/scanRunStates.js';
-import { readEpicStates, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
+import { readEpicStates, reconcileEpicStateWithIssue, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
 import { buildRunContext } from './runContext.js';
 import { formatPauseComment, parsePauseRequest } from './pauseProtocol.js';
 import { formatStatusComment, statusMarker } from './statusComment.js';
@@ -595,6 +595,7 @@ export class Orchestrator {
         return;
       }
 
+      if (config.tracker.epics.enabled) await this.reconcileClosedEpicParents(config, trackerClient, candidates);
       const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
       const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
 
@@ -1246,6 +1247,43 @@ export class Orchestrator {
       }
     }
     return epicParentIds;
+  }
+
+  private async reconcileClosedEpicParents(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    candidates: Issue[],
+  ): Promise<void> {
+    const candidateIds = new Set(candidates.flatMap((issue) => [issue.id, issue.identifier]));
+    const persisted = await readEpicStates(config.workspace.root);
+
+    for (const state of persisted) {
+      if (state.status === 'completed' || !state.issue_number) continue;
+      if (candidateIds.has(state.issue_id) || candidateIds.has(state.issue_identifier)) continue;
+
+      try {
+        const issue = await tracker.fetchIssueByNumber(state.issue_number);
+        if (!issue || !isTerminalIssue(config, issue)) continue;
+        await upsertEpicState(
+          config.workspace.root,
+          reconcileEpicStateWithIssue(state, issue, config.tracker.terminal_states),
+        );
+        log('info', 'epic_parent_closed_reconciled', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'epic_parent_closed_reconciled',
+        });
+      } catch (err) {
+        if (isGithubRateLimitError(err)) throw err;
+        log('error', 'epic_parent_reconciliation_failed', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          issue: state.issue_identifier,
+          event: 'epic_parent_reconciliation_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   private async coordinateEpic(config: WorkflowConfig, tracker: GithubIssueTrackerClient, tree: EpicTreeNode): Promise<void> {
