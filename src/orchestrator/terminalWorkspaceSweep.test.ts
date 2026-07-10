@@ -156,7 +156,7 @@ test('sweeps completed workspaces for closed issues when clean_on_terminal is en
 
   await assert.rejects(fs.access(workspacePath));
   const entries = await fs.readdir(workspaceRoot);
-  assert.deepEqual(entries, ['_archives']);
+  assert.deepEqual(entries.sort(), ['.symphony', '_archives']);
   const archives = await fs.readdir(path.join(workspaceRoot, '_archives'));
   assert.equal(archives.length, 1);
   assert.ok(calls.some((call) => call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42'));

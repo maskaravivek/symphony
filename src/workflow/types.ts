@@ -68,6 +68,33 @@ export interface ReviewConfig {
   number_of_auto_fix_iterations: number;
 }
 
+export type MergeRisk = 'standard' | 'elevated' | 'prohibited';
+
+export type MergeMethod = 'merge' | 'squash' | 'rebase';
+
+export interface MergeRiskRule {
+  risk: MergeRisk;
+  any_labels: string[];
+  paths: string[];
+  target_branches: string[];
+}
+
+export interface MergeConfig {
+  enabled: boolean;
+  dry_run: boolean;
+  method: MergeMethod;
+  default_risk: MergeRisk;
+  rules: MergeRiskRule[];
+}
+
+export interface ScheduledLoopConfig {
+  id: string;
+  enabled: boolean;
+  interval_ms: number;
+  prompt: string;
+  provider: string | null;
+}
+
 export interface CodexConfig {
   command: string;
   resume_command: string;
@@ -112,6 +139,8 @@ export interface WorkflowConfig {
   hooks: HooksConfig;
   agent: AgentConfig;
   review: ReviewConfig;
+  merge: MergeConfig;
+  loops: ScheduledLoopConfig[];
   codex: CodexConfig;
   agents: AgentsConfig;
 }

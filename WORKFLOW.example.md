@@ -37,6 +37,29 @@ tracker:
 polling:
   interval_ms: 30000
 
+# Repository-owned autonomous merge policy. Disabled unless explicitly enabled.
+merge:
+  enabled: false
+  dry_run: false
+  method: squash
+  default_risk: standard
+  rules:
+    - risk: elevated
+      any_labels: [security]
+      paths: [.github/workflows/**, WORKFLOW.md, migrations/**]
+    - risk: prohibited
+      any_labels: [no-automerge]
+      target_branches: [production]
+
+# Simple interval triggers: one due trigger starts one agent run. Keep product-
+# specific loop prompts and skill names in the target repository.
+loops:
+  - id: weekly-quality
+    enabled: false
+    interval_ms: 604800000
+    prompt: Inspect one bounded area, deduplicate findings, and create evidence-backed issues.
+    provider: codex
+
 workspace:
   root: ~/.symphony/workspaces/mdedit
   clean_on_terminal: false

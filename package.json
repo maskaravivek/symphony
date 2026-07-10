@@ -10,7 +10,7 @@
   },
   "packageManager": "yarn@1.22.22",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
   "bin": {
     "symphony": "bin/symphony.js"
@@ -35,7 +35,7 @@
     "yaml": "^2.8.1"
   },
   "devDependencies": {
-    "@types/node": "^20.10.5",
+    "@types/node": "^24.0.0",
     "tsup": "^8.0.2",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"

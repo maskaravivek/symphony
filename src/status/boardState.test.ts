@@ -114,6 +114,8 @@ function makeWorkflowConfig(workspaceRoot: string, repo = 'mdedit'): WorkflowCon
       auto_fix_review_comments: false,
       number_of_auto_fix_iterations: 1,
     },
+    merge: { enabled: false, dry_run: false, method: 'squash', default_risk: 'standard', rules: [] },
+    loops: [],
     codex: {
       command: 'true',
       resume_command: 'true',
@@ -245,6 +247,7 @@ test('collapses issue and pull request run states into one task card', () => {
             head_ref: 'symphony-42-work',
             head_sha: 'abc123',
             base_ref: 'main',
+            base_sha: 'base123',
             merge_state_status: 'clean',
           },
         ],

@@ -10,6 +10,10 @@ import type {
   AgentsConfig,
   CodexConfig,
   LoadedWorkflow,
+  MergeMethod,
+  MergeRisk,
+  MergeRiskRule,
+  ScheduledLoopConfig,
   WorkflowConfig,
   WorkspaceStrategy,
   WorkspaceStrategyConfig,
@@ -326,6 +330,83 @@ function normalizeAgentsConfig(raw: AnyRecord, codex: CodexConfig): AgentsConfig
   return { default: defaultProvider, providers, routes };
 }
 
+const MERGE_RISKS = new Set<MergeRisk>(['standard', 'elevated', 'prohibited']);
+const MERGE_METHODS = new Set<MergeMethod>(['merge', 'squash', 'rebase']);
+
+function normalizeMergeRisk(value: unknown, keyPath: string, fallback?: MergeRisk): MergeRisk {
+  if (value === undefined || value === null) {
+    if (fallback) return fallback;
+    throw new SymphonyConfigError(`${keyPath} is required`);
+  }
+  const risk = normalizeIdentifier(asString(value, keyPath) ?? '');
+  if (!MERGE_RISKS.has(risk as MergeRisk)) {
+    throw new SymphonyConfigError(`${keyPath} must be standard, elevated, or prohibited`);
+  }
+  return risk as MergeRisk;
+}
+
+function normalizeMergeRule(value: unknown, index: number): MergeRiskRule {
+  const keyPath = `merge.rules[${index}]`;
+  if (!isRecord(value)) throw new SymphonyConfigError(`${keyPath} must be an object`);
+  return {
+    risk: normalizeMergeRisk(value.risk, `${keyPath}.risk`),
+    any_labels: normalizeLabelList(value.any_labels, `${keyPath}.any_labels`),
+    paths: (asStringArray(value.paths, `${keyPath}.paths`) ?? []).map((path) => path.trim()).filter(Boolean),
+    target_branches: (asStringArray(value.target_branches, `${keyPath}.target_branches`) ?? [])
+      .map((branch) => branch.trim())
+      .filter(Boolean),
+  };
+}
+
+function normalizeMergeConfig(value: unknown): WorkflowConfig['merge'] {
+  const raw = isRecord(value) ? value : {};
+  const method = normalizeIdentifier(asString(raw.method, 'merge.method') ?? 'squash');
+  if (!MERGE_METHODS.has(method as MergeMethod)) {
+    throw new SymphonyConfigError('merge.method must be merge, squash, or rebase');
+  }
+  if (raw.rules !== undefined && !Array.isArray(raw.rules)) {
+    throw new SymphonyConfigError('merge.rules must be an array');
+  }
+  return {
+    enabled: asBoolean(raw.enabled, 'merge.enabled') ?? false,
+    dry_run: asBoolean(raw.dry_run, 'merge.dry_run') ?? false,
+    method: method as MergeMethod,
+    default_risk: normalizeMergeRisk(raw.default_risk, 'merge.default_risk', 'standard'),
+    rules: (raw.rules as unknown[] | undefined)?.map(normalizeMergeRule) ?? [],
+  };
+}
+
+function normalizeScheduledLoops(value: unknown): ScheduledLoopConfig[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new SymphonyConfigError('loops must be an array');
+  const seenIds = new Set<string>();
+  return value.map((entry, index) => {
+    const keyPath = `loops[${index}]`;
+    if (!isRecord(entry)) throw new SymphonyConfigError(`${keyPath} must be an object`);
+    const id = normalizeIdentifier(asTrimmedStringOrNull(entry.id, `${keyPath}.id`) ?? '');
+    if (!id) throw new SymphonyConfigError(`${keyPath}.id is required`);
+    if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+      throw new SymphonyConfigError(`${keyPath}.id may contain only lowercase letters, numbers, dots, underscores, and hyphens`);
+    }
+    if (seenIds.has(id)) throw new SymphonyConfigError(`loops contains duplicate id: ${id}`);
+    seenIds.add(id);
+    const intervalMs = asNumber(entry.interval_ms, `${keyPath}.interval_ms`);
+    if (intervalMs === null || !Number.isFinite(intervalMs) || intervalMs <= 0) {
+      throw new SymphonyConfigError(`${keyPath}.interval_ms must be a positive number`);
+    }
+    const prompt = asTrimmedStringOrNull(entry.prompt, `${keyPath}.prompt`);
+    if (!prompt) throw new SymphonyConfigError(`${keyPath}.prompt is required`);
+    const provider = asTrimmedStringOrNull(entry.provider, `${keyPath}.provider`);
+    return {
+      id,
+      enabled: asBoolean(entry.enabled, `${keyPath}.enabled`) ?? true,
+      interval_ms: intervalMs,
+      prompt,
+      provider: provider ? normalizeIdentifier(provider) : null,
+    };
+  });
+}
+
 function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   if (!isRecord(raw)) throw new SymphonyConfigError('WORKFLOW.md front matter must be a YAML object');
 
@@ -423,6 +504,13 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
     turn_timeout_ms: codexTurnTimeoutMs,
   };
   const agents = normalizeAgentsConfig(raw, codex);
+  const merge = normalizeMergeConfig(raw.merge);
+  const loops = normalizeScheduledLoops(raw.loops);
+  for (const loop of loops) {
+    if (loop.provider && !agents.providers[loop.provider]) {
+      throw new SymphonyConfigError(`loops provider references unknown provider: ${loop.provider}`);
+    }
+  }
 
   const priorityLabels = normalizePriorityLabels(trackerRaw.priority_labels);
 
@@ -465,6 +553,8 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       auto_fix_review_comments: autoFixReviewComments,
       number_of_auto_fix_iterations: numberOfAutoFixIterations,
     },
+    merge,
+    loops,
     codex,
     agents,
   };

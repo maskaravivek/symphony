@@ -49,8 +49,9 @@ type GithubPullRequestPayload = {
   labels?: GithubLabel[];
   html_url?: string;
   head?: { ref?: string; sha?: string; repo?: { full_name?: string } | null } | null;
-  base?: { ref?: string; repo?: { full_name?: string } | null } | null;
+  base?: { ref?: string; sha?: string; repo?: { full_name?: string } | null } | null;
   mergeable_state?: string | null;
+  merged_at?: string | null;
 };
 
 export interface IssueTrackerClient {
@@ -91,7 +92,28 @@ export interface PullRequestRef {
   head_ref: string;
   head_sha: string | null;
   base_ref: string;
+  base_sha: string | null;
   merge_state_status: string | null;
+}
+
+export interface PullRequestCheck {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  url: string | null;
+}
+
+export interface MergePullRequestResult {
+  merged: boolean;
+  message: string;
+  sha: string | null;
+}
+
+export interface MergedPullRequestRef {
+  number: number;
+  head_ref: string;
+  base_ref: string;
+  merged_at: string;
 }
 
 export class GithubRateLimitError extends SymphonyRuntimeError {
@@ -247,6 +269,7 @@ function normalizePullRequestPayload(payload: GithubPullRequestPayload): PullReq
     head_ref: typeof payload.head?.ref === 'string' ? payload.head.ref : '',
     head_sha: typeof payload.head?.sha === 'string' ? payload.head.sha : null,
     base_ref: typeof payload.base?.ref === 'string' ? payload.base.ref : 'main',
+    base_sha: typeof payload.base?.sha === 'string' ? payload.base.sha : null,
     merge_state_status: typeof payload.mergeable_state === 'string' ? payload.mergeable_state : null,
   };
 }
@@ -433,12 +456,110 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     return raw.map((p) => normalizePullRequestPayload(p as GithubPullRequestPayload)).filter((p): p is PullRequestRef => p !== null);
   }
 
+  async listMergedPullRequests(): Promise<MergedPullRequestRef[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls`, this.tracker.api_base_url);
+    url.searchParams.set('state', 'closed');
+    url.searchParams.set('sort', 'updated');
+    url.searchParams.set('direction', 'desc');
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const { data } = await this.fetchJson(url.toString());
+    if (!Array.isArray(data)) throw new SymphonyRuntimeError('Expected GitHub closed pull request response to be an array');
+    const raw = data as GithubPullRequestPayload[];
+    return raw
+      .map((payload) => ({
+        number: payload.number,
+        head_ref: payload.head?.ref,
+        base_ref: payload.base?.ref,
+        merged_at: payload.merged_at,
+      }))
+      .filter(
+        (pr): pr is MergedPullRequestRef =>
+          typeof pr.number === 'number' &&
+          typeof pr.head_ref === 'string' &&
+          typeof pr.base_ref === 'string' &&
+          typeof pr.merged_at === 'string',
+      );
+  }
+
+  async updatePullRequestBase(number: number, baseRef: string): Promise<PullRequestRef> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}`, this.tracker.api_base_url);
+    const { data } = await this.fetchJson(url.toString(), { method: 'PATCH', body: { base: baseRef } });
+    if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub pull request update response to be an object');
+    const pr = normalizePullRequestPayload(data as GithubPullRequestPayload);
+    if (!pr) throw new SymphonyRuntimeError('Updated GitHub pull request response is missing a number');
+    return pr;
+  }
+
   async fetchPullRequest(number: number): Promise<PullRequestRef | null> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}`, this.tracker.api_base_url);
     const { data } = await this.fetchJson(url.toString(), { allowNotFound: true });
     if (data === null) return null;
     if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub pull request response to be an object');
     return normalizePullRequestPayload(data as GithubPullRequestPayload);
+  }
+
+  async listPullRequestFiles(number: number): Promise<string[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}/files`, this.tracker.api_base_url);
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages<{ filename?: unknown }>(url.toString());
+    return raw.map((file) => file.filename).filter((filename): filename is string => typeof filename === 'string');
+  }
+
+  async listPullRequestChecks(headSha: string): Promise<PullRequestCheck[]> {
+    const checkRunsUrl = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/commits/${headSha}/check-runs`, this.tracker.api_base_url);
+    checkRunsUrl.searchParams.set('per_page', '100');
+    const checksResponse = await this.fetchJson(checkRunsUrl.toString());
+    if (!checksResponse.data || typeof checksResponse.data !== 'object') {
+      throw new SymphonyRuntimeError('Expected GitHub check-runs response to be an object');
+    }
+    const checkRuns = (checksResponse.data as { check_runs?: unknown }).check_runs;
+    if (!Array.isArray(checkRuns)) throw new SymphonyRuntimeError('Expected GitHub check_runs to be an array');
+    const checks: PullRequestCheck[] = checkRuns.map((entry) => {
+      const check = entry as { name?: unknown; status?: unknown; conclusion?: unknown; html_url?: unknown };
+      return {
+        name: typeof check.name === 'string' ? check.name : 'unnamed check',
+        status: typeof check.status === 'string' ? check.status : 'unknown',
+        conclusion: typeof check.conclusion === 'string' ? check.conclusion : null,
+        url: typeof check.html_url === 'string' ? check.html_url : null,
+      };
+    });
+
+    const statusUrl = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/commits/${headSha}/status`, this.tracker.api_base_url);
+    const statusResponse = await this.fetchJson(statusUrl.toString());
+    if (!statusResponse.data || typeof statusResponse.data !== 'object') {
+      throw new SymphonyRuntimeError('Expected GitHub commit status response to be an object');
+    }
+    const statuses = (statusResponse.data as { statuses?: unknown }).statuses;
+    if (!Array.isArray(statuses)) throw new SymphonyRuntimeError('Expected GitHub statuses to be an array');
+    for (const entry of statuses) {
+      const status = entry as { context?: unknown; state?: unknown; target_url?: unknown };
+      const state = typeof status.state === 'string' ? status.state : 'unknown';
+      checks.push({
+        name: typeof status.context === 'string' ? status.context : 'unnamed status',
+        status: state === 'pending' ? 'in_progress' : 'completed',
+        conclusion: state === 'pending' ? null : state,
+        url: typeof status.target_url === 'string' ? status.target_url : null,
+      });
+    }
+    return checks;
+  }
+
+  async mergePullRequest(
+    number: number,
+    options: { expectedHeadSha: string; method: 'merge' | 'squash' | 'rebase' },
+  ): Promise<MergePullRequestResult> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}/merge`, this.tracker.api_base_url);
+    const { data } = await this.fetchJson(url.toString(), {
+      method: 'PUT',
+      body: { sha: options.expectedHeadSha, merge_method: options.method },
+    });
+    if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub merge response to be an object');
+    const response = data as { merged?: unknown; message?: unknown; sha?: unknown };
+    return {
+      merged: response.merged === true,
+      message: typeof response.message === 'string' ? response.message : '',
+      sha: typeof response.sha === 'string' ? response.sha : null,
+    };
   }
 
   async listLabels(): Promise<RepositoryLabel[]> {

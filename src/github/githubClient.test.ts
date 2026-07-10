@@ -299,6 +299,122 @@ test('caches issue fetches by repo and number within a client', async () => {
   }
 });
 
+test('reads PR merge evidence and merges with an expected head SHA', async () => {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+    if (url.endsWith('/pulls/42/files?per_page=50')) {
+      return jsonResponse([{ filename: 'src/auth/login.ts' }, { filename: '.github/workflows/ci.yml' }]);
+    }
+    if (url.endsWith('/commits/head-sha/check-runs?per_page=100')) {
+      return jsonResponse({
+        total_count: 2,
+        check_runs: [
+          { name: 'test', status: 'completed', conclusion: 'success', html_url: 'https://checks.test/1' },
+          { name: 'lint', status: 'in_progress', conclusion: null, html_url: 'https://checks.test/2' },
+        ],
+      });
+    }
+    if (url.endsWith('/commits/head-sha/status')) {
+      return jsonResponse({ statuses: [{ context: 'legacy-ci', state: 'success', target_url: 'https://checks.test/3' }] });
+    }
+    if (url.endsWith('/pulls/42/merge') && method === 'PUT') {
+      return jsonResponse({ merged: true, message: 'Pull Request successfully merged', sha: 'merge-sha' });
+    }
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    assert.deepEqual(await client.listPullRequestFiles(42), ['src/auth/login.ts', '.github/workflows/ci.yml']);
+    assert.deepEqual(await client.listPullRequestChecks('head-sha'), [
+      { name: 'test', status: 'completed', conclusion: 'success', url: 'https://checks.test/1' },
+      { name: 'lint', status: 'in_progress', conclusion: null, url: 'https://checks.test/2' },
+      { name: 'legacy-ci', status: 'completed', conclusion: 'success', url: 'https://checks.test/3' },
+    ]);
+    assert.deepEqual(await client.mergePullRequest(42, { expectedHeadSha: 'head-sha', method: 'squash' }), {
+      merged: true,
+      message: 'Pull Request successfully merged',
+      sha: 'merge-sha',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(calls.at(-1), {
+    url: 'https://api.github.test/repos/mangoappstudio/mdedit/pulls/42/merge',
+    method: 'PUT',
+    body: { sha: 'head-sha', merge_method: 'squash' },
+  });
+});
+
+test('captures the base SHA when reading a pull request', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    jsonResponse({
+      number: 42,
+      title: 'Change',
+      state: 'open',
+      draft: false,
+      head: { ref: 'feature', sha: 'head-sha' },
+      base: { ref: 'main', sha: 'base-sha' },
+      mergeable_state: 'clean',
+    });
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    const pr = await client.fetchPullRequest(42);
+    assert.equal(pr?.base_sha, 'base-sha');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('lists merged predecessor PRs and retargets a stacked child', async () => {
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+    if (url.endsWith('/pulls?state=closed&sort=updated&direction=desc&per_page=50')) {
+      return jsonResponse([
+        { number: 10, head: { ref: 'symphony-1-first' }, base: { ref: 'main' }, merged_at: '2026-07-10T00:00:00Z' },
+        { number: 9, head: { ref: 'closed-not-merged' }, base: { ref: 'main' }, merged_at: null },
+      ]);
+    }
+    if (url.endsWith('/pulls/11') && method === 'PATCH') {
+      return jsonResponse({
+        number: 11,
+        title: 'Second',
+        state: 'open',
+        head: { ref: 'symphony-2-second', sha: 'head' },
+        base: { ref: 'main', sha: 'base' },
+        mergeable_state: 'clean',
+      });
+    }
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    assert.deepEqual(await client.listMergedPullRequests(), [
+      { number: 10, head_ref: 'symphony-1-first', base_ref: 'main', merged_at: '2026-07-10T00:00:00Z' },
+    ]);
+    assert.equal((await client.updatePullRequestBase(11, 'main')).base_ref, 'main');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calls.at(-1), {
+    url: 'https://api.github.test/repos/mangoappstudio/mdedit/pulls/11',
+    method: 'PATCH',
+    body: { base: 'main' },
+  });
+});
+
 test('lists open pull requests with merge state fields', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
@@ -338,6 +454,7 @@ test('lists open pull requests with merge state fields', async () => {
       head_ref: 'codex-339-migrate-frontend',
       head_sha: null,
       base_ref: 'main',
+      base_sha: null,
       merge_state_status: 'dirty',
     },
   ]);

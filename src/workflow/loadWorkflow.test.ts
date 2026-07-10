@@ -69,6 +69,118 @@ codex:
   });
 });
 
+test('defaults autonomous merge and scheduled loops conservatively', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.merge, {
+    enabled: false,
+    dry_run: false,
+    method: 'squash',
+    default_risk: 'standard',
+    rules: [],
+  });
+  assert.deepEqual(loaded.config.loops, []);
+});
+
+test('loads deterministic merge risk rules and scheduled loops', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+merge:
+  enabled: true
+  dry_run: true
+  method: rebase
+  default_risk: standard
+  rules:
+    - risk: elevated
+      any_labels: [security, migration]
+      paths: [apps/api/src/auth/**, .github/workflows/**]
+    - risk: prohibited
+      target_branches: [production]
+loops:
+  - id: daily-quality
+    enabled: true
+    interval_ms: 86400000
+    prompt: Use the repository quality skill and create only evidence-backed issues.
+    provider: codex
+codex:
+  command: codex exec -
+`);
+
+  const loaded = await loadWorkflowFromFile(workflowPath);
+  assert.deepEqual(loaded.config.merge, {
+    enabled: true,
+    dry_run: true,
+    method: 'rebase',
+    default_risk: 'standard',
+    rules: [
+      {
+        risk: 'elevated',
+        any_labels: ['security', 'migration'],
+        paths: ['apps/api/src/auth/**', '.github/workflows/**'],
+        target_branches: [],
+      },
+      {
+        risk: 'prohibited',
+        any_labels: [],
+        paths: [],
+        target_branches: ['production'],
+      },
+    ],
+  });
+  assert.deepEqual(loaded.config.loops, [
+    {
+      id: 'daily-quality',
+      enabled: true,
+      interval_ms: 86400000,
+      prompt: 'Use the repository quality skill and create only evidence-backed issues.',
+      provider: 'codex',
+    },
+  ]);
+});
+
+test('rejects invalid merge risk and scheduled-loop intervals', async () => {
+  const invalidRiskPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+merge:
+  default_risk: dangerous
+codex:
+  command: codex exec -
+`);
+  await assert.rejects(() => loadWorkflowFromFile(invalidRiskPath), /merge.default_risk must be standard, elevated, or prohibited/);
+
+  const invalidLoopPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+loops:
+  - id: quality
+    interval_ms: 0
+    prompt: Run quality checks.
+codex:
+  command: codex exec -
+`);
+  await assert.rejects(() => loadWorkflowFromFile(invalidLoopPath), /loops\[0\]\.interval_ms must be a positive number/);
+});
+
 test('rejects invalid review auto-fix iterations', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:

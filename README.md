@@ -4,6 +4,8 @@ Symphony is a long-running service that polls GitHub Issues (by label), creates 
 
 ## Run
 
+Symphony requires Node.js 22.5 or newer; the durable local episode ledger uses Node's built-in SQLite API.
+
 From repo root (or any directory that contains `WORKFLOW.md`):
 
 ```bash
@@ -62,6 +64,8 @@ Symphony writes per-issue artifacts under each workspace:
 - `.symphony/codex.jsonl` or `.symphony/claude.log` (configured agent output; tail this)
 - `.symphony/last_message.md` (final agent message)
 - `.symphony/run.json` (run metadata used by `symphony status/open/tail`)
+
+It also keeps an append-only local event ledger at `<workspace.root>/.symphony/episodes.sqlite`. The ledger stores structured run, verification, loop-trigger, and merge outcome metadata; large prompts and agent output remain file artifacts referenced by path.
 
 Helper commands:
 
@@ -199,13 +203,50 @@ Issues labeled `task:spec` or `planning` run in planning-only mode regardless of
 
 When an autonomous run produces a PR, Symphony writes a staff-engineer review prompt to `.symphony/review_prompt.md` and exposes it to `hooks.after_run` as `SYMPHONY_REVIEW_PROMPT_PATH` plus PR metadata such as `SYMPHONY_REVIEW_PR_NUMBER`, `SYMPHONY_REVIEW_PR_HEAD_REF`, and `SYMPHONY_REVIEW_PR_HEAD_SHA`. The prompt asks the review agent to prefer `/code-review` when the target repo has that skill installed, and to fall back to a manual review otherwise.
 
-Review hooks should end with `REVIEW_VERDICT: PASS` or `REVIEW_VERDICT: BLOCK`. Passing reviews label the PR `symphony-review:passed` and `ready-for-human`. Blocking reviews label the PR `symphony-review:blocking`.
+Review hooks should end with `REVIEW_VERDICT: PASS` or `REVIEW_VERDICT: BLOCK`. Passing reviews produce a structured receipt bound to both the PR head SHA and base SHA. Blocking reviews label the PR `symphony-review:blocking`.
 
-Labels are not the source of truth for whether a PR has already been reviewed. Symphony also maintains a hidden PR comment marked `symphony-review-state:v1` with the reviewed head SHA, verdict, and auto-fix iteration count. A PR is skipped only when that durable state says the current head SHA already passed review. If new commits are pushed, the SHA changes and Symphony can review the PR again.
+Labels are not the source of truth for whether a PR has already been reviewed. Symphony also maintains a hidden PR comment marked `symphony-review-state:v1` with verification receipts and auto-fix state. A receipt becomes stale when either the head or base changes, so new commits and stacked-PR retargeting require fresh verification.
 
 If `review.auto_fix_review_comments` is true, blocking reviews remove `ready-for-human`, add `ready-for-agent`, and add `symphony-review:auto-fix-N` until `review.number_of_auto_fix_iterations` is exhausted. If a blocking review repeats on the same head SHA, Symphony waits for a human immediately instead of spending more iterations on a PR that did not change. Once exhausted, Symphony leaves the PR `ready-for-human` instead of reviewing or fixing the same PR forever.
 
 When GitHub rejects a label write because a managed label does not exist yet, Symphony creates the missing label and retries the write. Hook output is streamed live, but Symphony only retains a bounded tail in memory for verdict parsing and error messages; override the default with `SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES` if needed.
+
+## Autonomous merge policy
+
+Autonomous merging is repository opt-in and deterministic:
+
+```yaml
+merge:
+  enabled: true
+  dry_run: false
+  method: squash
+  default_risk: standard
+  rules:
+    - risk: elevated
+      any_labels: [security]
+      paths: [.github/workflows/**, WORKFLOW.md, migrations/**]
+    - risk: prohibited
+      target_branches: [production]
+```
+
+The highest matching risk wins. `standard` requires one fresh passing verification receipt, `elevated` requires two, and `prohibited` never merges autonomously. A merge also requires an open non-draft PR, a clean merge state, a linked issue, available and successful GitHub checks, no blocking/pause label, current head/base SHAs, and an expected-head-SHA merge request. `dry_run: true` evaluates and records eligibility without merging. Repository rules use only labels, changed-file globs, and target branches; Symphony does not ask an LLM to decide merge eligibility.
+
+When autonomous merge and native epics are both enabled, Symphony also promotes stacked PRs after a predecessor merges: it retargets the child to the surviving base branch, clears stale review labels, and queues fresh review. The prior receipts no longer count because the base changed.
+
+## Scheduled loops
+
+Loops are deliberately small interval triggers, not a workflow engine:
+
+```yaml
+loops:
+  - id: weekly-quality
+    enabled: true
+    interval_ms: 604800000
+    prompt: Inspect one bounded area and create only evidence-backed issues.
+    provider: codex
+```
+
+One due trigger starts one agent run in a durable `_loops/<id>` workspace. The trigger is written to the local episode ledger before dispatch, so a restart does not immediately duplicate it. Each prompt receives a bounded newest-first episode summary; repository-specific skills, QA policy, and issue-creation rules belong in that repository's `WORKFLOW.md`. Scheduled discovery loops can create normal `ready-for-agent` issues, which then use the ordinary isolated implementation, verification, review, and merge path.
 
 ## Notes
 
@@ -223,4 +264,4 @@ When GitHub rejects a label write because a managed label does not exist yet, Sy
 - Hook scripts (`hooks.after_create`, `hooks.before_run`, `hooks.after_run`) are rendered as Liquid templates with `issue.*` available.
 - Agent commands are rendered as Liquid templates with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` / `symphony.agent_provider` / `symphony.agent_thread_id` available.
 - Legacy `codex.command` workflows still work; Symphony converts them into a default `codex` provider internally.
-- GitHub writes (comments, labels, PR creation) are intentionally left to the agent/toolchain (`gh`, MCP, etc.).
+- Issue and PR creation remain agent/toolchain responsibilities (`gh`, MCP, etc.); Symphony itself owns lifecycle comments/labels and policy-gated merges.

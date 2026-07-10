@@ -1,6 +1,11 @@
 import type { Issue } from '../domain/issue.js';
 import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
 import { GithubIssueTrackerClient, isGithubRateLimitError, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
+import { EpisodeStore } from '../episodes/episodeStore.js';
+import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
+import { classifyMergeRisk, type VerificationReceipt } from '../merge/mergePolicy.js';
+import { resolvePromotedBase } from '../merge/stackPromotion.js';
+import { dueScheduledLoops } from '../loops/scheduledLoops.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
@@ -10,7 +15,7 @@ import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { HookScriptError, runHookScript } from '../workspace/hooks.js';
 import { WorkspaceManager, workspacePathForIssue } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
-import type { AgentProviderConfig, LoadedWorkflow, WorkflowConfig, WorkspaceStrategy } from '../workflow/types.js';
+import type { AgentProviderConfig, LoadedWorkflow, ScheduledLoopConfig, WorkflowConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
 import { scanRunStates } from '../status/scanRunStates.js';
 import { readEpicStates, upsertEpicState, type EpicChildState, type EpicState } from '../status/epicState.js';
@@ -22,6 +27,7 @@ import { acquireWorkflowLock, type WorkflowLock } from './workflowLock.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 interface DispatchCapacity {
   remaining: number | null;
@@ -98,6 +104,12 @@ interface RunningSession {
   done: Promise<void> | null;
 }
 
+interface RunningLoop {
+  agent_provider_group: string;
+  cancel: (reason: string) => Promise<void>;
+  done: Promise<void>;
+}
+
 interface LiveOrphanClaim {
   issue_state: string;
   agent_provider_group: string;
@@ -129,10 +141,12 @@ interface PullRequestReviewState {
   head_ref: string;
   head_sha: string | null;
   base_ref: string;
+  base_sha: string | null;
   verdict: PullRequestReviewVerdict;
   auto_fix_iterations: number;
   reviewed_at: string;
   reason: string;
+  receipts: VerificationReceipt[];
 }
 
 type EpicExecutionMode = WorkflowConfig['tracker']['epics']['execution_mode'];
@@ -263,10 +277,26 @@ function parsePullRequestReviewStateComment(body: string): PullRequestReviewStat
       head_ref: typeof parsed.head_ref === 'string' ? parsed.head_ref : '',
       head_sha: typeof parsed.head_sha === 'string' ? parsed.head_sha : null,
       base_ref: typeof parsed.base_ref === 'string' ? parsed.base_ref : 'main',
+      base_sha: typeof parsed.base_sha === 'string' ? parsed.base_sha : null,
       verdict: parsed.verdict,
       auto_fix_iterations: Number.isInteger(parsed.auto_fix_iterations) && parsed.auto_fix_iterations! >= 0 ? parsed.auto_fix_iterations! : 0,
       reviewed_at: typeof parsed.reviewed_at === 'string' ? parsed.reviewed_at : '',
       reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+      receipts: Array.isArray(parsed.receipts)
+        ? parsed.receipts.filter((receipt): receipt is VerificationReceipt => {
+            if (!receipt || typeof receipt !== 'object') return false;
+            const candidate = receipt as Partial<VerificationReceipt>;
+            return (
+              typeof candidate.receipt_id === 'string' &&
+              typeof candidate.verifier === 'string' &&
+              (candidate.verdict === 'pass' || candidate.verdict === 'block' || candidate.verdict === 'error' || candidate.verdict === 'unavailable') &&
+              typeof candidate.head_sha === 'string' &&
+              typeof candidate.base_sha === 'string' &&
+              Array.isArray(candidate.evidence) &&
+              typeof candidate.verified_at === 'string'
+            );
+          })
+        : [],
     };
   } catch {
     return null;
@@ -287,7 +317,18 @@ ${JSON.stringify(state, null, 2)}
 
 function pullRequestHeadMatchesState(pr: PullRequestRef, state: PullRequestReviewState | null): boolean {
   if (!state?.head_sha || !pr.head_sha) return false;
+  if (state.base_ref !== pr.base_ref) return false;
+  if ((state.base_sha || pr.base_sha) && state.base_sha !== pr.base_sha) return false;
   return state.head_sha === pr.head_sha;
+}
+
+function freshPassingReceiptCount(pr: PullRequestRef, state: PullRequestReviewState | null): number {
+  if (!pr.head_sha || !pr.base_sha) return 0;
+  return new Set(
+    (state?.receipts ?? [])
+      .filter((receipt) => receipt.verdict === 'pass' && receipt.head_sha === pr.head_sha && receipt.base_sha === pr.base_sha)
+      .map((receipt) => receipt.receipt_id),
+  ).size;
 }
 
 function shouldWaitForMergeState(value: string | null): boolean {
@@ -431,9 +472,11 @@ export class Orchestrator {
   private lastGoodWorkflow: LoadedWorkflow | null = null;
 
   private running = new Map<string, RunningSession>();
+  private runningLoops = new Map<string, RunningLoop>();
   private retries = new Map<string, RetryEntry>();
   private conflictQueue = new Map<number, ConflictEntry>();
   private lastConflictScanAtMs = 0;
+  private lastStackPromotionScanAtMs = 0;
   private providerUsageLimitBackoffUntil = new Map<string, number>();
   private providerUsageLimitCheckBlocked = new Set<string>();
   private githubRateLimitBackoffUntilMs = 0;
@@ -451,7 +494,7 @@ export class Orchestrator {
   }
 
   getRunningCount(): number {
-    return this.running.size + this.liveOrphanClaims.size;
+    return this.running.size + this.runningLoops.size + this.liveOrphanClaims.size;
   }
 
   getRepoId(): string | null {
@@ -472,6 +515,7 @@ export class Orchestrator {
     if (!this.shutdownController.signal.aborted) this.shutdownController.abort(reason);
     this.wakeRunLoop?.();
     const sessions = [...this.running.values()];
+    const loops = [...this.runningLoops.values()];
     await Promise.allSettled(
       sessions.map(async (s) => {
         s.cancelled_reason = reason;
@@ -479,6 +523,10 @@ export class Orchestrator {
         await s.done;
       }),
     );
+    await Promise.allSettled(loops.map(async (loop) => {
+      await loop.cancel(reason);
+      await loop.done;
+    }));
     await this.releaseWorkflowLock();
   }
 
@@ -524,9 +572,12 @@ export class Orchestrator {
       await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
       await this.refreshProviderUsageLimitChecks(config);
       const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
+      await this.promoteStackedPullRequests(config, trackerClient);
       await this.scanOpenPullRequestsForConflicts(config, trackerClient);
+      await this.reconcileAutonomousMerges(config, trackerClient);
       await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
       await this.dispatchPullRequestReviews(config, trackerClient, workspaceManager, capacity);
+      await this.dispatchScheduledLoops(config, capacity);
 
       let candidates: Issue[];
       try {
@@ -831,6 +882,13 @@ export class Orchestrator {
         reason,
         worker_pid: state?.worker_pid ?? undefined,
       });
+      this.appendEpisodeEvent(config, `${issue.identifier}:recovery`, 'repair.orphan_recovered', {
+        issue_number: issue.number,
+        issue_identifier: issue.identifier,
+        reason,
+        worker_pid: state?.worker_pid ?? null,
+        requeued: !ignored,
+      });
 
       await this.applyLabels(config, issue.number!, nextLabels);
       await updateRunState(workspacePath, (cur) =>
@@ -901,6 +959,14 @@ export class Orchestrator {
       }
 
       if (!issue || !config.tracker.terminal_states.includes(issue.state)) continue;
+
+      this.appendEpisodeEvent(config, `${issue.identifier}:outcome`, 'issue.closed', {
+        issue_number: issue.number,
+        issue_identifier: issue.identifier,
+        issue_state: issue.state,
+        run_status: state.status,
+        workspace_path: state.workspace_path,
+      });
 
       log('info', 'terminal_workspace_cleaning', {
         ...getIssueLogFields(config, issue, this.repoId),
@@ -1093,6 +1159,26 @@ export class Orchestrator {
         return null;
       });
       if (reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
+        if (config.merge.enabled) {
+          const changedPaths = await tracker.listPullRequestFiles(pr.number).catch(() => []);
+          const risk = classifyMergeRisk(config.merge, {
+            labels: pr.labels,
+            changed_paths: changedPaths,
+            target_branch: pr.base_ref,
+          });
+          const requiredReviews = risk === 'elevated' ? 2 : 1;
+          if (freshPassingReceiptCount(pr, reviewState) < requiredReviews) {
+            // Continue into another independent review run for elevated changes.
+          } else {
+            log('info', 'pr_review_skipped_already_passed_for_head', {
+              ...getIssueLogFields(config, issue, this.repoId),
+              event: 'pr_review_skipped_already_passed_for_head',
+              pr_number: pr.number,
+              head_sha: pr.head_sha ?? '',
+            });
+            continue;
+          }
+        } else {
         log('info', 'pr_review_skipped_already_passed_for_head', {
           ...getIssueLogFields(config, issue, this.repoId),
           event: 'pr_review_skipped_already_passed_for_head',
@@ -1100,6 +1186,7 @@ export class Orchestrator {
           head_sha: pr.head_sha ?? '',
         });
         continue;
+        }
       }
 
       const provider = selectAgentProvider(config, issue);
@@ -1792,6 +1879,17 @@ export class Orchestrator {
         });
       },
     });
+    const episodeId = `${issue.identifier}:attempt:${opts.attempt}`;
+    this.appendEpisodeEvent(config, episodeId, 'run.started', {
+      issue_number: issue.number,
+      issue_identifier: issue.identifier,
+      attempt: opts.attempt,
+      mode: agentMode,
+      provider: provider.id,
+      session_id: agent.session_id,
+      workspace_path: workspacePath,
+      prompt_path: promptPath,
+    });
 
     await updateRunState(workspacePath, (cur) => {
       if (!cur) return null;
@@ -1825,6 +1923,18 @@ export class Orchestrator {
       .then(async ({ code, signal }) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
         this.running.delete(issue.id);
+        this.appendEpisodeEvent(config, episodeId, code === 0 && !signal ? 'run.completed' : 'run.failed', {
+          issue_number: issue.number,
+          issue_identifier: issue.identifier,
+          attempt: opts.attempt,
+          mode: agentMode,
+          provider: provider.id,
+          session_id: agent.session_id,
+          exit_code: code,
+          signal,
+          workspace_path: workspacePath,
+          last_message_path: lastMessagePath,
+        });
         const cancelledReason = session.cancelled_reason;
         await updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
@@ -1941,6 +2051,14 @@ export class Orchestrator {
                 }
                 if (verdict === 'pass') {
                   await this.handlePassingPullRequestReview(config, issue, reviewPr, 'Review hook returned REVIEW_VERDICT: PASS');
+                } else {
+                  await this.recordNonPassingVerificationReceipt(
+                    config,
+                    issue,
+                    reviewPr,
+                    'unavailable',
+                    'Review hook completed without a REVIEW_VERDICT line',
+                  );
                 }
               }
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed', hook_log_path: afterRunLogPath });
@@ -1963,6 +2081,9 @@ export class Orchestrator {
                 hook_log_path: afterRunLogPath,
                 error,
               });
+              if (reviewPr) {
+                await this.recordNonPassingVerificationReceipt(config, issue, reviewPr, 'error', error).catch(() => {});
+              }
               await updateRunState(workspacePath, (cur) =>
                 cur
                   ? {
@@ -2055,6 +2176,16 @@ export class Orchestrator {
       .catch(async (err) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
         this.running.delete(issue.id);
+        this.appendEpisodeEvent(config, episodeId, 'run.failed', {
+          issue_number: issue.number,
+          issue_identifier: issue.identifier,
+          attempt: opts.attempt,
+          mode: agentMode,
+          provider: provider.id,
+          session_id: agent.session_id,
+          error: err instanceof Error ? err.message : String(err),
+          workspace_path: workspacePath,
+        });
         await updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
           return {
@@ -2104,6 +2235,7 @@ export class Orchestrator {
         head_ref: prReview.head_ref,
         head_sha: prReview.head_sha,
         base_ref: prReview.base_ref,
+        base_sha: null,
         merge_state_status: null,
       };
     }
@@ -2111,30 +2243,414 @@ export class Orchestrator {
     return await this.findPullRequestForIssue(config, issue).catch(() => null);
   }
 
+  private async reconcileAutonomousMerges(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
+    if (!config.merge.enabled) return;
+    const pullRequests = await tracker.listOpenPullRequests();
+    for (const pr of pullRequests) {
+      if (!this.isSymphonyPullRequest(config, pr)) continue;
+      const detailed = await tracker.fetchPullRequest(pr.number).catch(() => null);
+      if (!detailed) continue;
+      const reviewState = await this.readPullRequestReviewState(config, detailed.number).catch(() => null);
+      if (!reviewState || reviewState.verdict !== 'pass') continue;
+      await this.assessAutonomousMerge(config, tracker, detailed, reviewState).catch((err) => {
+        log('warn', 'autonomous_merge_assessment_failed', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: 'autonomous_merge_assessment_failed',
+          pr_number: detailed.number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  }
+
+  private async promoteStackedPullRequests(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
+    if (!config.merge.enabled || !config.tracker.epics.enabled) return;
+    const now = nowMs();
+    if (now - this.lastStackPromotionScanAtMs < 5 * 60 * 1000) return;
+    this.lastStackPromotionScanAtMs = now;
+
+    const [openPullRequests, mergedPullRequests] = await Promise.all([
+      tracker.listOpenPullRequests(),
+      tracker.listMergedPullRequests(),
+    ]);
+    for (const pr of openPullRequests) {
+      if (!this.isSymphonyPullRequest(config, pr)) continue;
+      const nextBase = resolvePromotedBase(pr.base_ref, mergedPullRequests);
+      if (nextBase === pr.base_ref) continue;
+
+      const updated = await tracker.updatePullRequestBase(pr.number, nextBase);
+      await this.applyLabels(config, pr.number, {
+        add: [LABEL_READY],
+        remove: [
+          LABEL_REVIEW_PASSED,
+          LABEL_REVIEW_BLOCKING,
+          LABEL_READY_FOR_HUMAN,
+          ...pr.labels.filter(isReviewAutoFixLabel),
+        ],
+      });
+      this.conflictQueue.delete(pr.number);
+      this.appendEpisodeEvent(config, `pr-${pr.number}`, 'stack.promoted', {
+        pr_number: pr.number,
+        previous_base_ref: pr.base_ref,
+        base_ref: updated.base_ref,
+        head_sha: updated.head_sha,
+        base_sha: updated.base_sha,
+      });
+      log('info', 'stacked_pull_request_promoted', {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'stacked_pull_request_promoted',
+        pr_number: pr.number,
+        previous_base_ref: pr.base_ref,
+        base_ref: updated.base_ref,
+      });
+    }
+  }
+
+  private async dispatchScheduledLoops(config: WorkflowConfig, capacity: DispatchCapacity): Promise<void> {
+    if (config.loops.length === 0 || (capacity.remaining !== null && capacity.remaining <= 0)) return;
+    const maxConcurrent = this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents;
+    if (this.getRunningCount() >= maxConcurrent) return;
+
+    const databasePath = path.join(config.workspace.root, '.symphony', 'episodes.sqlite');
+    const lastTriggeredAt = new Map<string, string>();
+    let recentEvents: ReturnType<EpisodeStore['list']> = [];
+    let store: EpisodeStore | null = null;
+    try {
+      store = new EpisodeStore(databasePath);
+      for (const loop of config.loops) {
+        const event = store.latest({
+          repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
+          episode_id: `loop-${loop.id}`,
+          event: 'loop.triggered',
+        });
+        if (event) lastTriggeredAt.set(loop.id, event.created_at);
+      }
+      recentEvents = store.list({
+        repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
+        limit: 20,
+        order: 'desc',
+      });
+    } finally {
+      store?.close();
+    }
+
+    const due = dueScheduledLoops(config.loops, lastTriggeredAt, nowMs());
+    for (const loop of due) {
+      if (this.runningLoops.has(loop.id)) continue;
+      if (capacity.remaining !== null && capacity.remaining <= 0) return;
+      if (this.getRunningCount() >= maxConcurrent) return;
+      const provider = config.agents.providers[loop.provider ?? config.agents.default];
+      if (!provider) continue;
+      const limitKey = providerLimitKey(provider);
+      const backoffUntil = this.providerUsageLimitBackoffUntil.get(limitKey);
+      if ((backoffUntil !== undefined && nowMs() < backoffUntil) || this.providerUsageLimitCheckBlocked.has(limitKey)) continue;
+      if (provider.max_concurrent !== null) {
+        const runningIssues = [...this.running.values()].filter((session) => session.agent_provider_group === limitKey).length;
+        const runningLoops = [...this.runningLoops.values()].filter((session) => session.agent_provider_group === limitKey).length;
+        const orphaned = [...this.liveOrphanClaims.values()].filter((session) => session.agent_provider_group === limitKey).length;
+        if (runningIssues + runningLoops + orphaned >= provider.max_concurrent) continue;
+      }
+      await this.dispatchScheduledLoop(config, loop, recentEvents);
+      if (capacity.remaining !== null) capacity.remaining -= 1;
+    }
+  }
+
+  private async dispatchScheduledLoop(
+    config: WorkflowConfig,
+    loop: ScheduledLoopConfig,
+    recentEvents: ReturnType<EpisodeStore['list']>,
+  ): Promise<void> {
+    const provider = config.agents.providers[loop.provider ?? config.agents.default];
+    if (!provider) throw new SymphonyConfigError(`scheduled loop ${loop.id} references an unknown provider`);
+    const workspacePath = path.join(config.workspace.root, '_loops', loop.id);
+    const workspaceManager = new WorkspaceManager(config.workspace, 1);
+    await fs.mkdir(workspacePath, { recursive: true });
+
+    const issue: Issue = {
+      id: `loop:${loop.id}`,
+      identifier: `${config.tracker.owner}/${config.tracker.repo}#loop-${loop.id}`,
+      number: null,
+      title: `Scheduled loop: ${loop.id}`,
+      description: loop.prompt,
+      priority: null,
+      state: 'scheduled',
+      workflow_state: 'scheduled-loop',
+      branch_name: `${normalizeBranchPrefix(config.tracker.branch_prefix)}-loop-${loop.id}`,
+      url: null,
+      labels: ['symphony-loop'],
+      assignees: [],
+      milestone: null,
+      blocked_by: [],
+      pull_requests: [],
+      created_at: null,
+      updated_at: null,
+      ready_for_agent_labeled_at: null,
+    };
+    const symphonyContext = {
+      prompt_path: '',
+      workspace_path: workspacePath,
+      workspace_strategy: 'durable_issue_workspace',
+      agent_provider: provider.id,
+      agent_provider_group: provider.provider_group,
+      agent_provider_kind: provider.provider_kind,
+      loop_id: loop.id,
+    };
+    const env: Record<string, string> = {
+      SYMPHONY_REPO_ID: this.repoId ?? '',
+      SYMPHONY_TRACKER_OWNER: config.tracker.owner,
+      SYMPHONY_TRACKER_REPO: config.tracker.repo,
+      SYMPHONY_WORKSPACE_PATH: workspacePath,
+      SYMPHONY_WORKSPACE_STRATEGY: 'durable_issue_workspace',
+      SYMPHONY_BRANCH_NAME: issue.branch_name ?? '',
+      SYMPHONY_AGENT_PROVIDER: provider.id,
+      SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
+      SYMPHONY_AGENT_PROVIDER_KIND: provider.provider_kind,
+      SYMPHONY_LOOP_ID: loop.id,
+    };
+
+    const hasGitRepo = await workspaceManager.hasGitRepo(workspacePath);
+    if (!hasGitRepo && config.hooks.after_create) {
+      const entries = await fs.readdir(workspacePath);
+      if (entries.length > 0) await workspaceManager.clearWorkspaceContents(workspacePath);
+      const rendered = await renderTemplate(config.hooks.after_create, { issue, symphony: symphonyContext });
+      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
+        env,
+        logPath: hookLogPath(workspacePath, `loop-${loop.id}-after_create`),
+        streamOutput: shouldStreamHookOutput(),
+        signal: this.shutdownController.signal,
+      });
+    }
+    if (await workspaceManager.hasGitRepo(workspacePath)) await recoverFreshRunGitState(workspacePath);
+    if (config.hooks.before_run) {
+      const rendered = await renderTemplate(config.hooks.before_run, { issue, symphony: symphonyContext });
+      await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
+        env,
+        logPath: hookLogPath(workspacePath, `loop-${loop.id}-before_run`),
+        streamOutput: shouldStreamHookOutput(),
+        signal: this.shutdownController.signal,
+      });
+    }
+
+    const episodeSummary = recentEvents.map((event) => ({
+      event: event.event,
+      episode_id: event.episode_id,
+      created_at: event.created_at,
+      payload: event.payload,
+    }));
+    const prompt = `# Symphony Scheduled Loop: ${loop.id}
+
+${loop.prompt}
+
+This is one scheduled invocation. Complete one bounded pass, preserve normal repository review boundaries, and leave durable evidence of what you inspected and changed.
+
+## Recent Symphony episode summary
+
+The following bounded, newest-first event summary is context only. Treat repository and GitHub state as authoritative.
+
+\`\`\`json
+${JSON.stringify(episodeSummary, null, 2)}
+\`\`\`
+`;
+    const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
+    symphonyContext.prompt_path = promptPath;
+    env.SYMPHONY_PROMPT_PATH = promptPath;
+    const renderedCommand = await renderTemplate(provider.command, { issue, symphony: symphonyContext });
+
+    this.appendEpisodeEvent(config, `loop-${loop.id}`, 'loop.triggered', {
+      loop_id: loop.id,
+      provider: provider.id,
+      prompt_path: promptPath,
+      workspace_path: workspacePath,
+    });
+    const agent = runAgent({
+      command: renderedCommand,
+      cwd: workspacePath,
+      env,
+      turnTimeoutMs: provider.turn_timeout_ms,
+      logFields: {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'scheduled_loop_started',
+        loop_id: loop.id,
+        agent_provider: provider.id,
+      },
+    });
+    const done = agent.exit
+      .then(({ code, signal }) => {
+        this.appendEpisodeEvent(config, `loop-${loop.id}`, code === 0 && !signal ? 'loop.completed' : 'loop.failed', {
+          loop_id: loop.id,
+          provider: provider.id,
+          session_id: agent.session_id,
+          exit_code: code,
+          signal,
+          prompt_path: promptPath,
+          workspace_path: workspacePath,
+        });
+        log(code === 0 && !signal ? 'info' : 'error', code === 0 && !signal ? 'scheduled_loop_completed' : 'scheduled_loop_failed', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: code === 0 && !signal ? 'scheduled_loop_completed' : 'scheduled_loop_failed',
+          loop_id: loop.id,
+          exit_code: code,
+          signal,
+        });
+      })
+      .catch((err) => {
+        this.appendEpisodeEvent(config, `loop-${loop.id}`, 'loop.failed', {
+          loop_id: loop.id,
+          provider: provider.id,
+          session_id: agent.session_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        this.runningLoops.delete(loop.id);
+      });
+    this.runningLoops.set(loop.id, { agent_provider_group: provider.provider_group, cancel: agent.cancel, done });
+  }
+
+  private async assessAutonomousMerge(
+    config: WorkflowConfig,
+    tracker: GithubIssueTrackerClient,
+    pr: PullRequestRef,
+    reviewState: PullRequestReviewState,
+  ): Promise<AutonomousMergeResult> {
+    const linkedIssueNumber = issueNumberFromPullRequestBody(pr.body) ?? reviewState.issue_number;
+    const result = await assessAndMaybeMerge({
+      config: config.merge,
+      pull_request: pr,
+      linked_issue_number: linkedIssueNumber,
+      receipts: reviewState.receipts,
+      github: tracker,
+    });
+    if (result.action !== 'blocked') {
+      this.appendEpisodeEvent(config, `pr-${pr.number}`, `merge.${result.action}`, {
+        pr_number: pr.number,
+        issue_number: linkedIssueNumber,
+        head_sha: pr.head_sha,
+        base_sha: pr.base_sha,
+        risk: result.decision.risk,
+        required_reviews: result.decision.required_reviews,
+        merge_sha: result.merge_result?.sha ?? null,
+        message: result.merge_result?.message ?? null,
+      });
+    }
+    log(result.action === 'merged' ? 'info' : 'debug', `autonomous_merge_${result.action}`, {
+      repo_id: this.repoId ?? undefined,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      event: `autonomous_merge_${result.action}`,
+      pr_number: pr.number,
+      risk: result.decision.risk,
+      reasons: result.decision.reasons,
+      merge_sha: result.merge_result?.sha ?? undefined,
+    });
+    return result;
+  }
+
+  private appendEpisodeEvent(
+    config: WorkflowConfig,
+    episodeId: string,
+    event: string,
+    payload: Record<string, unknown>,
+  ): void {
+    let store: EpisodeStore | null = null;
+    try {
+      store = new EpisodeStore(path.join(config.workspace.root, '.symphony', 'episodes.sqlite'));
+      store.append({
+        repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
+        episode_id: episodeId,
+        event,
+        payload,
+      });
+    } catch (err) {
+      log('warn', 'episode_event_write_failed', {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'episode_event_write_failed',
+        episode_id: episodeId,
+        episode_event: event,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      store?.close();
+    }
+  }
+
   private async handlePassingPullRequestReview(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, reason: string): Promise<void> {
     const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
-    await this.writePullRequestReviewState(config, {
+    const reviewedAt = new Date().toISOString();
+    const receipt: VerificationReceipt = {
+      receipt_id: randomUUID(),
+      verifier: 'post-run-review',
+      verdict: pr.head_sha && pr.base_sha ? 'pass' : 'unavailable',
+      head_sha: pr.head_sha ?? '',
+      base_sha: pr.base_sha ?? '',
+      evidence: [reason],
+      verified_at: reviewedAt,
+    };
+    const nextState: PullRequestReviewState = {
       version: 1,
       pr_number: pr.number,
       issue_number: issue.number ?? previousState?.issue_number ?? null,
       head_ref: pr.head_ref,
       head_sha: pr.head_sha,
       base_ref: pr.base_ref || 'main',
+      base_sha: pr.base_sha,
       verdict: 'pass',
       auto_fix_iterations: previousState?.auto_fix_iterations ?? reviewAutoFixIteration(pr.labels),
-      reviewed_at: new Date().toISOString(),
+      reviewed_at: reviewedAt,
       reason,
-    });
+      receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+    };
+    await this.writePullRequestReviewState(config, nextState);
+
+    let requiresAnotherReview = false;
+    if (config.merge.enabled) {
+      const tracker = new GithubIssueTrackerClient(config.tracker);
+      const changedPaths = await tracker.listPullRequestFiles(pr.number).catch(() => []);
+      const risk = classifyMergeRisk(config.merge, { labels: pr.labels, changed_paths: changedPaths, target_branch: pr.base_ref });
+      requiresAnotherReview = risk === 'elevated' && freshPassingReceiptCount(pr, nextState) < 2;
+    }
 
     await this.applyLabels(config, pr.number, {
-      add: [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN],
+      add: requiresAnotherReview ? [LABEL_REVIEW_PASSED, LABEL_READY] : [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN],
       remove: [
         LABEL_REVIEW_BLOCKING,
-        LABEL_READY,
+        requiresAnotherReview ? LABEL_READY_FOR_HUMAN : LABEL_READY,
         LABEL_RUNNING,
         ...pr.labels.filter(isReviewAutoFixLabel),
       ],
     });
+
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
+      pr_number: pr.number,
+      issue_number: nextState.issue_number,
+      receipt,
+      receipt_count: freshPassingReceiptCount(pr, nextState),
+      requires_another_review: requiresAnotherReview,
+    });
+
+    if (config.merge.enabled && !requiresAnotherReview) {
+      const latestPr = await new GithubIssueTrackerClient(config.tracker).fetchPullRequest(pr.number).catch(() => pr);
+      if (latestPr) {
+        await this.assessAutonomousMerge(config, new GithubIssueTrackerClient(config.tracker), latestPr, nextState).catch((err) => {
+          log('warn', 'autonomous_merge_assessment_failed', {
+            ...getIssueLogFields(config, issue, this.repoId),
+            event: 'autonomous_merge_assessment_failed',
+            pr_number: pr.number,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
+    }
   }
 
   private async handleBlockingPullRequestReview(
@@ -2153,6 +2669,16 @@ export class Orchestrator {
       previousIteration < config.review.number_of_auto_fix_iterations;
     const nextIteration = canAutoFix ? previousIteration + 1 : previousIteration;
     const autoFixLabel = `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`;
+    const reviewedAt = new Date().toISOString();
+    const receipt: VerificationReceipt = {
+      receipt_id: randomUUID(),
+      verifier: 'post-run-review',
+      verdict: pr.head_sha && pr.base_sha ? 'block' : 'unavailable',
+      head_sha: pr.head_sha ?? '',
+      base_sha: pr.base_sha ?? '',
+      evidence: [reason],
+      verified_at: reviewedAt,
+    };
 
     await this.writePullRequestReviewState(config, {
       version: 1,
@@ -2161,10 +2687,17 @@ export class Orchestrator {
       head_ref: pr.head_ref,
       head_sha: pr.head_sha,
       base_ref: pr.base_ref || 'main',
+      base_sha: pr.base_sha,
       verdict: 'block',
       auto_fix_iterations: nextIteration,
-      reviewed_at: new Date().toISOString(),
+      reviewed_at: reviewedAt,
       reason,
+      receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+    });
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
+      pr_number: pr.number,
+      issue_number: issue.number ?? previousState?.issue_number ?? null,
+      receipt,
     });
 
     await this.applyLabels(config, pr.number, {
@@ -2204,6 +2737,45 @@ export class Orchestrator {
     }
 
     await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `${status} (${reason})`);
+  }
+
+  private async recordNonPassingVerificationReceipt(
+    config: WorkflowConfig,
+    issue: Issue,
+    pr: PullRequestRef,
+    verdict: 'error' | 'unavailable',
+    reason: string,
+  ): Promise<void> {
+    const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+    const reviewedAt = new Date().toISOString();
+    const receipt: VerificationReceipt = {
+      receipt_id: randomUUID(),
+      verifier: 'post-run-review',
+      verdict,
+      head_sha: pr.head_sha ?? '',
+      base_sha: pr.base_sha ?? '',
+      evidence: [reason],
+      verified_at: reviewedAt,
+    };
+    await this.writePullRequestReviewState(config, {
+      version: 1,
+      pr_number: pr.number,
+      issue_number: issue.number ?? previousState?.issue_number ?? null,
+      head_ref: pr.head_ref,
+      head_sha: pr.head_sha,
+      base_ref: pr.base_ref || 'main',
+      base_sha: pr.base_sha,
+      verdict: 'block',
+      auto_fix_iterations: previousState?.auto_fix_iterations ?? reviewAutoFixIteration(pr.labels),
+      reviewed_at: reviewedAt,
+      reason,
+      receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+    });
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
+      pr_number: pr.number,
+      issue_number: issue.number ?? previousState?.issue_number ?? null,
+      receipt,
+    });
   }
 
   private async readPullRequestReviewState(config: WorkflowConfig, prNumber: number): Promise<PullRequestReviewState | null> {
@@ -2569,6 +3141,13 @@ ${runContext}`;
     const nextAttempt = attempt + 1;
     if (config.agent.max_attempts !== null && nextAttempt > config.agent.max_attempts) {
       this.retries.delete(issue.id);
+      this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${attempt}`, 'repair.exhausted', {
+        issue_number: issue.number,
+        issue_identifier: issue.identifier,
+        attempt,
+        max_attempts: config.agent.max_attempts,
+        reason,
+      });
       log('warn', 'retry_exhausted', {
         repo_id: this.repoId ?? undefined,
         tracker_kind: config.tracker.kind,
@@ -2607,6 +3186,14 @@ ${runContext}`;
       next_run_at_ms: nextAt,
       issue_number: issue.number ?? -1,
       issue_id: issue.id,
+    });
+    this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${attempt}`, 'repair.scheduled', {
+      issue_number: issue.number,
+      issue_identifier: issue.identifier,
+      attempt: nextAttempt,
+      delay_ms: delayMs,
+      next_run_at: new Date(nextAt).toISOString(),
+      reason,
     });
 
     log('info', 'retry_scheduled', {
@@ -2839,8 +3426,9 @@ ${runContext}`;
     if (this.providerUsageLimitCheckBlocked.has(limitKey)) return 'usage_limit';
     if (provider.max_concurrent !== null) {
       const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider_group === limitKey).length;
+      const runningLoopsForProvider = [...this.runningLoops.values()].filter((s) => s.agent_provider_group === limitKey).length;
       const orphanedForProvider = [...this.liveOrphanClaims.values()].filter((s) => s.agent_provider_group === limitKey).length;
-      if (runningForProvider + orphanedForProvider >= provider.max_concurrent) return 'provider_capacity';
+      if (runningForProvider + runningLoopsForProvider + orphanedForProvider >= provider.max_concurrent) return 'provider_capacity';
     }
     return null;
   }
