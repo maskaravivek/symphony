@@ -200,6 +200,7 @@ function repoFor(state: RunState, source: BoardRepoSource): string | null {
 
 function runCard(source: BoardRepoSource, state: RunState, now: Date, staleAfterMs: number): BoardCard {
   const labels = labelsFor(state);
+  const column = classifyRunState(state, source.config.tracker.terminal_states);
   const prToIssue = new Map(source.pullRequests.map((pr) => [pr.number, issueNumberFromPullRequestBody(pr.body)]));
   const prForIssue = source.pullRequests.find((pr) => issueNumberFromPullRequestBody(pr.body) === state.issue_number) ?? null;
   const parentIssueNumber = state.issue_number ? (prToIssue.get(state.issue_number) ?? state.issue_number) : null;
@@ -213,7 +214,7 @@ function runCard(source: BoardRepoSource, state: RunState, now: Date, staleAfter
     id: `run:${repoId ?? owner ?? ''}/${repo ?? ''}:${parentIssueNumber ?? state.issue_identifier}`,
     kind: 'run',
     task_key: `task:${repoId ?? owner ?? ''}/${repo ?? ''}:${parentIssueNumber ?? state.issue_identifier}`,
-    column: classifyRunState(state, source.config.tracker.terminal_states),
+    column,
     repo_id: repoId,
     owner,
     repo,
@@ -245,17 +246,18 @@ function runCard(source: BoardRepoSource, state: RunState, now: Date, staleAfter
     review_auto_fix_iteration: reviewAutoFixIteration(labels),
     epic_progress: null,
     sources_count: 1,
-    stale: isStale(state.updated_at, now, staleAfterMs),
+    stale: column !== 'closed' && isStale(state.updated_at, now, staleAfterMs),
   };
 }
 
 function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAfterMs: number): BoardCard {
   const labels = labelsFor(state);
+  const completed = state.status === 'completed';
   return {
     id: `epic:${state.issue_identifier}`,
     kind: 'epic',
     task_key: `epic:${state.issue_identifier}`,
-    column: state.status === 'completed' ? 'closed' : 'active',
+    column: completed ? 'closed' : 'active',
     repo_id: state.repo_id ?? source.repoId,
     owner: state.owner ?? source.config.tracker.owner,
     repo: state.repo ?? source.config.tracker.repo,
@@ -269,7 +271,7 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
     feature_labels: featureLabels(labels),
     status: `epic:${state.status}`,
     workflow_state: state.status,
-    issue_state: state.status === 'completed' ? 'closed' : null,
+    issue_state: completed ? 'closed' : null,
     pause_reason: null,
     agent_provider: null,
     agent_mode: null,
@@ -287,7 +289,7 @@ function epicCard(source: BoardRepoSource, state: EpicState, now: Date, staleAft
     review_auto_fix_iteration: null,
     epic_progress: `${state.terminal_children}/${state.total_children}`,
     sources_count: 1,
-    stale: isStale(state.updated_at, now, staleAfterMs),
+    stale: !completed && isStale(state.updated_at, now, staleAfterMs),
   };
 }
 

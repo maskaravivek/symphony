@@ -284,6 +284,28 @@ test('builds epic cards without a separate epics column', () => {
   assert.equal(board.columns.find((column) => column.id === 'closed')?.cards[0]?.status, 'epic:completed');
 });
 
+test('does not flag terminal history as stale', () => {
+  const oldTimestamp = '2026-07-01T00:00:00.000Z';
+  const board = buildBoardState({
+    source: { kind: 'workflow', path: '/tmp/WORKFLOW.md' },
+    refreshMs: 5000,
+    now: NOW,
+    repos: [
+      {
+        repoId: 'mdedit',
+        workflowPath: '/tmp/WORKFLOW.md',
+        config: makeWorkflowConfig('/tmp/workspace'),
+        runs: [makeRunState({ issue_state: 'closed', updated_at: oldTimestamp })],
+        epics: [makeEpic({ status: 'completed', updated_at: oldTimestamp })],
+        pullRequests: [],
+      },
+    ],
+  });
+
+  assert.equal(board.stale_cards, 0);
+  assert.ok(board.columns.find((column) => column.id === 'closed')?.cards.every((card) => card.stale === false));
+});
+
 test('loads board state from multi-repo server config and preserves repo ids', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-board-state-'));
   const workspaceA = path.join(root, 'workspace-a');

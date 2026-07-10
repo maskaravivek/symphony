@@ -93,7 +93,14 @@ test('serves readonly dashboard HTML and board JSON', async () => {
   try {
     const htmlResponse = await fetch(started.url);
     assert.equal(htmlResponse.status, 200);
-    assert.match(await htmlResponse.text(), /Symphony Dashboard/);
+    const html = await htmlResponse.text();
+    assert.match(html, /Symphony Dashboard/);
+    assert.match(html, /color-scheme: light/);
+    assert.doesNotMatch(html, /prefers-color-scheme: dark/);
+    assert.match(html, /aria-label="Dashboard filters"/);
+    assert.match(html, /id="clearFilters"/);
+    assert.match(html, /id="refreshStatus"[^>]*role="status"/);
+    assert.match(html, /Loading orchestration state/);
 
     const boardResponse = await fetch(new URL('/api/board', started.url));
     assert.equal(boardResponse.status, 200);
