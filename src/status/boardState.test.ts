@@ -202,6 +202,7 @@ test('classifies local run states into dashboard columns by priority', () => {
     ['needs info', makeRunState({ pause_reason: 'needs-info', labels: ['blocked'] }), 'needs-info'],
     ['blocked', makeRunState({ labels: ['blocked', 'symphony-review:blocking'] }), 'blocked'],
     ['review blocked', makeRunState({ labels: ['symphony-review:blocking', 'symphony-review:auto-fix-2'] }), 'review-blocked'],
+    ['review infrastructure error', makeRunState({ labels: ['symphony-review:unavailable'] }), 'review-error'],
     ['ready review label', makeRunState({ labels: ['symphony-review:passed', 'ready-for-human'] }), 'ready-for-review'],
     ['ready review mode', makeRunState({ agent_mode: 'pr-review', workflow_state: 'ready-for-human' }), 'ready-for-review'],
     ['waiting human', makeRunState({ labels: ['ready-for-human'] }), 'waiting-human'],

@@ -449,6 +449,9 @@ async function main(): Promise<void> {
           session: manifest.session_id,
           attempt: manifest.attempt,
           mode: manifest.mode,
+          phase: manifest.phase ?? 'unknown',
+          agent: manifest.agent_outcome ?? 'pending',
+          workflow: manifest.workflow_outcome ?? 'pending',
           created: manifest.created_at,
           artifacts: artifactDir,
         });

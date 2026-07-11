@@ -79,6 +79,13 @@ async function killProcess(
   if (!killed) {
     log('warn', 'worker_sigkill', { ...fields, event: 'worker_sigkill', reason });
     signalProcessGroup(child, 'SIGKILL');
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) resolve();
+        else child.once('exit', () => resolve());
+      }),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
   }
 }
 

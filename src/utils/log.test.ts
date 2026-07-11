@@ -4,7 +4,7 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { configurePersistentLogging, formatPrettyLogLine, log } from './log.js';
+import { configurePersistentLogging, flushPersistentLogs, formatPrettyLogLine, log } from './log.js';
 
 test('formats issue logs as compact text', () => {
   const line = formatPrettyLogLine(
@@ -45,13 +45,15 @@ test('formats issue logs as compact text', () => {
 test('persists redacted structured daily logs with owner-only permissions', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-log-'));
   await configurePersistentLogging(root, 30);
-  log('info', 'test_event', { token: 'secret-value', issue_number: 42 });
+  log('info', 'test_event', { token: 'secret-value', nested: { authorization: 'Bearer abc' }, issue_number: 42 });
+  await flushPersistentLogs();
   const names = await fs.readdir(root);
   assert.equal(names.length, 1);
   const file = path.join(root, names[0]!);
   const parsed = JSON.parse((await fs.readFile(file, 'utf8')).trim()) as Record<string, unknown>;
   assert.equal(parsed.message, 'test_event');
   assert.equal(parsed.token, '[REDACTED]');
+  assert.deepEqual(parsed.nested, { authorization: '[REDACTED]' });
   assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
 });
 

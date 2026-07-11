@@ -14,6 +14,7 @@ export const BOARD_COLUMNS = [
   { id: 'needs-info', title: 'Needs Info' },
   { id: 'blocked', title: 'Blocked' },
   { id: 'review-blocked', title: 'Review Blocked' },
+  { id: 'review-error', title: 'Review Infrastructure Error' },
   { id: 'ready-for-review', title: 'Ready for Review' },
   { id: 'waiting-human', title: 'Waiting for Human' },
   { id: 'queued', title: 'Queued' },
@@ -173,6 +174,7 @@ export function classifyRunState(state: RunState, terminalStates: string[]): Boa
   if (state.status === 'running' || state.status === 'agent-running' || state.status === 'finalizing' || workflowState === 'agent-running') return 'active';
   if (state.pause_reason === 'needs-info' || hasLabel(labels, 'needs-info')) return 'needs-info';
   if (hasLabel(labels, 'blocked') || workflowState === 'blocked') return 'blocked';
+  if (hasLabel(labels, 'symphony-review:error') || hasLabel(labels, 'symphony-review:unavailable')) return 'review-error';
   if (hasLabel(labels, 'symphony-review:blocking')) return 'review-blocked';
   if (hasLabel(labels, 'symphony-review:passed') || (state.agent_mode === 'pr-review' && workflowState === 'ready-for-human')) {
     return 'ready-for-review';

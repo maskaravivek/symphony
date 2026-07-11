@@ -12,6 +12,21 @@ export type CodexMode = AgentMode;
 
 export type PauseReason = 'interactive' | 'needs-info' | null;
 
+export interface FinalizationContext {
+  mode: AgentMode;
+  review_pr: {
+    pr_number: number;
+    pr_url: string | null;
+    head_ref: string;
+    head_sha: string | null;
+    base_ref: string;
+    base_sha: string | null;
+    originating_issue_number: number | null;
+    review_key: string;
+    lens: string;
+  } | null;
+}
+
 export interface RunState {
   repo_id: string | null;
   owner: string | null;
@@ -47,6 +62,8 @@ export interface RunState {
   workflow_outcome?: WorkflowOutcome;
   retry_reason?: string | null;
   retry_not_before?: string | null;
+  finalization_context?: FinalizationContext | null;
+  finalization_step?: 'pending' | 'hook-running' | 'hook-completed' | 'effects-applied' | null;
 
   status: RunStatus;
   started_at: string | null;
@@ -90,6 +107,23 @@ export async function writeRunState(workspacePath: string, runState: RunState): 
   try {
     await fs.writeFile(tmpPath, `${JSON.stringify(runState, null, 2)}\n`, 'utf8');
     await fs.rename(tmpPath, runPath);
+    if (runState.session_artifact_dir) {
+      const manifestPath = path.join(runState.session_artifact_dir, 'manifest.json');
+      try {
+        const current = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+        await fs.writeFile(manifestPath, `${JSON.stringify({
+          ...current,
+          phase: runState.status,
+          agent_outcome: runState.agent_outcome ?? null,
+          workflow_outcome: runState.workflow_outcome ?? null,
+          agent_finished_at: runState.agent_finished_at ?? null,
+          finished_at: runState.finished_at,
+          updated_at: runState.updated_at,
+        }, null, 2)}\n`, { mode: 0o600 });
+      } catch {
+        // The manifest is created immediately after the initial run state.
+      }
+    }
   } finally {
     await fs.rm(tmpPath, { force: true }).catch(() => {});
   }

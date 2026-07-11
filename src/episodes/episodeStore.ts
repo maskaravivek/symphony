@@ -42,6 +42,7 @@ export interface ReviewClaim {
   review_key: string;
   status: string;
   updated_at: string;
+  attempts: number;
 }
 
 export interface MergeAssessmentRecord {
@@ -81,6 +82,11 @@ export class EpisodeStore {
         ON episode_events (repo_id, episode_id, sequence);
       CREATE INDEX IF NOT EXISTS episode_events_event
         ON episode_events (repo_id, event, sequence);
+      CREATE TABLE IF NOT EXISTS episode_event_keys (
+        repo_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        PRIMARY KEY (repo_id, idempotency_key)
+      );
       CREATE TABLE IF NOT EXISTS retry_queue (
         repo_id TEXT NOT NULL,
         issue_id TEXT NOT NULL,
@@ -98,6 +104,7 @@ export class EpisodeStore {
         review_key TEXT NOT NULL,
         status TEXT NOT NULL,
         updated_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 1,
         PRIMARY KEY (repo_id, review_key)
       );
       CREATE TABLE IF NOT EXISTS merge_assessments (
@@ -109,6 +116,11 @@ export class EpisodeStore {
         PRIMARY KEY (repo_id, pr_number)
       );
     `);
+    try {
+      this.database.exec('ALTER TABLE review_claims ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1');
+    } catch {
+      // Existing databases already containing the column are current.
+    }
   }
 
   append(input: EpisodeEventInput): EpisodeEvent {
@@ -129,6 +141,20 @@ export class EpisodeStore {
       payload,
       created_at: createdAt,
     };
+  }
+
+  appendOnce(input: EpisodeEventInput, idempotencyKey: string): EpisodeEvent | null {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const claimed = this.database.prepare('INSERT OR IGNORE INTO episode_event_keys (repo_id, idempotency_key) VALUES (?, ?)')
+        .run(input.repo_id, idempotencyKey);
+      const event = Number(claimed.changes) === 1 ? this.append(input) : null;
+      this.database.exec('COMMIT');
+      return event;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   list(filter: EpisodeEventFilter = {}): EpisodeEvent[] {
@@ -239,25 +265,32 @@ export class EpisodeStore {
     this.database.prepare('DELETE FROM retry_queue WHERE repo_id = ? AND issue_id = ?').run(repoId, issueId);
   }
 
-  claimReview(repoId: string, reviewKey: string, status: string): boolean {
+  claimReview(repoId: string, reviewKey: string, status: string, maxAttempts = 3): boolean {
+    const staleBefore = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     const result = this.database.prepare(`
-      INSERT INTO review_claims (repo_id, review_key, status, updated_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT(repo_id, review_key) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
-      WHERE review_claims.status IN ('error', 'unavailable')
-    `).run(repoId, reviewKey, status, new Date().toISOString());
+      INSERT INTO review_claims (repo_id, review_key, status, updated_at, attempts) VALUES (?, ?, ?, ?, 1)
+      ON CONFLICT(repo_id, review_key) DO UPDATE SET
+        status=excluded.status,
+        updated_at=excluded.updated_at,
+        attempts=review_claims.attempts + 1
+      WHERE review_claims.attempts < ? AND (
+        review_claims.status IN ('error', 'unavailable') OR
+        (review_claims.status = 'running' AND review_claims.updated_at < ?)
+      )
+    `).run(repoId, reviewKey, status, new Date().toISOString(), maxAttempts, staleBefore);
     return Number(result.changes) === 1;
   }
 
   completeReviewClaim(repoId: string, reviewKey: string, status: string): void {
     this.database.prepare(`
-      INSERT INTO review_claims (repo_id, review_key, status, updated_at) VALUES (?, ?, ?, ?)
+      INSERT INTO review_claims (repo_id, review_key, status, updated_at, attempts) VALUES (?, ?, ?, ?, 1)
       ON CONFLICT(repo_id, review_key) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
     `).run(repoId, reviewKey, status, new Date().toISOString());
   }
 
   getReviewClaim(repoId: string, reviewKey: string): ReviewClaim | null {
     return (this.database.prepare(`
-      SELECT repo_id, review_key, status, updated_at FROM review_claims WHERE repo_id = ? AND review_key = ?
+      SELECT repo_id, review_key, status, updated_at, attempts FROM review_claims WHERE repo_id = ? AND review_key = ?
     `).get(repoId, reviewKey) as unknown as ReviewClaim | undefined) ?? null;
   }
 
@@ -281,6 +314,15 @@ export class EpisodeStore {
 
   clearMergeAssessment(repoId: string, prNumber: number): void {
     this.database.prepare('DELETE FROM merge_assessments WHERE repo_id = ? AND pr_number = ?').run(repoId, prNumber);
+  }
+
+  clearMergeAssessmentsExcept(repoId: string, openPrNumbers: number[]): void {
+    if (openPrNumbers.length === 0) {
+      this.database.prepare('DELETE FROM merge_assessments WHERE repo_id = ?').run(repoId);
+      return;
+    }
+    const placeholders = openPrNumbers.map(() => '?').join(', ');
+    this.database.prepare(`DELETE FROM merge_assessments WHERE repo_id = ? AND pr_number NOT IN (${placeholders})`).run(repoId, ...openPrNumbers);
   }
 
   close(): void {

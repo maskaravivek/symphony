@@ -527,6 +527,32 @@ function resolveEpicExecutionMode(config: WorkflowConfig, epicIssue: Issue): Epi
   return config.tracker.epics.execution_mode;
 }
 
+async function captureVerificationSnapshot(
+  workspacePath: string,
+  artifactDir: string,
+  outcome: { code: number | null; signal: NodeJS.Signals | null },
+): Promise<void> {
+  const runGit = (args: string[]) => new Promise<string | null>((resolve) => {
+    execFile('git', args, { cwd: workspacePath }, (error, stdout) => resolve(error ? null : stdout.trim()));
+  });
+  const [headSha, status] = await Promise.all([
+    runGit(['rev-parse', 'HEAD']),
+    runGit(['status', '--porcelain=v1']),
+  ]);
+  const source = path.join(workspacePath, '.symphony', 'verification.json');
+  await fs.copyFile(source, path.join(artifactDir, 'verification.json')).catch(async () => {
+    await fs.writeFile(path.join(artifactDir, 'verification.json'), `${JSON.stringify({
+      version: 1,
+      captured_at: new Date().toISOString(),
+      head_sha: headSha,
+      working_tree_status: status?.split('\n').filter(Boolean) ?? [],
+      agent_exit_code: outcome.code,
+      agent_signal: outcome.signal,
+      evidence: [],
+    }, null, 2)}\n`, { mode: 0o600 });
+  });
+}
+
 export class Orchestrator {
   private workflowPath: string;
   private repoId: string | null;
@@ -592,6 +618,32 @@ export class Orchestrator {
       store.deleteRetry(this.durableRepoId(config), issueId);
     } finally {
       store.close();
+    }
+  }
+
+  private async reconcileDurableRetries(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
+    for (const entry of [...this.retries.values()]) {
+      let issue: Issue | null;
+      try {
+        issue = await tracker.fetchIssueByNumber(entry.issue_number);
+      } catch (error) {
+        log('warn', 'retry_reconcile_issue_fetch_failed', {
+          repo_id: this.repoId ?? undefined,
+          issue_id: entry.issue_id,
+          issue_number: entry.issue_number,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+      if (issue && config.tracker.active_states.includes(issue.state) && !hasNonQueueableLifecycleLabel(issue.labels) && !hasAnyLabel(issue.labels, config.tracker.ignored_labels)) continue;
+      this.deleteDurableRetry(config, entry.issue_id);
+      if (issue?.number) await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] }).catch(() => {});
+      log('info', 'retry_cancelled', {
+        repo_id: this.repoId ?? undefined,
+        issue_id: entry.issue_id,
+        issue_number: entry.issue_number,
+        reason: issue ? 'issue_not_queueable' : 'issue_missing',
+      });
     }
   }
 
@@ -673,6 +725,7 @@ export class Orchestrator {
       await this.recoverFinalizingRuns(config, trackerClient);
       await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
       this.loadDurableRetries(config);
+      await this.reconcileDurableRetries(config, trackerClient);
       await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
       await this.refreshProviderUsageLimitChecks(config);
       const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
@@ -857,7 +910,6 @@ export class Orchestrator {
         log('info', 'worker_cancelled_by_reconciliation', { ...fields, event: 'worker_cancelled_by_reconciliation', reason: 'terminal_state' });
         session.cancelled_reason = 'terminal_state';
         await session.cancel('issue reached terminal state');
-        this.running.delete(issue.id);
         if (issue.number) await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] }).catch(() => {});
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
@@ -880,7 +932,6 @@ export class Orchestrator {
         log('info', 'worker_cancelled_by_reconciliation', { ...fields, event: 'worker_cancelled_by_reconciliation', reason: 'ignored_label' });
         session.cancelled_reason = 'ignored_label';
         await session.cancel('issue gained ignored label');
-        this.running.delete(issue.id);
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -904,7 +955,6 @@ export class Orchestrator {
         });
         session.cancelled_reason = 'missing_required_label';
         await session.cancel('issue missing required labels');
-        this.running.delete(issue.id);
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -927,7 +977,6 @@ export class Orchestrator {
         });
         session.cancelled_reason = 'missing_any_required_labels';
         await session.cancel('issue missing any-required labels');
-        this.running.delete(issue.id);
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -982,8 +1031,9 @@ export class Orchestrator {
         : await workspaceManager.ensureWorkspace(issue, { strategy: 'durable_issue_workspace' });
       const workspacePath = fallbackWorkspacePath;
       const state = existingState ?? (await readRunState(workspacePath));
-      const liveOrphan = state?.status === 'running' && isProcessAlive(state.worker_pid);
-      if (state?.status === 'running' && isProcessAlive(state.worker_pid)) {
+      const agentWasRunning = state?.status === 'running' || state?.status === 'agent-running';
+      const liveOrphan = agentWasRunning && isProcessAlive(state.worker_pid);
+      if (agentWasRunning && isProcessAlive(state.worker_pid)) {
         terminateOrphanedWorker(state.worker_pid);
       }
 
@@ -992,7 +1042,7 @@ export class Orchestrator {
       const nextWorkflowState = ignored ? null : LABEL_READY;
       const reason = liveOrphan
         ? 'live_orphan_worker_terminated'
-        : state?.status === 'running'
+        : agentWasRunning
           ? 'worker_pid_not_alive'
           : 'agent_running_without_running_state';
 
@@ -1040,9 +1090,17 @@ export class Orchestrator {
       if (!issue) continue;
       this.recoveringFinalizations.add(state.issue_id);
       try {
+        const finalization = state.finalization_context;
+        if (finalization?.mode === 'interactive-handoff') {
+          await this.pauseForInteractive(config, issue, state.workspace_path, 'Interactive handoff is ready.');
+          await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'paused', workflow_outcome: 'paused', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
+          this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.paused', { issue_number: issue.number, session_id: state.session_id, reason: 'interactive', recovered: true });
+          continue;
+        }
         const pauseRequest = parsePauseRequest(await this.readLastMessage(state.last_message_path ?? ''));
         if (pauseRequest) {
-          await tracker.createIssueComment(issue.number!, formatPauseComment(pauseRequest));
+          const marker = `<!-- symphony-pause:${state.session_id ?? state.issue_id} -->`;
+          await tracker.upsertStatusComment(issue.number!, marker, `${marker}\n${formatPauseComment(pauseRequest)}`);
           await this.applyLabels(config, issue.number!, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING] });
           await this.updateLifecycleState(state.workspace_path, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING], workflowState: LABEL_NEEDS_INFO });
           await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'paused', pause_reason: 'needs-info', workflow_outcome: 'paused', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
@@ -1050,10 +1108,29 @@ export class Orchestrator {
           continue;
         }
 
-        const reviewPr = await this.findReviewPullRequest(config, issue, undefined);
+        if (finalization?.mode === 'planning') {
+          await this.postPlanningResult(config, issue, state.workspace_path, state.last_message_path ?? '');
+          await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+          await this.updateLifecycleState(state.workspace_path, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING], workflowState: LABEL_READY_FOR_HUMAN });
+          await this.completeWorkflowState(state.workspace_path);
+          this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, session_id: state.session_id, outcome: 'planning-posted', recovered: true });
+          continue;
+        }
+
+        const savedReview = finalization?.review_pr;
+        const reviewPr = savedReview
+          ? await tracker.fetchPullRequest(savedReview.pr_number).catch(() => null)
+          : await this.findReviewPullRequest(config, issue, undefined);
+        if (savedReview && (!reviewPr || reviewPr.head_sha !== savedReview.head_sha || reviewPr.base_sha !== savedReview.base_sha)) {
+          throw new Error(`PR #${savedReview.pr_number} changed while finalization was interrupted`);
+        }
         let reviewResult: StructuredReviewResult | null = null;
-        if (config.hooks.after_run) {
-          const reviewPrompt = reviewPr ? await this.writePullRequestReviewPrompt(config, state.workspace_path, issue, reviewPr) : null;
+        const completedHookOutput = state.finalization_step === 'hook-completed' && state.session_artifact_dir
+          ? await fs.readFile(path.join(state.session_artifact_dir, 'code-review.md'), 'utf8').catch(() => '')
+          : '';
+        if (reviewPr && completedHookOutput) reviewResult = parseStructuredReviewResult(completedHookOutput);
+        if (config.hooks.after_run && state.finalization_step !== 'hook-completed') {
+          const reviewPrompt = reviewPr ? await this.writePullRequestReviewPrompt(config, state.workspace_path, issue, reviewPr, savedReview?.lens) : null;
           const context = {
             workspace_path: state.workspace_path,
             workspace_strategy: state.workspace_strategy ?? 'durable_issue_workspace',
@@ -1067,11 +1144,15 @@ export class Orchestrator {
             review_pr_head_sha: reviewPr?.head_sha ?? '',
             review_pr_base_ref: reviewPr?.base_ref ?? '',
             review_pr_base_sha: reviewPr?.base_sha ?? '',
-            review_issue_number: issueNumberFromPullRequestBody(reviewPr?.body ?? null) ?? issue.number ?? '',
+            review_issue_number: savedReview?.originating_issue_number ?? issueNumberFromPullRequestBody(reviewPr?.body ?? null) ?? issue.number ?? '',
+            review_execution_key: savedReview?.review_key ?? '',
           };
           const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: context });
-          const result = await runHookScript(rendered, state.workspace_path, config.hooks.timeout_ms, {
-            env: {
+          await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, finalization_step: 'hook-running', updated_at: new Date().toISOString() } : null);
+          let recoveredHookOutput: string;
+          try {
+            const result = await runHookScript(rendered, state.workspace_path, config.hooks.timeout_ms, {
+              env: {
               SYMPHONY_REVIEW_PROMPT_PATH: reviewPrompt?.path ?? '',
               SYMPHONY_REVIEW_PR_NUMBER: String(reviewPr?.number ?? ''),
               SYMPHONY_REVIEW_PR_URL: reviewPr?.url ?? '',
@@ -1080,21 +1161,29 @@ export class Orchestrator {
               SYMPHONY_REVIEW_PR_BASE_REF: reviewPr?.base_ref ?? '',
               SYMPHONY_REVIEW_PR_BASE_SHA: reviewPr?.base_sha ?? '',
               SYMPHONY_REVIEW_ISSUE_NUMBER: String(context.review_issue_number),
-              SYMPHONY_REVIEW_LENS: reviewPrompt?.lens ?? 'staff-engineer',
+              SYMPHONY_REVIEW_LENS: savedReview?.lens ?? reviewPrompt?.lens ?? 'staff-engineer',
+              SYMPHONY_REVIEW_EXECUTION_KEY: savedReview?.review_key ?? '',
               SYMPHONY_RUN_ARTIFACT_DIR: state.session_artifact_dir ?? path.join(state.workspace_path, '.symphony'),
               SYMPHONY_LAST_MESSAGE_PATH: state.last_message_path ?? '',
-            },
-            logPath: path.join(state.session_artifact_dir ?? path.join(state.workspace_path, '.symphony'), 'after_run-recovered.log'),
-            signal: this.shutdownController.signal,
-          });
-          reviewResult = reviewPr ? parseStructuredReviewResult(result.output) : null;
+              },
+              logPath: path.join(state.session_artifact_dir ?? path.join(state.workspace_path, '.symphony'), 'after_run-recovered.log'),
+              signal: this.shutdownController.signal,
+            });
+            recoveredHookOutput = result.output;
+          } catch (error) {
+            const parsed = reviewPr ? parseStructuredReviewResult(hookOutputFromError(error)) : null;
+            if (parsed?.verdict !== 'block') throw error;
+            recoveredHookOutput = hookOutputFromError(error);
+          }
+          reviewResult = reviewPr ? parseStructuredReviewResult(recoveredHookOutput) : null;
+          await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, finalization_step: 'hook-completed', updated_at: new Date().toISOString() } : null);
         }
         if (reviewPr && reviewResult?.verdict === 'block') await this.handleBlockingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
         if (reviewPr && reviewResult?.verdict === 'pass') await this.handlePassingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
         if (reviewPr && (!reviewResult || reviewResult.verdict === 'retry')) throw new Error('Recovered finalization did not produce a terminal review verdict');
 
         if (!reviewPr) await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
-        await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'completed', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
+        await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
         this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, session_id: state.session_id, recovered: true });
       } catch (err) {
         await this.scheduleRetry(config, issue, state.attempt, 'finalization_recovery_failed', state.workspace_path);
@@ -1129,7 +1218,9 @@ export class Orchestrator {
 
     for (const state of states) {
       if (this.running.has(state.issue_id)) continue;
-      if (state.status === 'running' && isProcessAlive(state.worker_pid)) continue;
+      if (this.recoveringFinalizations.has(state.issue_id)) continue;
+      if ((state.status === 'running' || state.status === 'agent-running') && isProcessAlive(state.worker_pid)) continue;
+      if (state.status === 'finalizing' || state.status === 'retry-wait') continue;
       if (!state.issue_number) continue;
 
       let issue: Issue | null;
@@ -1341,6 +1432,7 @@ export class Orchestrator {
       if (capacity.remaining !== null && capacity.remaining <= 0) return;
       if (!issue.number) continue;
       if (this.running.has(issue.id)) continue;
+      if (this.retries.has(issue.id)) continue;
 
       const pr = await tracker.fetchPullRequest(issue.number).catch(() => null);
       if (!pr || pr.is_draft || !pr.head_ref) continue;
@@ -1660,8 +1752,20 @@ export class Orchestrator {
     const now = nowMs();
     for (const entry of [...this.retries.values()].sort((a, b) => a.next_run_at_ms - b.next_run_at_ms)) {
       if (entry.next_run_at_ms > now) continue;
-      let candidate = candidates.find((c) => c.id === entry.issue_id || c.number === entry.issue_number) ??
-        await tracker.fetchIssueByNumber(entry.issue_number).catch(() => null);
+      let candidate = candidates.find((c) => c.id === entry.issue_id || c.number === entry.issue_number) ?? null;
+      if (!candidate) {
+        try {
+          candidate = await tracker.fetchIssueByNumber(entry.issue_number);
+        } catch (error) {
+          log('warn', 'retry_dispatch_issue_fetch_failed', {
+            repo_id: this.repoId ?? undefined,
+            issue_id: entry.issue_id,
+            issue_number: entry.issue_number,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
+      }
       if (!candidate) {
         log('info', 'retry_released', {
           repo_id: this.repoId ?? undefined,
@@ -1711,7 +1815,6 @@ export class Orchestrator {
           reviewStore.close();
         }
         if (!claimed) {
-          this.deleteDurableRetry(config, entry.issue_id);
           continue;
         }
         prReview = {
@@ -1726,7 +1829,6 @@ export class Orchestrator {
           lens,
         };
       }
-      this.deleteDurableRetry(config, entry.issue_id);
       try {
         await this.dispatchIssue(config, candidate, workspaceManager, {
           attempt: entry.attempt,
@@ -1735,6 +1837,7 @@ export class Orchestrator {
           prReview,
           stackContext: stackContext?.context ?? null,
         });
+        this.deleteDurableRetry(config, entry.issue_id);
         if (capacity.remaining !== null) capacity.remaining -= 1;
         if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
@@ -1831,6 +1934,11 @@ export class Orchestrator {
       strategy: workspaceStrategy,
       epicRootIssueIdentifier: stackContext?.root_issue_identifier ?? null,
     });
+    const sessionId = randomUUID();
+    const sessionArtifactDir = sessionArtifactDirectory(workspacePath, opts.attempt, sessionId);
+    const stableLastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
+    const lastMessagePath = path.join(sessionArtifactDir, 'last_message.md');
+    const preAgentHookLogs: Array<{ source: string; name: string }> = [];
     const workspaceFields = { ...issueFields, workspace_path: workspacePath };
     const hookSymphonyContext = {
       workspace_path: workspacePath,
@@ -1854,6 +1962,10 @@ export class Orchestrator {
       review_pr_base_ref: '',
       review_pr_base_sha: '',
       review_issue_number: '',
+      review_execution_key: '',
+      session_id: sessionId,
+      run_artifact_dir: sessionArtifactDir,
+      last_message_path: lastMessagePath,
     };
     const hookEnv: Record<string, string> = {
       SYMPHONY_REPO_ID: this.repoId ?? '',
@@ -1885,6 +1997,10 @@ export class Orchestrator {
       SYMPHONY_REVIEW_PR_BASE_REF: '',
       SYMPHONY_REVIEW_PR_BASE_SHA: '',
       SYMPHONY_REVIEW_ISSUE_NUMBER: '',
+      SYMPHONY_REVIEW_EXECUTION_KEY: '',
+      SYMPHONY_SESSION_ID: sessionId,
+      SYMPHONY_RUN_ARTIFACT_DIR: sessionArtifactDir,
+      SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
     };
 
     const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
@@ -1907,6 +2023,7 @@ export class Orchestrator {
 
       const rendered = await renderTemplate(config.hooks.after_create, { issue, symphony: hookSymphonyContext });
       const afterCreateLogPath = hookLogPath(workspacePath, 'after_create');
+      preAgentHookLogs.push({ source: afterCreateLogPath, name: 'after_create.log' });
       log('info', 'workspace_after_create_hook_started', { ...workspaceFields, event: 'workspace_after_create_hook_started', hook_log_path: afterCreateLogPath });
       try {
         await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
@@ -1950,6 +2067,7 @@ export class Orchestrator {
     if (config.hooks.before_run && !isPausedResume && !skipsWorkspaceHooks) {
       const rendered = await renderTemplate(config.hooks.before_run, { issue, symphony: hookSymphonyContext });
       const beforeRunLogPath = hookLogPath(workspacePath, 'before_run');
+      preAgentHookLogs.push({ source: beforeRunLogPath, name: 'before_run.log' });
       log('info', 'workspace_before_run_hook_started', { ...workspaceFields, event: 'workspace_before_run_hook_started', hook_log_path: beforeRunLogPath });
       try {
         await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
@@ -1995,12 +2113,11 @@ export class Orchestrator {
     if (opts.mode === 'pr-review' && opts.prReview) {
       pullRequestReviewComments = await new GithubIssueTrackerClient(config.tracker).listPullRequestReviewComments(opts.prReview.pr_number);
     }
-    const sessionId = randomUUID();
-    const sessionArtifactDir = sessionArtifactDirectory(workspacePath, opts.attempt, sessionId);
     await fs.mkdir(sessionArtifactDir, { recursive: true });
-    await pruneSessionArtifacts(path.join(workspacePath, '.symphony', 'runs'), { activeDir: sessionArtifactDir });
-    const stableLastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
-    const lastMessagePath = path.join(sessionArtifactDir, 'last_message.md');
+    await pruneSessionArtifacts(path.join(workspacePath, '.symphony', 'runs'), { activeDir: sessionArtifactDir, issueIdentifier: issue.identifier });
+    for (const hookLog of preAgentHookLogs) {
+      await fs.copyFile(hookLog.source, path.join(sessionArtifactDir, hookLog.name)).catch(() => {});
+    }
     const runContext = await buildRunContext({
       workspacePath,
       comments,
@@ -2110,7 +2227,7 @@ export class Orchestrator {
       workspace_path: workspacePath,
       workspace_strategy: workspaceStrategy,
       attempt: opts.attempt,
-      session_id: null,
+      session_id: sessionId,
       agent_provider: provider.id,
       agent_provider_group: provider.provider_group,
       agent_provider_kind: provider.provider_kind,
@@ -2127,6 +2244,11 @@ export class Orchestrator {
       workflow_outcome: null,
       retry_reason: null,
       retry_not_before: null,
+      finalization_context: {
+        mode: agentMode,
+        review_pr: opts.prReview ?? null,
+      },
+      finalization_step: 'pending',
       status: 'agent-running',
       started_at: new Date().toISOString(),
       finished_at: null,
@@ -2154,6 +2276,9 @@ export class Orchestrator {
       mode: agentMode,
       provider: provider.id,
       created_at: initialState.started_at,
+      phase: initialState.status,
+      agent_outcome: initialState.agent_outcome,
+      workflow_outcome: initialState.workflow_outcome,
       prompt_path: promptPath,
       agent_log_path: agentLogPath,
       last_message_path: lastMessagePath,
@@ -2312,9 +2437,11 @@ export class Orchestrator {
             finished_at: null,
             last_exit_code: code ?? null,
             last_signal: signal ?? null,
+            finalization_step: code === 0 && !signal ? 'pending' : cur.finalization_step ?? null,
             updated_at: new Date().toISOString(),
           };
         });
+        await captureVerificationSnapshot(workspacePath, sessionArtifactDir, { code, signal });
 
         if (cancelledReason) {
           log('info', 'worker_cancelled', {
@@ -2330,6 +2457,13 @@ export class Orchestrator {
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Autonomous run was interrupted. Symphony will retry.');
             await this.scheduleRetry(config, issue, opts.attempt, 'cancelled', workspacePath);
           } else {
+            await updateRunState(workspacePath, (cur) => cur ? {
+              ...cur,
+              status: 'cancelled',
+              workflow_outcome: 'cancelled',
+              finished_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            } : null);
             this.appendEpisodeEvent(config, episodeId, 'workflow.cancelled', {
               issue_number: issue.number, session_id: agent.session_id, reason: cancelledReason,
             });
@@ -2369,7 +2503,8 @@ export class Orchestrator {
 
           const pauseRequest = parsePauseRequest(await this.readLastMessage(lastMessagePath));
           if (pauseRequest) {
-            await new GithubIssueTrackerClient(config.tracker).createIssueComment(issue.number!, formatPauseComment(pauseRequest));
+            const marker = `<!-- symphony-pause:${agent.session_id} -->`;
+            await new GithubIssueTrackerClient(config.tracker).upsertStatusComment(issue.number!, marker, `${marker}\n${formatPauseComment(pauseRequest)}`);
             await this.applyLabels(config, issue.number!, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING] });
             await this.updateLifecycleState(workspacePath, {
               add: [LABEL_NEEDS_INFO],
@@ -2377,7 +2512,7 @@ export class Orchestrator {
               workflowState: LABEL_NEEDS_INFO,
             });
             await updateRunState(workspacePath, (cur) =>
-              cur ? { ...cur, status: 'paused', pause_reason: 'needs-info', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null,
+              cur ? { ...cur, status: 'paused', pause_reason: 'needs-info', workflow_outcome: 'paused', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null,
             );
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Paused for user input. Symphony posted a question on this issue.');
             this.appendEpisodeEvent(config, episodeId, 'workflow.paused', { issue_number: issue.number, session_id: agent.session_id, reason: 'needs-info' });
@@ -2401,6 +2536,22 @@ export class Orchestrator {
           const reviewPr = await this.findReviewPullRequest(config, issue, opts.prReview);
           if (reviewPr) {
             const { path: reviewPromptPath, lens: reviewLens } = await this.writePullRequestReviewPrompt(config, workspacePath, issue, reviewPr, opts.prReview?.lens);
+            const capturedReview: PullRequestReviewDispatchOptions = {
+              pr_number: reviewPr.number,
+              pr_url: reviewPr.url,
+              head_ref: reviewPr.head_ref,
+              head_sha: reviewPr.head_sha,
+              base_ref: reviewPr.base_ref || 'main',
+              base_sha: reviewPr.base_sha,
+              originating_issue_number: opts.prReview?.originating_issue_number ?? issue.number ?? null,
+              review_key: opts.prReview?.review_key ?? reviewExecutionKey(config, reviewPr, reviewLens),
+              lens: reviewLens,
+            };
+            await updateRunState(workspacePath, (cur) => cur ? {
+              ...cur,
+              finalization_context: { mode: agentMode, review_pr: capturedReview },
+              updated_at: new Date().toISOString(),
+            } : null);
             hookSymphonyContext.review_prompt_path = reviewPromptPath;
             hookSymphonyContext.review_pr_number = String(reviewPr.number);
             hookSymphonyContext.review_pr_url = reviewPr.url ?? '';
@@ -2409,6 +2560,7 @@ export class Orchestrator {
             hookSymphonyContext.review_pr_base_ref = reviewPr.base_ref || 'main';
             hookSymphonyContext.review_pr_base_sha = reviewPr.base_sha ?? opts.prReview?.base_sha ?? '';
             hookSymphonyContext.review_issue_number = String(opts.prReview?.originating_issue_number ?? issue.number ?? '');
+            hookSymphonyContext.review_execution_key = capturedReview.review_key;
             env.SYMPHONY_REVIEW_PROMPT_PATH = reviewPromptPath;
             env.SYMPHONY_REVIEW_PR_NUMBER = String(reviewPr.number);
             env.SYMPHONY_REVIEW_PR_URL = reviewPr.url ?? '';
@@ -2418,12 +2570,14 @@ export class Orchestrator {
             env.SYMPHONY_REVIEW_PR_BASE_SHA = reviewPr.base_sha ?? opts.prReview?.base_sha ?? '';
             env.SYMPHONY_REVIEW_ISSUE_NUMBER = String(opts.prReview?.originating_issue_number ?? issue.number ?? '');
             env.SYMPHONY_REVIEW_LENS = reviewLens;
+            env.SYMPHONY_REVIEW_EXECUTION_KEY = capturedReview.review_key;
           }
 
           if (config.hooks.after_run) {
             const afterRunLogPath = path.join(sessionArtifactDir, 'after_run.log');
             log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started', hook_log_path: afterRunLogPath });
             try {
+              await updateRunState(workspacePath, (cur) => cur ? { ...cur, finalization_step: 'hook-running', updated_at: new Date().toISOString() } : null);
               const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: hookSymphonyContext });
               const hookResult = await runHookScript(rendered, workspacePath, config.hooks.timeout_ms, {
                 env,
@@ -2455,6 +2609,7 @@ export class Orchestrator {
                 }
               }
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed', hook_log_path: afterRunLogPath });
+              await updateRunState(workspacePath, (cur) => cur ? { ...cur, finalization_step: 'hook-completed', updated_at: new Date().toISOString() } : null);
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
               const reviewResult = reviewPr ? parseStructuredReviewResult(hookOutputFromError(err)) : null;
@@ -2552,7 +2707,7 @@ export class Orchestrator {
             await this.mustReadRunState(workspacePath),
             isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
           );
-          await updateRunState(workspacePath, (cur) => cur ? { ...cur, status: 'completed', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
+          await updateRunState(workspacePath, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
           this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id });
           return;
         }
@@ -2588,11 +2743,23 @@ export class Orchestrator {
       })
       .catch(async (err) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
+        this.appendEpisodeEvent(config, episodeId, 'agent.failed', {
+          issue_number: issue.number,
+          issue_identifier: issue.identifier,
+          attempt: opts.attempt,
+          mode: agentMode,
+          provider: provider.id,
+          session_id: agent.session_id,
+          error: err instanceof Error ? err.message : String(err),
+          workspace_path: workspacePath,
+        });
         await updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
           return {
             ...cur,
             status: 'failed',
+            agent_finished_at: cur.agent_finished_at ?? new Date().toISOString(),
+            agent_outcome: cur.agent_outcome ?? 'failed',
             finished_at: new Date().toISOString(),
             last_exit_code: null,
             last_signal: null,
@@ -2651,6 +2818,12 @@ export class Orchestrator {
   private async reconcileAutonomousMerges(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
     if (!config.merge.enabled) return;
     const pullRequests = await tracker.listOpenPullRequests();
+    const cleanupStore = new EpisodeStore(this.storePath(config));
+    try {
+      cleanupStore.clearMergeAssessmentsExcept(this.durableRepoId(config), pullRequests.map((pr) => pr.number));
+    } finally {
+      cleanupStore.close();
+    }
     for (const pr of pullRequests) {
       if (!this.isSymphonyPullRequest(config, pr)) continue;
       const detailed = await tracker.fetchPullRequest(pr.number).catch(() => null);
@@ -3084,12 +3257,20 @@ ${JSON.stringify(episodeSummary, null, 2)}
     let store: EpisodeStore | null = null;
     try {
       store = new EpisodeStore(path.join(config.workspace.root, '.symphony', 'episodes.sqlite'));
-      store.append({
+      const input = {
         repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
         episode_id: episodeId,
         event,
         payload,
-      });
+      };
+      const sessionId = typeof payload.session_id === 'string' ? payload.session_id : null;
+      const agentTerminal = event === 'agent.completed' || event === 'agent.failed';
+      const workflowTerminal = ['workflow.retry_scheduled', 'workflow.paused', 'workflow.completed', 'workflow.failed', 'workflow.cancelled'].includes(event);
+      if (sessionId && (agentTerminal || workflowTerminal)) {
+        store.appendOnce(input, `${episodeId}:${sessionId}:${agentTerminal ? 'agent-terminal' : 'workflow-terminal'}`);
+      } else {
+        store.append(input);
+      }
     } catch (err) {
       log('warn', 'episode_event_write_failed', {
         repo_id: this.repoId ?? undefined,
@@ -3183,6 +3364,8 @@ ${JSON.stringify(episodeSummary, null, 2)}
       add: requiresAnotherReview ? [LABEL_REVIEW_PASSED, LABEL_READY] : [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN],
       remove: [
         LABEL_REVIEW_BLOCKING,
+        'symphony-review:error',
+        'symphony-review:unavailable',
         requiresAnotherReview ? LABEL_READY_FOR_HUMAN : LABEL_READY,
         LABEL_RUNNING,
         ...pr.labels.filter(isReviewAutoFixLabel),
@@ -3285,8 +3468,8 @@ ${JSON.stringify(episodeSummary, null, 2)}
     await this.applyLabels(config, pr.number, {
       add: canAutoFix ? [LABEL_REVIEW_BLOCKING, LABEL_READY, autoFixLabel] : [LABEL_REVIEW_BLOCKING, LABEL_READY_FOR_HUMAN],
       remove: canAutoFix
-        ? [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN, LABEL_RUNNING]
-        : [LABEL_REVIEW_PASSED, LABEL_READY, LABEL_RUNNING],
+        ? [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN, LABEL_RUNNING, 'symphony-review:error', 'symphony-review:unavailable']
+        : [LABEL_REVIEW_PASSED, LABEL_READY, LABEL_RUNNING, 'symphony-review:error', 'symphony-review:unavailable'],
     });
 
     if (issue.number && issue.number !== pr.number) {
@@ -3351,6 +3534,10 @@ ${JSON.stringify(episodeSummary, null, 2)}
       receipts: upsertVerificationReceipt(previousState?.receipts ?? [], receipt),
       last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     });
+    await this.applyLabels(config, pr.number, {
+      add: [`symphony-review:${verdict}`],
+      remove: [LABEL_REVIEW_PASSED, LABEL_REVIEW_BLOCKING],
+    }).catch(() => {});
     this.completeReviewExecution(config, pr, receipt, verdict);
     this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
       pr_number: pr.number,
@@ -3687,6 +3874,7 @@ ${runContext}`;
     await updateRunState(workspacePath, (cur) => cur ? {
       ...cur,
       status: 'completed',
+      finalization_step: 'effects-applied',
       workflow_outcome: 'completed',
       finished_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -3725,6 +3913,7 @@ ${runContext}`;
             ...cur,
             status: 'paused',
             pause_reason: 'interactive',
+            workflow_outcome: 'paused',
             finished_at: now,
             last_handoff_at: now,
             labels: issue.labels.filter((label) => label !== LABEL_READY && label !== LABEL_RUNNING),
@@ -3739,12 +3928,15 @@ ${runContext}`;
   private async postPlanningResult(config: WorkflowConfig, issue: Issue, workspacePath: string, lastMessagePath: string): Promise<void> {
     if (!issue.number) return;
     const lastMessage = (await this.readLastMessage(lastMessagePath)).trim();
+    const state = await readRunState(workspacePath);
+    const marker = `<!-- symphony-plan:${state?.session_id ?? issue.id} -->`;
     const body = [
+      marker,
       '## Symphony Technical Specification',
       '',
       lastMessage || `The planning agent completed successfully, but no final message was captured. Review the workspace artifacts in \`${workspacePath}\`.`,
     ].join('\n');
-    await new GithubIssueTrackerClient(config.tracker).createIssueComment(issue.number, body);
+    await new GithubIssueTrackerClient(config.tracker).upsertStatusComment(issue.number, marker, body);
   }
 
   private async readLastMessage(lastMessagePath: string): Promise<string> {
@@ -3762,6 +3954,16 @@ ${runContext}`;
   }
 
   private async scheduleRetry(config: WorkflowConfig, issue: Issue, attempt: number, reason: string, workspacePath?: string): Promise<void> {
+    const retryState = workspacePath ? await readRunState(workspacePath) : null;
+    const retrySessionId = retryState?.session_id ?? null;
+    if (retryState?.agent_mode === 'pr-review' && retryState.finalization_context?.review_pr?.review_key) {
+      const reviewStore = new EpisodeStore(this.storePath(config));
+      try {
+        reviewStore.completeReviewClaim(this.durableRepoId(config), retryState.finalization_context.review_pr.review_key, 'error');
+      } finally {
+        reviewStore.close();
+      }
+    }
     const nextAttempt = attempt + 1;
     if (config.agent.max_attempts !== null && nextAttempt > config.agent.max_attempts) {
       this.deleteDurableRetry(config, issue.id);
@@ -3771,6 +3973,7 @@ ${runContext}`;
         attempt,
         max_attempts: config.agent.max_attempts,
         reason,
+        session_id: retrySessionId,
       });
       log('warn', 'retry_exhausted', {
         repo_id: this.repoId ?? undefined,
@@ -3787,6 +3990,14 @@ ${runContext}`;
       if (issue.number) {
         await this.applyLabels(config, issue.number, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING] });
         if (workspacePath) {
+          await updateRunState(workspacePath, (cur) => cur ? {
+            ...cur,
+            status: 'failed',
+            workflow_outcome: 'failed',
+            retry_reason: reason,
+            finished_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          } : null);
           await this.updateLifecycleState(workspacePath, {
             add: [LABEL_NEEDS_INFO],
             remove: [LABEL_READY, LABEL_RUNNING],
@@ -3857,6 +4068,7 @@ ${runContext}`;
       delay_ms: delayMs,
       next_run_at: new Date(nextAt).toISOString(),
       reason,
+      session_id: retrySessionId,
     });
 
     log('info', 'retry_scheduled', {
@@ -4071,27 +4283,37 @@ ${runContext}`;
     provider: AgentProviderConfig,
     capacity: DispatchCapacity,
   ): DispatchBlockReason | null {
-    if (capacity.remaining !== null && capacity.remaining <= 0) return 'global_capacity';
+    const blocked = (reason: DispatchBlockReason): DispatchBlockReason => {
+      log('info', 'dispatch_capacity_blocked', {
+        ...getIssueLogFields(config, issue, this.repoId),
+        reason,
+        agent_provider: provider.id,
+        active_count: this.getRunningCount(),
+        capacity_remaining: capacity.remaining,
+      });
+      return reason;
+    };
+    if (capacity.remaining !== null && capacity.remaining <= 0) return blocked('global_capacity');
     const maxConcurrentAgents = this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents;
-    if (this.getRunningCount() >= maxConcurrentAgents) return 'global_capacity';
+    if (this.getRunningCount() >= maxConcurrentAgents) return blocked('global_capacity');
     const byState = config.agent.max_concurrent_agents_by_state;
     if (byState) {
       const limit = byState[issue.state];
       if (typeof limit === 'number') {
         const runningInState = [...this.running.values()].filter((s) => s.issue_state === issue.state).length;
         const orphanedInState = [...this.liveOrphanClaims.values()].filter((s) => s.issue_state === issue.state).length;
-        if (runningInState + orphanedInState >= limit) return 'state_capacity';
+        if (runningInState + orphanedInState >= limit) return blocked('state_capacity');
       }
     }
     const limitKey = providerLimitKey(provider);
     const backoffUntil = this.providerUsageLimitBackoffUntil.get(limitKey);
-    if (backoffUntil !== undefined && nowMs() < backoffUntil) return 'usage_limit';
-    if (this.providerUsageLimitCheckBlocked.has(limitKey)) return 'usage_limit';
+    if (backoffUntil !== undefined && nowMs() < backoffUntil) return blocked('usage_limit');
+    if (this.providerUsageLimitCheckBlocked.has(limitKey)) return blocked('usage_limit');
     if (provider.max_concurrent !== null) {
       const runningForProvider = [...this.running.values()].filter((s) => s.agent_provider_group === limitKey).length;
       const runningLoopsForProvider = [...this.runningLoops.values()].filter((s) => s.agent_provider_group === limitKey).length;
       const orphanedForProvider = [...this.liveOrphanClaims.values()].filter((s) => s.agent_provider_group === limitKey).length;
-      if (runningForProvider + runningLoopsForProvider + orphanedForProvider >= provider.max_concurrent) return 'provider_capacity';
+      if (runningForProvider + runningLoopsForProvider + orphanedForProvider >= provider.max_concurrent) return blocked('provider_capacity');
     }
     return null;
   }

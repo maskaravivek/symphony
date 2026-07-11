@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
@@ -35,12 +34,20 @@ const COLOR: Record<LogLevel | 'muted' | 'field', string> = {
 
 const RESET = '\u001b[0m';
 let persistentLogDirectory: string | null = null;
+let persistentWriteQueue: Promise<void> = Promise.resolve();
+const initializedLogFiles = new Set<string>();
+
+function redactValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, nested]) => [
+    key,
+    /(token|secret|password|authorization|cookie)/i.test(key) ? '[REDACTED]' : redactValue(nested),
+  ]));
+}
 
 function redactFields(fields: LogFields): LogFields {
-  return Object.fromEntries(Object.entries(fields).map(([key, value]) => {
-    if (/(token|secret|password|authorization|cookie)/i.test(key)) return [key, '[REDACTED]'];
-    return [key, value];
-  }));
+  return redactValue(fields) as LogFields;
 }
 
 export async function configurePersistentLogging(directory: string, retentionDays = 30): Promise<void> {
@@ -61,8 +68,17 @@ function persistLog(level: LogLevel, message: string, fields: LogFields): void {
   const now = new Date();
   const file = path.join(persistentLogDirectory, `symphony-${now.toISOString().slice(0, 10)}.jsonl`);
   const payload = JSON.stringify({ ts: now.toISOString(), level, message, ...redactFields(fields) });
-  fs.appendFileSync(file, `${payload}\n`, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(file, 0o600);
+  persistentWriteQueue = persistentWriteQueue.then(async () => {
+    await fsp.appendFile(file, `${payload}\n`, { encoding: 'utf8', mode: 0o600 });
+    if (!initializedLogFiles.has(file)) {
+      await fsp.chmod(file, 0o600);
+      initializedLogFiles.add(file);
+    }
+  }).catch(() => {});
+}
+
+export async function flushPersistentLogs(): Promise<void> {
+  await persistentWriteQueue;
 }
 
 function currentLogLevel(): LogLevel {

@@ -37,6 +37,16 @@ test('persists append-only episode events across store instances', async () => {
   assert.equal(latest?.event, 'run_completed');
 });
 
+test('deduplicates terminal session events by durable idempotency key', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-event-once-'));
+  const store = new EpisodeStore(path.join(root, 'episodes.sqlite'));
+  const input = { repo_id: 'mdedit', episode_id: 'mdedit#42:attempt:1', event: 'workflow.completed', payload: { session_id: 'session-1' } };
+  assert.ok(store.appendOnce(input, 'mdedit#42:attempt:1:session-1:workflow-terminal'));
+  assert.equal(store.appendOnce(input, 'mdedit#42:attempt:1:session-1:workflow-terminal'), null);
+  assert.equal(store.list({ repo_id: 'mdedit', episode_id: input.episode_id }).length, 1);
+  store.close();
+});
+
 test('persists retry queue entries across store instances and removes them explicitly', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-retries-'));
   const databasePath = path.join(root, 'episodes.sqlite');
@@ -81,6 +91,17 @@ test('upserts review claims and merge assessments by durable identity', async ()
   assert.equal(store.claimReview('mdedit', reviewKey, 'running'), false);
   store.completeReviewClaim('mdedit', reviewKey, 'block');
   assert.equal(store.getReviewClaim('mdedit', reviewKey)?.status, 'block');
+  assert.equal(store.getReviewClaim('mdedit', reviewKey)?.attempts, 1);
+
+  const retryKey = '646:head:base:policy:workflow:retry';
+  assert.equal(store.claimReview('mdedit', retryKey, 'running'), true);
+  store.completeReviewClaim('mdedit', retryKey, 'error');
+  assert.equal(store.claimReview('mdedit', retryKey, 'running'), true);
+  store.completeReviewClaim('mdedit', retryKey, 'unavailable');
+  assert.equal(store.claimReview('mdedit', retryKey, 'running'), true);
+  store.completeReviewClaim('mdedit', retryKey, 'error');
+  assert.equal(store.claimReview('mdedit', retryKey, 'running'), false);
+  assert.equal(store.getReviewClaim('mdedit', retryKey)?.attempts, 3);
 
   store.upsertMergeAssessment({
     repo_id: 'mdedit',
@@ -90,7 +111,9 @@ test('upserts review claims and merge assessments by durable identity', async ()
     next_check_at: '2026-07-11T12:05:00.000Z',
   });
   assert.equal(store.getMergeAssessment('mdedit', 650)?.decision_fingerprint, 'decision-1');
-  store.clearMergeAssessment('mdedit', 650);
+  store.upsertMergeAssessment({ repo_id: 'mdedit', pr_number: 651, input_fingerprint: 'input-2', decision_fingerprint: 'decision-2', next_check_at: '2026-07-11T12:05:00.000Z' });
+  store.clearMergeAssessmentsExcept('mdedit', [651]);
   assert.equal(store.getMergeAssessment('mdedit', 650), null);
+  assert.equal(store.getMergeAssessment('mdedit', 651)?.decision_fingerprint, 'decision-2');
   store.close();
 });
