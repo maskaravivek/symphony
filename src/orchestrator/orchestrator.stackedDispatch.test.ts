@@ -222,3 +222,93 @@ test('stacked epic dispatch reuses predecessor codex thread and exports stack ba
   assert.equal(lastMessage, 'resume:symphony-43-first-leaf:thread-43');
   assert.equal(stackBaseBranch, 'symphony-43-first-leaf');
 });
+
+test('first stacked epic leaf uses main as its base branch', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-first-stacked-dispatch-workspace-'));
+  const workflowPath = await writeWorkflow(workspaceRoot);
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([issuePayload(43, 'First leaf', 'open', ['ready-for-agent'])]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/parent') {
+      return jsonResponse(issuePayload(42, 'Epic parent', 'open', ['ready-for-agent', 'epic:stacked']));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/sub_issues?per_page=50') {
+      return jsonResponse([
+        issuePayload(43, 'First leaf', 'open', ['ready-for-agent']),
+        issuePayload(44, 'Second leaf', 'open', []),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/sub_issues?per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/44/sub_issues?per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/comments?per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43') {
+      return jsonResponse(issuePayload(43, 'First leaf', 'open', ['agent-running']));
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' && method === 'POST') {
+      return jsonResponse([]);
+    }
+    if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels/') && method === 'DELETE') {
+      return new Response(null, { status: 204 });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/comments' && method === 'POST') {
+      return jsonResponse({ id: 701, body: String(body), html_url: 'https://github.test/comment/701' });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/701' && method === 'PATCH') {
+      return jsonResponse({ id: 701, body: String(body), html_url: 'https://github.test/comment/701' });
+    }
+
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    const workspacePath = path.join(workspaceRoot, 'mangoappstudio_mdedit_43');
+    await waitFor(async () => {
+      try {
+        return (await fs.readFile(path.join(workspacePath, '.symphony', 'last_message.md'), 'utf8')).startsWith('fresh:');
+      } catch {
+        return false;
+      }
+    });
+    await waitFor(() =>
+      calls.some(
+        (call) =>
+          call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' &&
+          call.method === 'POST' &&
+          JSON.stringify(call.body) === JSON.stringify({ labels: ['ready-for-human'] }),
+      ),
+    );
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const workspacePath = path.join(workspaceRoot, 'mangoappstudio_mdedit_43');
+  const prompt = await fs.readFile(path.join(workspacePath, '.symphony', 'prompt.md'), 'utf8');
+  const stackBaseBranch = await fs.readFile(path.join(workspacePath, '.symphony', 'stack-base-branch.txt'), 'utf8');
+
+  assert.match(prompt, /Open this issue's PR against `main`/);
+  assert.equal(stackBaseBranch, 'main');
+});

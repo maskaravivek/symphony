@@ -292,7 +292,7 @@ Instructions:
 9. Open or update a pull request:
    - PR title should match the issue title.
    {% if symphony.stack_base_branch %}
-   - This issue is in a stacked epic. Open a separate PR against base branch `{{ symphony.stack_base_branch }}`, not `main`.
+   - This issue is in a stacked epic. Open a separate PR against base branch `{{ symphony.stack_base_branch }}`.
    - Do not combine this issue with its predecessor issue.
    {% endif %}
    - PR body MUST contain `Fixes #{{ issue.number }}` so GitHub auto-closes the issue after the PR is merged.

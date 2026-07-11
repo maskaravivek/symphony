@@ -3221,7 +3221,7 @@ ${runContext}`;
         base_branch:
           predecessorIssue && predecessorIssue.number && !isTerminalIssue(config, predecessorIssue)
             ? predecessorIssue.branch_name ?? null
-            : null,
+            : 'main',
         reusable_thread_id: reusableThreadId,
         predecessor_last_message: predecessorLastMessage,
         position: position + 1,

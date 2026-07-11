@@ -5,6 +5,7 @@ import type { Issue } from '../domain/issue.js';
 const engine = new Liquid({
   strictVariables: false,
   strictFilters: false,
+  jsTruthy: true,
 });
 
 engine.registerFilter('join', (input: unknown, sep: unknown) => {
