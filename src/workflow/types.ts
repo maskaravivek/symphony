@@ -66,6 +66,8 @@ export interface AgentConfig {
 export interface ReviewConfig {
   auto_fix_review_comments: boolean;
   number_of_auto_fix_iterations: number;
+  shepherd_pull_requests: boolean;
+  lenses: string[];
 }
 
 export type MergeRisk = 'standard' | 'elevated' | 'prohibited';
@@ -77,6 +79,9 @@ export interface MergeRiskRule {
   any_labels: string[];
   paths: string[];
   target_branches: string[];
+  min_changed_lines?: number | null;
+  min_changed_files?: number | null;
+  required_evidence?: string[];
 }
 
 export interface MergeConfig {
@@ -84,6 +89,11 @@ export interface MergeConfig {
   dry_run: boolean;
   method: MergeMethod;
   default_risk: MergeRisk;
+  policy_version?: string;
+  workflow_sha?: string;
+  require_independent_reviews?: boolean;
+  required_evidence?: Partial<Record<Exclude<MergeRisk, 'prohibited'>, string[]>>;
+  substantive_ignored_paths?: string[];
   rules: MergeRiskRule[];
 }
 
@@ -133,6 +143,7 @@ export interface AgentsConfig {
 }
 
 export interface WorkflowConfig {
+  workflow_sha?: string;
   tracker: GithubTrackerConfig;
   polling: PollingConfig;
   workspace: WorkspaceConfig;

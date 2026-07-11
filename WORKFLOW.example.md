@@ -43,10 +43,19 @@ merge:
   dry_run: false
   method: squash
   default_risk: standard
+  policy_version: example-v1
+  require_independent_reviews: true
+  required_evidence:
+    standard: [review]
+    elevated: [review, test]
+  substantive_ignored_paths: ["**/*.test.*", "**/*.md", generated/**]
   rules:
     - risk: elevated
       any_labels: [security]
       paths: [.github/workflows/**, WORKFLOW.md, migrations/**]
+    - risk: elevated
+      min_changed_lines: 800
+      min_changed_files: 30
     - risk: prohibited
       any_labels: [no-automerge]
       target_branches: [production]
@@ -179,6 +188,8 @@ hooks:
 review:
   auto_fix_review_comments: false
   number_of_auto_fix_iterations: 1
+  shepherd_pull_requests: false
+  lenses: [staff-engineer, security-and-data-safety]
 
 agent:
   max_concurrent_agents: 2

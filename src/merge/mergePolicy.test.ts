@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { MergeConfig } from '../workflow/types.js';
-import { classifyMergeRisk, evaluateMergeEligibility, type VerificationReceipt } from './mergePolicy.js';
+import {
+  classifyMergeRisk,
+  evaluateMergeEligibility,
+  requiredMergeEvidence,
+  summarizeSubstantiveChanges,
+  type VerificationReceipt,
+} from './mergePolicy.js';
 
 const config: MergeConfig = {
   enabled: true,
@@ -53,7 +59,14 @@ test('allows a standard PR only after all deterministic gates pass', () => {
     checks: [{ name: 'test', status: 'completed', conclusion: 'success' }],
     receipts: [receipt('review-1')],
   });
-  assert.deepEqual(decision, { eligible: true, risk: 'standard', required_reviews: 1, reasons: [] });
+  assert.deepEqual(decision, {
+    eligible: true,
+    risk: 'standard',
+    required_reviews: 1,
+    required_evidence: ['review'],
+    observed_evidence: ['review'],
+    reasons: [],
+  });
 });
 
 test('requires two fresh receipts for elevated risk and rejects stale receipts', () => {
@@ -73,14 +86,14 @@ test('requires two fresh receipts for elevated risk and rejects stale receipts',
   };
   const one = evaluateMergeEligibility({ ...base, receipts: [receipt('review-1')] });
   assert.equal(one.eligible, false);
-  assert.ok(one.reasons.includes('requires 2 fresh passing verification receipts; found 1'));
+  assert.ok(one.reasons.includes('requires 2 fresh independent passing reviews; found 1'));
 
   const stale = evaluateMergeEligibility({
     ...base,
     receipts: [receipt('review-1'), receipt('review-2', { base_sha: 'old-base' })],
   });
   assert.equal(stale.eligible, false);
-  assert.ok(stale.reasons.includes('requires 2 fresh passing verification receipts; found 1'));
+  assert.ok(stale.reasons.includes('requires 2 fresh independent passing reviews; found 1'));
 
   const two = evaluateMergeEligibility({ ...base, receipts: [receipt('review-1'), receipt('review-2')] });
   assert.equal(two.eligible, true);
@@ -129,5 +142,68 @@ test('treats missing checks and unavailable verification as blocking evidence ga
   });
   assert.equal(decision.eligible, false);
   assert.ok(decision.reasons.includes('no check results available'));
-  assert.ok(decision.reasons.includes('requires 1 fresh passing verification receipt; found 0'));
+  assert.ok(decision.reasons.includes('requires 1 fresh independent passing review; found 0'));
+  assert.ok(decision.reasons.includes('required verification evidence is missing: review'));
+});
+
+test('uses substantive size thresholds and path-specific evidence requirements', () => {
+  const sizeConfig: MergeConfig = {
+    ...config,
+    substantive_ignored_paths: ['**/*.test.ts', 'generated/**'],
+    rules: [
+      ...config.rules,
+      { risk: 'elevated', any_labels: [], paths: [], target_branches: [], min_changed_lines: 500, required_evidence: ['test'] },
+      { risk: 'standard', any_labels: [], paths: ['apps/web/**'], target_branches: [], required_evidence: ['browser-observation'] },
+    ],
+  };
+  const summary = summarizeSubstantiveChanges(sizeConfig, [
+    { path: 'src/large.ts', additions: 350, deletions: 150 },
+    { path: 'src/large.test.ts', additions: 900, deletions: 0 },
+  ]);
+  const input = { labels: [], changed_paths: ['src/large.ts', 'src/large.test.ts'], target_branch: 'main', ...summary };
+  assert.deepEqual(summary, { substantive_changed_lines: 500, substantive_changed_files: 1 });
+  assert.equal(classifyMergeRisk(sizeConfig, input), 'elevated');
+  assert.deepEqual(requiredMergeEvidence(sizeConfig, 'elevated', input), ['review', 'test']);
+
+  assert.deepEqual(
+    requiredMergeEvidence(sizeConfig, 'standard', {
+      labels: [],
+      changed_paths: ['apps/web/page.tsx'],
+      target_branch: 'main',
+    }),
+    ['browser-observation', 'review'],
+  );
+});
+
+test('requires independent reviewer executions when configured', () => {
+  const independentConfig: MergeConfig = { ...config, require_independent_reviews: true };
+  const decision = evaluateMergeEligibility({
+    config: independentConfig,
+    risk: 'elevated',
+    pull_request: {
+      state: 'open', is_draft: false, merge_state_status: 'clean', head_sha: 'head-1', base_sha: 'base-1', linked_issue_number: 42, labels: [],
+    },
+    checks: [{ name: 'test', status: 'completed', conclusion: 'success' }],
+    receipts: [
+      receipt('one', { reviewer: { execution_id: 'review-a', provider: 'codex', model: null, lens: 'general' }, author_execution_id: 'author' }),
+      receipt('two', { reviewer: { execution_id: 'review-a', provider: 'codex', model: null, lens: 'security' }, author_execution_id: 'author' }),
+    ],
+  });
+  assert.equal(decision.eligible, false);
+  assert.ok(decision.reasons.includes('requires 2 fresh independent passing reviews; found 1'));
+});
+
+test('invalidates receipts when the workflow policy changes', () => {
+  const workflowConfig: MergeConfig = { ...config, workflow_sha: 'workflow-new' };
+  const decision = evaluateMergeEligibility({
+    config: workflowConfig,
+    risk: 'standard',
+    pull_request: {
+      state: 'open', is_draft: false, merge_state_status: 'clean', head_sha: 'head-1', base_sha: 'base-1', linked_issue_number: 42, labels: [],
+    },
+    checks: [{ name: 'test', status: 'completed', conclusion: 'success' }],
+    receipts: [receipt('old', { workflow_sha: 'workflow-old' })],
+  });
+  assert.equal(decision.eligible, false);
+  assert.ok(decision.reasons.includes('requires 1 fresh independent passing review; found 0'));
 });

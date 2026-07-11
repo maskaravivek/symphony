@@ -3,9 +3,10 @@ import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
 import { GithubIssueTrackerClient, isGithubRateLimitError, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
-import { classifyMergeRisk, type VerificationReceipt } from '../merge/mergePolicy.js';
+import { classifyMergeRisk, summarizeSubstantiveChanges, type VerificationReceipt } from '../merge/mergePolicy.js';
 import { resolvePromotedBase } from '../merge/stackPromotion.js';
 import { dueScheduledLoops } from '../loops/scheduledLoops.js';
+import { parseStructuredReviewResult, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
@@ -147,6 +148,7 @@ interface PullRequestReviewState {
   reviewed_at: string;
   reason: string;
   receipts: VerificationReceipt[];
+  last_review_comment_id?: number | null;
 }
 
 type EpicExecutionMode = WorkflowConfig['tracker']['epics']['execution_mode'];
@@ -248,14 +250,6 @@ function reviewAutoFixIteration(labels: string[]): number {
   return max;
 }
 
-function parseReviewVerdict(output: string): 'pass' | 'block' | null {
-  const matches = [...output.matchAll(/REVIEW_VERDICT:\s*(PASS|BLOCK)\b/gi)];
-  const last = matches.at(-1)?.[1]?.toUpperCase();
-  if (last === 'PASS') return 'pass';
-  if (last === 'BLOCK') return 'block';
-  return null;
-}
-
 function hookOutputFromError(err: unknown): string {
   if (err instanceof HookScriptError) return err.output;
   return '';
@@ -282,6 +276,7 @@ function parsePullRequestReviewStateComment(body: string): PullRequestReviewStat
       auto_fix_iterations: Number.isInteger(parsed.auto_fix_iterations) && parsed.auto_fix_iterations! >= 0 ? parsed.auto_fix_iterations! : 0,
       reviewed_at: typeof parsed.reviewed_at === 'string' ? parsed.reviewed_at : '',
       reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+      last_review_comment_id: typeof parsed.last_review_comment_id === 'number' ? parsed.last_review_comment_id : null,
       receipts: Array.isArray(parsed.receipts)
         ? parsed.receipts.filter((receipt): receipt is VerificationReceipt => {
             if (!receipt || typeof receipt !== 'object') return false;
@@ -293,6 +288,20 @@ function parsePullRequestReviewStateComment(body: string): PullRequestReviewStat
               typeof candidate.head_sha === 'string' &&
               typeof candidate.base_sha === 'string' &&
               Array.isArray(candidate.evidence) &&
+              candidate.evidence.every(
+                (entry) =>
+                  typeof entry === 'string' ||
+                  (Boolean(entry) &&
+                    typeof entry === 'object' &&
+                    typeof entry.kind === 'string' &&
+                    typeof entry.summary === 'string'),
+              ) &&
+              (candidate.reviewer === undefined ||
+                candidate.reviewer === null ||
+                (typeof candidate.reviewer.execution_id === 'string' &&
+                  (candidate.reviewer.provider === null || typeof candidate.reviewer.provider === 'string') &&
+                  (candidate.reviewer.model === null || typeof candidate.reviewer.model === 'string') &&
+                  (candidate.reviewer.lens === null || typeof candidate.reviewer.lens === 'string'))) &&
               typeof candidate.verified_at === 'string'
             );
           })
@@ -322,12 +331,23 @@ function pullRequestHeadMatchesState(pr: PullRequestRef, state: PullRequestRevie
   return state.head_sha === pr.head_sha;
 }
 
-function freshPassingReceiptCount(pr: PullRequestRef, state: PullRequestReviewState | null): number {
+function freshPassingReceiptCount(config: WorkflowConfig, pr: PullRequestRef, state: PullRequestReviewState | null): number {
   if (!pr.head_sha || !pr.base_sha) return 0;
   return new Set(
     (state?.receipts ?? [])
-      .filter((receipt) => receipt.verdict === 'pass' && receipt.head_sha === pr.head_sha && receipt.base_sha === pr.base_sha)
-      .map((receipt) => receipt.receipt_id),
+      .filter(
+        (receipt) =>
+          receipt.verdict === 'pass' &&
+          receipt.head_sha === pr.head_sha &&
+          receipt.base_sha === pr.base_sha &&
+          (receipt.policy_version ?? 'v1') === (config.merge.policy_version ?? 'v1') &&
+          (receipt.workflow_sha ?? null) === (config.workflow_sha ?? null) &&
+          receipt.evidence.some((entry) => typeof entry === 'string' || entry.kind === 'review') &&
+          (!config.merge.require_independent_reviews ||
+            (Boolean(receipt.reviewer?.execution_id) &&
+              (!receipt.author_execution_id || receipt.reviewer?.execution_id !== receipt.author_execution_id))),
+      )
+      .map((receipt) => config.merge.require_independent_reviews ? receipt.reviewer!.execution_id : receipt.receipt_id),
   ).size;
 }
 
@@ -477,6 +497,7 @@ export class Orchestrator {
   private conflictQueue = new Map<number, ConflictEntry>();
   private lastConflictScanAtMs = 0;
   private lastStackPromotionScanAtMs = 0;
+  private lastPullRequestFeedbackScanAtMs = 0;
   private providerUsageLimitBackoffUntil = new Map<string, number>();
   private providerUsageLimitCheckBlocked = new Set<string>();
   private githubRateLimitBackoffUntilMs = 0;
@@ -575,6 +596,7 @@ export class Orchestrator {
       await this.promoteStackedPullRequests(config, trackerClient);
       await this.scanOpenPullRequestsForConflicts(config, trackerClient);
       await this.reconcileAutonomousMerges(config, trackerClient);
+      await this.reconcilePullRequestFeedback(config, trackerClient);
       await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
       await this.dispatchPullRequestReviews(config, trackerClient, workspaceManager, capacity);
       await this.dispatchScheduledLoops(config, capacity);
@@ -1161,14 +1183,16 @@ export class Orchestrator {
       });
       if (reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
         if (config.merge.enabled) {
-          const changedPaths = await tracker.listPullRequestFiles(pr.number).catch(() => []);
+          const changedFiles = await tracker.listPullRequestFileDetails(pr.number).catch(() => []);
+          const changedPaths = changedFiles.map((file) => file.path);
           const risk = classifyMergeRisk(config.merge, {
             labels: pr.labels,
             changed_paths: changedPaths,
             target_branch: pr.base_ref,
+            ...summarizeSubstantiveChanges(config.merge, changedFiles),
           });
           const requiredReviews = risk === 'elevated' ? 2 : 1;
-          if (freshPassingReceiptCount(pr, reviewState) < requiredReviews) {
+          if (freshPassingReceiptCount(config, pr, reviewState) < requiredReviews) {
             // Continue into another independent review run for elevated changes.
           } else {
             log('info', 'pr_review_skipped_already_passed_for_head', {
@@ -2055,7 +2079,7 @@ export class Orchestrator {
 
           const reviewPr = await this.findReviewPullRequest(config, issue, opts.prReview);
           if (reviewPr) {
-            const reviewPromptPath = await this.writePullRequestReviewPrompt(workspacePath, issue, reviewPr);
+            const { path: reviewPromptPath, lens: reviewLens } = await this.writePullRequestReviewPrompt(config, workspacePath, issue, reviewPr);
             hookSymphonyContext.review_prompt_path = reviewPromptPath;
             hookSymphonyContext.review_pr_number = String(reviewPr.number);
             hookSymphonyContext.review_pr_url = reviewPr.url ?? '';
@@ -2068,6 +2092,7 @@ export class Orchestrator {
             env.SYMPHONY_REVIEW_PR_HEAD_REF = reviewPr.head_ref;
             env.SYMPHONY_REVIEW_PR_HEAD_SHA = reviewPr.head_sha ?? '';
             env.SYMPHONY_REVIEW_PR_BASE_REF = reviewPr.base_ref || 'main';
+            env.SYMPHONY_REVIEW_LENS = reviewLens;
           }
 
           if (config.hooks.after_run) {
@@ -2082,18 +2107,21 @@ export class Orchestrator {
                 signal: this.shutdownController.signal,
               });
               if (reviewPr) {
-                const verdict = parseReviewVerdict(hookResult.output);
-                if (verdict === 'block') {
-                  await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, 'Review hook returned REVIEW_VERDICT: BLOCK');
+                const reviewResult = parseStructuredReviewResult(hookResult.output);
+                if (reviewResult?.verdict === 'block') {
+                  await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
                   return;
                 }
-                if (verdict === 'pass') {
-                  await this.handlePassingPullRequestReview(config, issue, reviewPr, 'Review hook returned REVIEW_VERDICT: PASS');
+                if (reviewResult?.verdict === 'pass') {
+                  await this.handlePassingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
+                } else if (reviewResult?.verdict === 'retry') {
+                  await this.recordNonPassingVerificationReceipt(config, issue, reviewPr, workspacePath, 'error', reviewResult.summary, reviewResult);
                 } else {
                   await this.recordNonPassingVerificationReceipt(
                     config,
                     issue,
                     reviewPr,
+                    workspacePath,
                     'unavailable',
                     'Review hook completed without a REVIEW_VERDICT line',
                   );
@@ -2102,7 +2130,8 @@ export class Orchestrator {
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed', hook_log_path: afterRunLogPath });
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
-              if (reviewPr && parseReviewVerdict(hookOutputFromError(err)) === 'block') {
+              const reviewResult = reviewPr ? parseStructuredReviewResult(hookOutputFromError(err)) : null;
+              if (reviewPr && reviewResult?.verdict === 'block') {
                 log('info', 'workspace_after_run_hook_review_blocked', {
                   ...endFields,
                   event: 'workspace_after_run_hook_review_blocked',
@@ -2110,7 +2139,7 @@ export class Orchestrator {
                   hook_log_path: afterRunLogPath,
                   error,
                 });
-                await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, error);
+                await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
                 return;
               }
               log('error', 'workspace_after_run_hook_failed', {
@@ -2120,7 +2149,7 @@ export class Orchestrator {
                 error,
               });
               if (reviewPr) {
-                await this.recordNonPassingVerificationReceipt(config, issue, reviewPr, 'error', error).catch(() => {});
+                await this.recordNonPassingVerificationReceipt(config, issue, reviewPr, workspacePath, 'error', reviewResult?.summary ?? error, reviewResult).catch(() => {});
               }
               await updateRunState(workspacePath, (cur) =>
                 cur
@@ -2188,14 +2217,13 @@ export class Orchestrator {
         }
 
         log('error', 'worker_failed', { ...endFields, event: 'worker_failed', status: 'failed', code });
-        await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
-        await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
-
+        let usageLimitBackoff: { limitKey: string; backoffSeconds: number } | null = null;
         if (code !== null && provider.usage_limit_exit_codes?.includes(code) && provider.usage_limit_backoff_ms > 0) {
           const limitKey = providerLimitKey(provider);
           const backoffUntil = nowMs() + provider.usage_limit_backoff_ms;
           const backoffSeconds = Math.round(provider.usage_limit_backoff_ms / 1000);
           this.providerUsageLimitBackoffUntil.set(limitKey, backoffUntil);
+          usageLimitBackoff = { limitKey, backoffSeconds };
           log('warn', 'provider_usage_limit_backoff', {
             ...endFields,
             event: 'provider_usage_limit_backoff',
@@ -2205,7 +2233,13 @@ export class Orchestrator {
             backoff_ms: provider.usage_limit_backoff_ms,
             backoff_until: new Date(backoffUntil).toISOString(),
           });
-          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${limitKey} dispatches for ${backoffSeconds}s and retry.`);
+        }
+
+        await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
+        await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
+
+        if (usageLimitBackoff) {
+          await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Usage limit reached for ${provider.id} (exit code ${code}). Symphony will pause new ${usageLimitBackoff.limitKey} dispatches for ${usageLimitBackoff.backoffSeconds}s and retry.`);
         } else {
           await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
         }
@@ -2299,6 +2333,63 @@ export class Orchestrator {
           pr_number: detailed.number,
           error: err instanceof Error ? err.message : String(err),
         });
+      });
+    }
+  }
+
+  private async reconcilePullRequestFeedback(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
+    if (!config.review.shepherd_pull_requests) return;
+    const now = nowMs();
+    if (now - this.lastPullRequestFeedbackScanAtMs < 5 * 60 * 1000) return;
+    this.lastPullRequestFeedbackScanAtMs = now;
+
+    let pullRequests: PullRequestRef[];
+    try {
+      pullRequests = await tracker.listOpenPullRequests();
+    } catch (err) {
+      if (isGithubRateLimitError(err)) throw err;
+      log('warn', 'pr_feedback_scan_failed', {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'pr_feedback_scan_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    for (const pr of pullRequests) {
+      if (!this.isSymphonyPullRequest(config, pr) || pr.labels.includes(LABEL_RUNNING)) continue;
+      const reviewState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+      if (!reviewState) continue;
+      const comments = await tracker.listPullRequestReviewComments(pr.number).catch(() => []);
+      const latestCommentId = comments.reduce((latest, comment) => Math.max(latest, comment.id), 0);
+      if (latestCommentId === 0) continue;
+
+      const previousCommentId = reviewState.last_review_comment_id ?? null;
+      if (previousCommentId === null) {
+        await this.writePullRequestReviewState(config, { ...reviewState, last_review_comment_id: latestCommentId });
+        continue;
+      }
+      if (latestCommentId <= previousCommentId) continue;
+
+      await this.writePullRequestReviewState(config, { ...reviewState, last_review_comment_id: latestCommentId });
+      await this.applyLabels(config, pr.number, {
+        add: [LABEL_READY],
+        remove: [LABEL_READY_FOR_HUMAN],
+      });
+      this.appendEpisodeEvent(config, `pr-${pr.number}`, 'pr.feedback_queued', {
+        pr_number: pr.number,
+        head_sha: pr.head_sha,
+        previous_review_comment_id: previousCommentId,
+        latest_review_comment_id: latestCommentId,
+      });
+      log('info', 'pr_feedback_queued', {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: 'pr_feedback_queued',
+        pr_number: pr.number,
+        head_sha: pr.head_sha ?? '',
       });
     }
   }
@@ -2567,18 +2658,23 @@ ${JSON.stringify(episodeSummary, null, 2)}
       receipts: reviewState.receipts,
       github: tracker,
     });
-    if (result.action !== 'blocked') {
-      this.appendEpisodeEvent(config, `pr-${pr.number}`, `merge.${result.action}`, {
-        pr_number: pr.number,
-        issue_number: linkedIssueNumber,
-        head_sha: pr.head_sha,
-        base_sha: pr.base_sha,
-        risk: result.decision.risk,
-        required_reviews: result.decision.required_reviews,
-        merge_sha: result.merge_result?.sha ?? null,
-        message: result.merge_result?.message ?? null,
-      });
-    }
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, `merge.${result.action}`, {
+      pr_number: pr.number,
+      issue_number: linkedIssueNumber,
+      head_sha: pr.head_sha,
+      base_sha: pr.base_sha,
+      policy_version: config.merge.policy_version ?? 'v1',
+      workflow_sha: config.workflow_sha ?? null,
+      risk: result.decision.risk,
+      required_reviews: result.decision.required_reviews,
+      required_evidence: result.decision.required_evidence,
+      observed_evidence: result.decision.observed_evidence,
+      substantive_changed_lines: result.substantive_changed_lines,
+      substantive_changed_files: result.substantive_changed_files,
+      reasons: result.decision.reasons,
+      merge_sha: result.merge_result?.sha ?? null,
+      message: result.merge_result?.message ?? null,
+    });
     log(result.action === 'merged' ? 'info' : 'debug', `autonomous_merge_${result.action}`, {
       repo_id: this.repoId ?? undefined,
       owner: config.tracker.owner,
@@ -2622,18 +2718,48 @@ ${JSON.stringify(episodeSummary, null, 2)}
     }
   }
 
-  private async handlePassingPullRequestReview(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, reason: string): Promise<void> {
-    const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
-    const reviewedAt = new Date().toISOString();
-    const receipt: VerificationReceipt = {
+  private async createVerificationReceipt(
+    config: WorkflowConfig,
+    pr: PullRequestRef,
+    workspacePath: string,
+    verdict: VerificationReceipt['verdict'],
+    reason: string,
+    reviewResult: StructuredReviewResult | null,
+  ): Promise<VerificationReceipt> {
+    const runState = await readRunState(workspacePath).catch(() => null);
+    return {
       receipt_id: randomUUID(),
-      verifier: 'post-run-review',
-      verdict: pr.head_sha && pr.base_sha ? 'pass' : 'unavailable',
+      verifier: reviewResult?.reviewer?.lens ?? 'post-run-review',
+      verdict: pr.head_sha && pr.base_sha ? verdict : 'unavailable',
       head_sha: pr.head_sha ?? '',
       base_sha: pr.base_sha ?? '',
-      evidence: [reason],
-      verified_at: reviewedAt,
+      evidence: reviewResult?.evidence.length
+        ? reviewResult.evidence
+        : [{ kind: 'review', summary: reason, command: null, artifact: null }],
+      verified_at: new Date().toISOString(),
+      policy_version: config.merge.policy_version ?? 'v1',
+      workflow_sha: config.workflow_sha,
+      reviewer: reviewResult?.reviewer ?? {
+        execution_id: randomUUID(),
+        provider: null,
+        model: null,
+        lens: 'post-run-review',
+      },
+      author_execution_id: runState?.agent_thread_id ?? runState?.session_id ?? null,
     };
+  }
+
+  private async handlePassingPullRequestReview(
+    config: WorkflowConfig,
+    issue: Issue,
+    pr: PullRequestRef,
+    workspacePath: string,
+    reviewResult: StructuredReviewResult,
+  ): Promise<void> {
+    const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+    const runState = await readRunState(workspacePath).catch(() => null);
+    const receipt = await this.createVerificationReceipt(config, pr, workspacePath, 'pass', reviewResult.summary, reviewResult);
+    const reviewedAt = receipt.verified_at;
     const nextState: PullRequestReviewState = {
       version: 1,
       pr_number: pr.number,
@@ -2645,17 +2771,24 @@ ${JSON.stringify(episodeSummary, null, 2)}
       verdict: 'pass',
       auto_fix_iterations: previousState?.auto_fix_iterations ?? reviewAutoFixIteration(pr.labels),
       reviewed_at: reviewedAt,
-      reason,
+      reason: reviewResult.summary,
       receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+      last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     };
     await this.writePullRequestReviewState(config, nextState);
 
     let requiresAnotherReview = false;
     if (config.merge.enabled) {
       const tracker = new GithubIssueTrackerClient(config.tracker);
-      const changedPaths = await tracker.listPullRequestFiles(pr.number).catch(() => []);
-      const risk = classifyMergeRisk(config.merge, { labels: pr.labels, changed_paths: changedPaths, target_branch: pr.base_ref });
-      requiresAnotherReview = risk === 'elevated' && freshPassingReceiptCount(pr, nextState) < 2;
+      const changedFiles = await tracker.listPullRequestFileDetails(pr.number).catch(() => []);
+      const changedPaths = changedFiles.map((file) => file.path);
+      const risk = classifyMergeRisk(config.merge, {
+        labels: pr.labels,
+        changed_paths: changedPaths,
+        target_branch: pr.base_ref,
+        ...summarizeSubstantiveChanges(config.merge, changedFiles),
+      });
+      requiresAnotherReview = risk === 'elevated' && freshPassingReceiptCount(config, pr, nextState) < 2;
     }
 
     await this.applyLabels(config, pr.number, {
@@ -2672,21 +2805,47 @@ ${JSON.stringify(episodeSummary, null, 2)}
       pr_number: pr.number,
       issue_number: nextState.issue_number,
       receipt,
-      receipt_count: freshPassingReceiptCount(pr, nextState),
+      receipt_count: freshPassingReceiptCount(config, pr, nextState),
       requires_another_review: requiresAnotherReview,
     });
 
     if (config.merge.enabled && !requiresAnotherReview) {
       const latestPr = await new GithubIssueTrackerClient(config.tracker).fetchPullRequest(pr.number).catch(() => pr);
       if (latestPr) {
-        await this.assessAutonomousMerge(config, new GithubIssueTrackerClient(config.tracker), latestPr, nextState).catch((err) => {
+        const mergeResult = await this.assessAutonomousMerge(config, new GithubIssueTrackerClient(config.tracker), latestPr, nextState).catch((err) => {
           log('warn', 'autonomous_merge_assessment_failed', {
             ...getIssueLogFields(config, issue, this.repoId),
             event: 'autonomous_merge_assessment_failed',
             pr_number: pr.number,
             error: err instanceof Error ? err.message : String(err),
           });
+          return null;
         });
+        const missingEvidence = mergeResult?.decision.reasons.filter((entry) => entry.startsWith('required verification evidence is missing:')) ?? [];
+        if (mergeResult?.action === 'blocked' && missingEvidence.length > 0) {
+          const previousIteration = nextState.auto_fix_iterations;
+          const canRemediate = config.review.auto_fix_review_comments && previousIteration < config.review.number_of_auto_fix_iterations;
+          if (canRemediate) {
+            const nextIteration = previousIteration + 1;
+            nextState.auto_fix_iterations = nextIteration;
+            await this.writePullRequestReviewState(config, nextState);
+            await this.applyLabels(config, pr.number, {
+              add: [LABEL_READY, `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`],
+              remove: [LABEL_READY_FOR_HUMAN, LABEL_RUNNING],
+            });
+            await this.updateLifecycleState(workspacePath, {
+              add: [LABEL_READY, `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`],
+              remove: [LABEL_READY_FOR_HUMAN, LABEL_RUNNING],
+              workflowState: LABEL_READY,
+            });
+            await this.upsertStatus(
+              config,
+              issue,
+              await this.mustReadRunState(workspacePath),
+              `Code review passed, but merge evidence is incomplete. Symphony queued evidence remediation ${nextIteration}/${config.review.number_of_auto_fix_iterations}: ${missingEvidence.join('; ')}`,
+            );
+          }
+        }
       }
     }
   }
@@ -2696,27 +2855,22 @@ ${JSON.stringify(episodeSummary, null, 2)}
     issue: Issue,
     pr: PullRequestRef,
     workspacePath: string,
-    reason: string,
+    reviewResult: StructuredReviewResult,
   ): Promise<void> {
     const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+    const runState = await readRunState(workspacePath).catch(() => null);
     const previousIteration = Math.max(previousState?.auto_fix_iterations ?? 0, reviewAutoFixIteration(pr.labels));
     const sameHeadAlreadyBlocked = previousState?.verdict === 'block' && pullRequestHeadMatchesState(pr, previousState);
+    const needsHuman = reviewNeedsHuman(reviewResult);
     const canAutoFix =
       config.review.auto_fix_review_comments &&
+      !needsHuman &&
       !sameHeadAlreadyBlocked &&
       previousIteration < config.review.number_of_auto_fix_iterations;
     const nextIteration = canAutoFix ? previousIteration + 1 : previousIteration;
     const autoFixLabel = `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`;
-    const reviewedAt = new Date().toISOString();
-    const receipt: VerificationReceipt = {
-      receipt_id: randomUUID(),
-      verifier: 'post-run-review',
-      verdict: pr.head_sha && pr.base_sha ? 'block' : 'unavailable',
-      head_sha: pr.head_sha ?? '',
-      base_sha: pr.base_sha ?? '',
-      evidence: [reason],
-      verified_at: reviewedAt,
-    };
+    const receipt = await this.createVerificationReceipt(config, pr, workspacePath, 'block', reviewResult.summary, reviewResult);
+    const reviewedAt = receipt.verified_at;
 
     await this.writePullRequestReviewState(config, {
       version: 1,
@@ -2729,8 +2883,9 @@ ${JSON.stringify(episodeSummary, null, 2)}
       verdict: 'block',
       auto_fix_iterations: nextIteration,
       reviewed_at: reviewedAt,
-      reason,
+      reason: reviewResult.summary,
       receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+      last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     });
     this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
       pr_number: pr.number,
@@ -2766,7 +2921,9 @@ ${JSON.stringify(episodeSummary, null, 2)}
     });
 
     let status: string;
-    if (canAutoFix) {
+    if (needsHuman) {
+      status = `Post-run review found an ambiguous issue on PR #${pr.number}. Symphony is waiting for human input instead of guessing.`;
+    } else if (canAutoFix) {
       status = `Post-run review found blocking issues on PR #${pr.number}. Symphony queued auto-fix iteration ${nextIteration}/${config.review.number_of_auto_fix_iterations}.`;
     } else if (sameHeadAlreadyBlocked) {
       status = `Post-run review found blocking issues on PR #${pr.number} again, but the PR head did not change since the previous blocking review. Symphony is waiting for human review instead of looping.`;
@@ -2774,27 +2931,22 @@ ${JSON.stringify(episodeSummary, null, 2)}
       status = `Post-run review found blocking issues on PR #${pr.number}. Auto-fix is ${config.review.auto_fix_review_comments ? 'exhausted' : 'disabled'}, so the PR is waiting for human review.`;
     }
 
-    await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `${status} (${reason})`);
+    await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `${status} (${reviewResult.summary})`);
   }
 
   private async recordNonPassingVerificationReceipt(
     config: WorkflowConfig,
     issue: Issue,
     pr: PullRequestRef,
+    workspacePath: string,
     verdict: 'error' | 'unavailable',
     reason: string,
+    reviewResult: StructuredReviewResult | null = null,
   ): Promise<void> {
     const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
-    const reviewedAt = new Date().toISOString();
-    const receipt: VerificationReceipt = {
-      receipt_id: randomUUID(),
-      verifier: 'post-run-review',
-      verdict,
-      head_sha: pr.head_sha ?? '',
-      base_sha: pr.base_sha ?? '',
-      evidence: [reason],
-      verified_at: reviewedAt,
-    };
+    const runState = await readRunState(workspacePath).catch(() => null);
+    const receipt = await this.createVerificationReceipt(config, pr, workspacePath, verdict, reason, reviewResult);
+    const reviewedAt = receipt.verified_at;
     await this.writePullRequestReviewState(config, {
       version: 1,
       pr_number: pr.number,
@@ -2808,6 +2960,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
       reviewed_at: reviewedAt,
       reason,
       receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+      last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     });
     this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
       pr_number: pr.number,
@@ -2831,14 +2984,28 @@ ${JSON.stringify(episodeSummary, null, 2)}
     await client.upsertStatusComment(state.pr_number, REVIEW_STATE_MARKER, formatPullRequestReviewStateComment(state));
   }
 
-  private async writePullRequestReviewPrompt(workspacePath: string, issue: Issue, pr: PullRequestRef): Promise<string> {
+  private async writePullRequestReviewPrompt(
+    config: WorkflowConfig,
+    workspacePath: string,
+    issue: Issue,
+    pr: PullRequestRef,
+  ): Promise<{ path: string; lens: string }> {
     const symphonyDir = path.join(workspacePath, '.symphony');
     await fs.mkdir(symphonyDir, { recursive: true });
     const reviewPromptPath = path.join(symphonyDir, 'review_prompt.md');
     const baseRef = pr.base_ref || 'main';
+    const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+    const priorReviewExecutions = new Set(
+      (previousState?.receipts ?? [])
+        .filter((receipt) => receipt.head_sha === pr.head_sha && receipt.base_sha === pr.base_sha && receipt.reviewer?.execution_id)
+        .map((receipt) => receipt.reviewer!.execution_id),
+    ).size;
+    const lens = config.review.lenses[priorReviewExecutions % config.review.lenses.length] ?? 'staff-engineer';
     const prompt = `You are performing Symphony's post-run review for PR #${pr.number}${pr.url ? ` (${pr.url})` : ''}.
 
 Review from the perspective of a staff engineer. Prioritize actionable issues that matter before merge: correctness bugs, regressions, incomplete requirements, missing or weak tests, maintainability risks, code quality gaps, security or data-safety issues, and avoidable architectural complexity.
+
+Review lens: \`${lens}\`. Apply this lens as an additional focus while still reporting any merge-blocking correctness or safety issue you find.
 
 Preferred flow:
 - If this repository has the \`/code-review\` skill installed, use it to review \`origin/${baseRef}...HEAD\`.
@@ -2859,12 +3026,16 @@ Pull request:
 - Base branch: ${baseRef}
 
 Final response requirements:
-- End with exactly one verdict line: \`REVIEW_VERDICT: PASS\` or \`REVIEW_VERDICT: BLOCK\`.
+- Include exactly one single-line JSON result using this schema:
+  \`SYMPHONY_REVIEW_RESULT: {"verdict":"pass|block|retry","summary":"...","findings":[{"disposition":"actionable|nit|ambiguous","severity":"critical|high|medium|low|nit","summary":"...","file":"path or null","line":123}]}.\`
+- Use disposition \`actionable\` when an agent can make a clear bounded fix, \`nit\` for non-blocking polish, and \`ambiguous\` only when a real product, architecture, security, data-loss, cost, or irreversible decision is required.
+- Use verdict \`retry\` only when review could not complete because of a transient tool, provider, or environment failure.
+- End with exactly one verdict line: \`REVIEW_VERDICT: PASS\`, \`REVIEW_VERDICT: BLOCK\`, or \`REVIEW_VERDICT: RETRY\`.
 - Use \`REVIEW_VERDICT: BLOCK\` only when there are actionable blockers Symphony should send back to an agent or human before merge.
 - Use \`REVIEW_VERDICT: PASS\` when there are no blocking findings. Non-blocking notes are fine, but keep them clearly labeled.
 `;
     await fs.writeFile(reviewPromptPath, prompt, 'utf8');
-    return reviewPromptPath;
+    return { path: reviewPromptPath, lens };
   }
 
   private async prepareConflictResolutionWorkspace(workspacePath: string, conflict: ConflictDispatchOptions): Promise<string> {

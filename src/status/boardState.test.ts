@@ -113,6 +113,8 @@ function makeWorkflowConfig(workspaceRoot: string, repo = 'mdedit'): WorkflowCon
     review: {
       auto_fix_review_comments: false,
       number_of_auto_fix_iterations: 1,
+      shepherd_pull_requests: false,
+      lenses: ['staff-engineer'],
     },
     merge: { enabled: false, dry_run: false, method: 'squash', default_risk: 'standard', rules: [] },
     loops: [],

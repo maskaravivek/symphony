@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,9 +14,7 @@ function jsonResponse(value: unknown): Response {
 test('reconciles a reviewed PR through policy gates and expected-SHA merge', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-merge-flow-'));
   const workflowPath = path.join(root, 'WORKFLOW.md');
-  await fs.writeFile(
-    workflowPath,
-    `---
+  const workflowText = `---
 tracker:
   kind: github
   owner: example
@@ -34,9 +33,9 @@ codex:
 ---
 
 Issue prompt.
-`,
-    'utf8',
-  );
+`;
+  await fs.writeFile(workflowPath, workflowText, 'utf8');
+  const workflowSha = createHash('sha256').update(workflowText).digest('hex');
 
   const pr = {
     number: 42,
@@ -71,6 +70,7 @@ ${JSON.stringify({
     head_sha: 'head-sha',
     base_sha: 'base-sha',
     evidence: ['review passed'],
+    workflow_sha: workflowSha,
     verified_at: '2026-07-10T00:00:00Z',
   }],
 })}

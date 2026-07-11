@@ -203,11 +203,17 @@ Issues labeled `task:spec` or `planning` run in planning-only mode regardless of
 
 When an autonomous run produces a PR, Symphony writes a staff-engineer review prompt to `.symphony/review_prompt.md` and exposes it to `hooks.after_run` as `SYMPHONY_REVIEW_PROMPT_PATH` plus PR metadata such as `SYMPHONY_REVIEW_PR_NUMBER`, `SYMPHONY_REVIEW_PR_HEAD_REF`, and `SYMPHONY_REVIEW_PR_HEAD_SHA`. The prompt asks the review agent to prefer `/code-review` when the target repo has that skill installed, and to fall back to a manual review otherwise.
 
-Review hooks should end with `REVIEW_VERDICT: PASS` or `REVIEW_VERDICT: BLOCK`. Passing reviews produce a structured receipt bound to both the PR head SHA and base SHA. Blocking reviews label the PR `symphony-review:blocking`.
+Review hooks should emit a one-line `SYMPHONY_REVIEW_RESULT` JSON object and end with `REVIEW_VERDICT: PASS`, `BLOCK`, or `RETRY`. Findings are classified as `actionable`, `nit`, or `ambiguous`: actionable blockers can enter the bounded auto-fix loop, nits do not block, and ambiguous decisions go directly to human review. `RETRY` represents a transient reviewer or environment failure rather than a code defect.
+
+Hooks can also emit `SYMPHONY_REVIEWER` and `SYMPHONY_VERIFICATION_EVIDENCE` one-line JSON objects. Receipts record reviewer execution/provider/model/lens, policy version, and typed evidence such as `test`, `integration`, `browser-observation`, or `migration-dry-run`. Every receipt is bound to both the PR head SHA and base SHA.
+
+`review.lenses` provides a small ordered set of repository-owned review perspectives. Fresh review executions on the same head/base cycle through the list, so an elevated PR can receive, for example, one general review and one security/data-safety review without adding a swarm engine to Symphony.
 
 Labels are not the source of truth for whether a PR has already been reviewed. Symphony also maintains a hidden PR comment marked `symphony-review-state:v1` with verification receipts and auto-fix state. A receipt becomes stale when either the head or base changes, so new commits and stacked-PR retargeting require fresh verification.
 
 If `review.auto_fix_review_comments` is true, blocking reviews remove `ready-for-human`, add `ready-for-agent`, and add `symphony-review:auto-fix-N` until `review.number_of_auto_fix_iterations` is exhausted. If a blocking review repeats on the same head SHA, Symphony waits for a human immediately instead of spending more iterations on a PR that did not change. Once exhausted, Symphony leaves the PR `ready-for-human` instead of reviewing or fixing the same PR forever.
+
+With `review.shepherd_pull_requests: true`, Symphony performs a lightweight five-minute reconciliation of its open PRs. New inline review feedback re-queues the existing PR branch through the ordinary review-fix path; the last observed review-comment ID is stored in the durable PR review state so unchanged PRs stay quiet. CI interpretation and flaky-job reruns remain repository-owned rather than generic Symphony behavior.
 
 When GitHub rejects a label write because a managed label does not exist yet, Symphony creates the missing label and retries the write. Hook output is streamed live, but Symphony only retains a bounded tail in memory for verdict parsing and error messages; override the default with `SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES` if needed.
 
@@ -221,15 +227,26 @@ merge:
   dry_run: false
   method: squash
   default_risk: standard
+  policy_version: my-repo-v1
+  require_independent_reviews: true
+  required_evidence:
+    standard: [review]
+    elevated: [review, test]
+  substantive_ignored_paths: ["**/*.test.*", "**/*.md", generated/**]
   rules:
     - risk: elevated
       any_labels: [security]
       paths: [.github/workflows/**, WORKFLOW.md, migrations/**]
+    - risk: elevated
+      min_changed_lines: 800
+      min_changed_files: 30
     - risk: prohibited
       target_branches: [production]
 ```
 
-The highest matching risk wins. `standard` requires one fresh passing verification receipt, `elevated` requires two, and `prohibited` never merges autonomously. A merge also requires an open non-draft PR, a clean merge state, a linked issue, available and successful GitHub checks, no blocking/pause label, current head/base SHAs, and an expected-head-SHA merge request. `dry_run: true` evaluates and records eligibility without merging. Repository rules use only labels, changed-file globs, and target branches; Symphony does not ask an LLM to decide merge eligibility.
+The highest matching risk wins. Rules may match labels, changed-file globs, target branches, or substantive line/file thresholds; matching rules may also add evidence requirements without raising the tier. `standard` requires one fresh passing review, `elevated` requires two, and `prohibited` never merges autonomously. With `require_independent_reviews`, reviewer execution IDs must be distinct and cannot equal the authoring execution. Changing `policy_version` invalidates older receipts, and Symphony automatically binds receipts to the SHA-256 of the complete workflow file so prompt or hook changes also require fresh verification.
+
+A merge also requires every configured evidence kind, an open non-draft PR, a clean merge state, a linked issue, available and successful GitHub checks, no blocking/pause label, current head/base SHAs, and an expected-head-SHA merge request. `dry_run: true` evaluates and records eligibility without merging. Every assessment, including blocked decisions, is written to the episode ledger with the policy version, substantive change size, evidence, and gate reasons. Symphony does not ask an LLM to loosen deterministic merge policy.
 
 When autonomous merge and native epics are both enabled, Symphony also promotes stacked PRs after a predecessor merges: it retargets the child to the surviving base branch, clears stale review labels, and queues fresh review. The prior receipts no longer count because the base changed.
 

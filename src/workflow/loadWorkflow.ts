@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 
 import { getGhAuthToken } from '../github/ghAuth.js';
@@ -348,12 +349,24 @@ function normalizeMergeRisk(value: unknown, keyPath: string, fallback?: MergeRis
 function normalizeMergeRule(value: unknown, index: number): MergeRiskRule {
   const keyPath = `merge.rules[${index}]`;
   if (!isRecord(value)) throw new SymphonyConfigError(`${keyPath} must be an object`);
+  const minChangedLines = asNumber(value.min_changed_lines, `${keyPath}.min_changed_lines`);
+  const minChangedFiles = asNumber(value.min_changed_files, `${keyPath}.min_changed_files`);
+  for (const [name, threshold] of [['min_changed_lines', minChangedLines], ['min_changed_files', minChangedFiles]] as const) {
+    if (threshold !== null && (!Number.isInteger(threshold) || threshold <= 0)) {
+      throw new SymphonyConfigError(`${keyPath}.${name} must be a positive integer`);
+    }
+  }
   return {
     risk: normalizeMergeRisk(value.risk, `${keyPath}.risk`),
     any_labels: normalizeLabelList(value.any_labels, `${keyPath}.any_labels`),
     paths: (asStringArray(value.paths, `${keyPath}.paths`) ?? []).map((path) => path.trim()).filter(Boolean),
     target_branches: (asStringArray(value.target_branches, `${keyPath}.target_branches`) ?? [])
       .map((branch) => branch.trim())
+      .filter(Boolean),
+    min_changed_lines: minChangedLines,
+    min_changed_files: minChangedFiles,
+    required_evidence: (asStringArray(value.required_evidence, `${keyPath}.required_evidence`) ?? [])
+      .map((kind) => normalizeIdentifier(kind))
       .filter(Boolean),
   };
 }
@@ -372,6 +385,19 @@ function normalizeMergeConfig(value: unknown): WorkflowConfig['merge'] {
     dry_run: asBoolean(raw.dry_run, 'merge.dry_run') ?? false,
     method: method as MergeMethod,
     default_risk: normalizeMergeRisk(raw.default_risk, 'merge.default_risk', 'standard'),
+    policy_version: asTrimmedStringOrNull(raw.policy_version, 'merge.policy_version') ?? 'v1',
+    require_independent_reviews: asBoolean(raw.require_independent_reviews, 'merge.require_independent_reviews') ?? false,
+    required_evidence: {
+      standard: (asStringArray(isRecord(raw.required_evidence) ? raw.required_evidence.standard : undefined, 'merge.required_evidence.standard') ?? ['review'])
+        .map((kind) => normalizeIdentifier(kind))
+        .filter(Boolean),
+      elevated: (asStringArray(isRecord(raw.required_evidence) ? raw.required_evidence.elevated : undefined, 'merge.required_evidence.elevated') ?? ['review'])
+        .map((kind) => normalizeIdentifier(kind))
+        .filter(Boolean),
+    },
+    substantive_ignored_paths: (asStringArray(raw.substantive_ignored_paths, 'merge.substantive_ignored_paths') ?? [])
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     rules: (raw.rules as unknown[] | undefined)?.map(normalizeMergeRule) ?? [],
   };
 }
@@ -479,6 +505,11 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
 
   const reviewRaw = isRecord(raw.review) ? raw.review : {};
   const autoFixReviewComments = asBoolean(reviewRaw.auto_fix_review_comments, 'review.auto_fix_review_comments') ?? false;
+  const shepherdPullRequests = asBoolean(reviewRaw.shepherd_pull_requests, 'review.shepherd_pull_requests') ?? false;
+  const reviewLenses = (asStringArray(reviewRaw.lenses, 'review.lenses') ?? ['staff-engineer'])
+    .map((lens) => normalizeIdentifier(lens))
+    .filter(Boolean);
+  if (reviewLenses.length === 0) throw new SymphonyConfigError('review.lenses must contain at least one lens');
   const numberOfAutoFixIterations = asNumber(reviewRaw.number_of_auto_fix_iterations, 'review.number_of_auto_fix_iterations') ?? 1;
   if (
     !Number.isFinite(numberOfAutoFixIterations) ||
@@ -552,6 +583,8 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
     review: {
       auto_fix_review_comments: autoFixReviewComments,
       number_of_auto_fix_iterations: numberOfAutoFixIterations,
+      shepherd_pull_requests: shepherdPullRequests,
+      lenses: reviewLenses,
     },
     merge,
     loops,
@@ -570,6 +603,8 @@ export async function loadWorkflowFromFile(
   const rawConfig = yaml ? parseYaml(yaml) : {};
   const resolved = resolveEnvRefs(rawConfig, env);
   let config = normalizeWorkflowConfig(resolved);
+  const workflowSha = createHash('sha256').update(rawText).digest('hex');
+  config = { ...config, workflow_sha: workflowSha, merge: { ...config.merge, workflow_sha: workflowSha } };
 
   // If no token is provided via env/literal, attempt to use existing `gh` CLI auth.
   // This does not persist to the parent shell, but sets `process.env.GITHUB_TOKEN`

@@ -40,6 +40,8 @@ tracker:
 review:
   auto_fix_review_comments: true
   number_of_auto_fix_iterations: 2
+  shepherd_pull_requests: true
+  lenses: [staff-engineer, security]
 codex:
   command: codex exec -
 `);
@@ -48,6 +50,8 @@ codex:
   assert.deepEqual(loaded.config.review, {
     auto_fix_review_comments: true,
     number_of_auto_fix_iterations: 2,
+    shepherd_pull_requests: true,
+    lenses: ['staff-engineer', 'security'],
   });
 });
 
@@ -66,6 +70,8 @@ codex:
   assert.deepEqual(loaded.config.review, {
     auto_fix_review_comments: false,
     number_of_auto_fix_iterations: 1,
+    shepherd_pull_requests: false,
+    lenses: ['staff-engineer'],
   });
 });
 
@@ -81,11 +87,18 @@ codex:
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
-  assert.deepEqual(loaded.config.merge, {
+  assert.match(loaded.config.workflow_sha ?? '', /^[a-f0-9]{64}$/);
+  assert.equal(loaded.config.merge.workflow_sha, loaded.config.workflow_sha);
+  const { workflow_sha: _workflowSha, ...merge } = loaded.config.merge;
+  assert.deepEqual(merge, {
     enabled: false,
     dry_run: false,
     method: 'squash',
     default_risk: 'standard',
+    policy_version: 'v1',
+    require_independent_reviews: false,
+    required_evidence: { standard: ['review'], elevated: ['review'] },
+    substantive_ignored_paths: [],
     rules: [],
   });
   assert.deepEqual(loaded.config.loops, []);
@@ -103,10 +116,19 @@ merge:
   dry_run: true
   method: rebase
   default_risk: standard
+  policy_version: mdedit-2026-07
+  require_independent_reviews: true
+  required_evidence:
+    standard: [review]
+    elevated: [review, test]
+  substantive_ignored_paths: ["**/*.test.ts", generated/**]
   rules:
     - risk: elevated
       any_labels: [security, migration]
       paths: [apps/api/src/auth/**, .github/workflows/**]
+      min_changed_lines: 500
+      min_changed_files: 20
+      required_evidence: [integration]
     - risk: prohibited
       target_branches: [production]
 loops:
@@ -120,23 +142,36 @@ codex:
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
-  assert.deepEqual(loaded.config.merge, {
+  assert.match(loaded.config.workflow_sha ?? '', /^[a-f0-9]{64}$/);
+  assert.equal(loaded.config.merge.workflow_sha, loaded.config.workflow_sha);
+  const { workflow_sha: _workflowSha, ...merge } = loaded.config.merge;
+  assert.deepEqual(merge, {
     enabled: true,
     dry_run: true,
     method: 'rebase',
     default_risk: 'standard',
+    policy_version: 'mdedit-2026-07',
+    require_independent_reviews: true,
+    required_evidence: { standard: ['review'], elevated: ['review', 'test'] },
+    substantive_ignored_paths: ['**/*.test.ts', 'generated/**'],
     rules: [
       {
         risk: 'elevated',
         any_labels: ['security', 'migration'],
         paths: ['apps/api/src/auth/**', '.github/workflows/**'],
         target_branches: [],
+        min_changed_lines: 500,
+        min_changed_files: 20,
+        required_evidence: ['integration'],
       },
       {
         risk: 'prohibited',
         any_labels: [],
         paths: [],
         target_branches: ['production'],
+        min_changed_lines: null,
+        min_changed_files: null,
+        required_evidence: [],
       },
     ],
   });
@@ -164,6 +199,21 @@ codex:
   command: codex exec -
 `);
   await assert.rejects(() => loadWorkflowFromFile(invalidRiskPath), /merge.default_risk must be standard, elevated, or prohibited/);
+
+  const invalidSizePath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+merge:
+  rules:
+    - risk: elevated
+      min_changed_lines: 0
+codex:
+  command: codex exec -
+`);
+  await assert.rejects(() => loadWorkflowFromFile(invalidSizePath), /merge.rules\[0\].min_changed_lines must be a positive integer/);
 
   const invalidLoopPath = await writeWorkflow(`
 tracker:

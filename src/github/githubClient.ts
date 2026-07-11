@@ -103,6 +103,12 @@ export interface PullRequestCheck {
   url: string | null;
 }
 
+export interface PullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
 export interface MergePullRequestResult {
   merged: boolean;
   message: string;
@@ -499,10 +505,21 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
   }
 
   async listPullRequestFiles(number: number): Promise<string[]> {
+    return (await this.listPullRequestFileDetails(number)).map((file) => file.path);
+  }
+
+  async listPullRequestFileDetails(number: number): Promise<PullRequestFile[]> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}/files`, this.tracker.api_base_url);
     url.searchParams.set('per_page', String(this.tracker.page_size));
-    const raw = await this.fetchAllPages<{ filename?: unknown }>(url.toString());
-    return raw.map((file) => file.filename).filter((filename): filename is string => typeof filename === 'string');
+    const raw = await this.fetchAllPages<{ filename?: unknown; additions?: unknown; deletions?: unknown }>(url.toString());
+    return raw.flatMap((file) => {
+      if (typeof file.filename !== 'string') return [];
+      return [{
+        path: file.filename,
+        additions: typeof file.additions === 'number' ? file.additions : 0,
+        deletions: typeof file.deletions === 'number' ? file.deletions : 0,
+      }];
+    });
   }
 
   async listPullRequestChecks(headSha: string): Promise<PullRequestCheck[]> {

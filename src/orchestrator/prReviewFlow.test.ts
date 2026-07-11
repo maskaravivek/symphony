@@ -386,6 +386,7 @@ test('labels PR passed when post-run review passes', async () => {
   const reviewPrompt = await fs.readFile(path.join(workspaceRoot, 'mangoappstudio_mdedit_42', '.symphony', 'review_prompt.md'), 'utf8');
   assert.match(reviewPrompt, /\/code-review/);
   assert.match(reviewPrompt, /staff engineer/);
+  assert.match(reviewPrompt, /Review lens: `staff-engineer`/);
   assert.match(reviewPrompt, /REVIEW_VERDICT: PASS/);
   assert.ok(
     calls.some(
