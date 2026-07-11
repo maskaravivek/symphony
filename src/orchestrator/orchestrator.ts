@@ -1799,7 +1799,18 @@ export class Orchestrator {
       if (stackContext?.blocked_reason) continue;
       let prReview: PullRequestReviewDispatchOptions | undefined;
       if (entry.mode === 'pr-review') {
-        const pr = await tracker.fetchPullRequest(entry.issue_number).catch(() => null);
+        let pr: PullRequestRef | null;
+        try {
+          pr = await tracker.fetchPullRequest(entry.issue_number);
+        } catch (error) {
+          log('warn', 'retry_dispatch_pr_fetch_failed', {
+            repo_id: this.repoId ?? undefined,
+            issue_id: entry.issue_id,
+            pr_number: entry.issue_number,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          continue;
+        }
         if (!pr) {
           this.deleteDurableRetry(config, entry.issue_id);
           continue;
@@ -1841,12 +1852,20 @@ export class Orchestrator {
         if (capacity.remaining !== null) capacity.remaining -= 1;
         if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
+        if (prReview?.review_key) {
+          const reviewStore = new EpisodeStore(this.storePath(config));
+          try {
+            reviewStore.completeReviewClaim(this.durableRepoId(config), prReview.review_key, 'error');
+          } finally {
+            reviewStore.close();
+          }
+        }
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, candidate, this.repoId),
           event: 'issue_dispatch_failed',
           error: err instanceof Error ? err.message : String(err),
         });
-        await this.scheduleRetry(config, candidate, entry.attempt, 'dispatch_error');
+        await this.scheduleRetry(config, candidate, entry.attempt, 'dispatch_error', entry.workspace_path ?? undefined);
       }
     }
   }
