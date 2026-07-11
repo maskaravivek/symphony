@@ -25,10 +25,12 @@ import { formatPauseComment, parsePauseRequest } from './pauseProtocol.js';
 import { formatStatusComment, statusMarker } from './statusComment.js';
 import { epicStatusMarker, formatEpicStatusComment } from './epicStatusComment.js';
 import { acquireWorkflowLock, type WorkflowLock } from './workflowLock.js';
+import { hasNonQueueableLifecycleLabel } from './lifecycle.js';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { pruneSessionArtifacts, sessionArtifactDirectory } from '../artifacts/sessionArtifacts.js';
 
 interface DispatchCapacity {
   remaining: number | null;
@@ -63,6 +65,10 @@ interface RetryEntry {
   next_run_at_ms: number;
   issue_number: number;
   issue_id: string;
+  issue_identifier: string;
+  reason: string;
+  workspace_path: string | null;
+  mode: AgentMode;
 }
 
 interface ConflictEntry {
@@ -87,6 +93,10 @@ interface PullRequestReviewDispatchOptions {
   head_ref: string;
   head_sha: string | null;
   base_ref: string;
+  base_sha: string | null;
+  originating_issue_number: number | null;
+  review_key: string;
+  lens: string;
 }
 
 interface RunningSession {
@@ -133,7 +143,7 @@ interface EpicStackPlanEntry {
   skipped_reason: string | null;
 }
 
-type PullRequestReviewVerdict = 'pass' | 'block';
+type PullRequestReviewVerdict = 'pass' | 'block' | 'error' | 'unavailable';
 
 interface PullRequestReviewState {
   version: 1;
@@ -250,6 +260,31 @@ function reviewAutoFixIteration(labels: string[]): number {
   return max;
 }
 
+function fingerprint(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function reviewExecutionKey(config: WorkflowConfig, pr: PullRequestRef, lens: string): string {
+  return fingerprint({
+    pr: pr.number,
+    head: pr.head_sha,
+    base: pr.base_sha,
+    policy: config.merge.policy_version ?? 'v1',
+    workflow: config.workflow_sha ?? null,
+    lens,
+  });
+}
+
+function nextReviewLens(config: WorkflowConfig, pr: PullRequestRef, state: PullRequestReviewState | null): string {
+  const completed = new Set(
+    (state?.receipts ?? [])
+      .filter((receipt) => receipt.head_sha === pr.head_sha && receipt.base_sha === pr.base_sha && (receipt.verdict === 'pass' || receipt.verdict === 'block'))
+      .map((receipt) => receipt.reviewer?.lens)
+      .filter((lens): lens is string => Boolean(lens)),
+  );
+  return config.review.lenses.find((lens) => !completed.has(lens)) ?? config.review.lenses[0] ?? 'staff-engineer';
+}
+
 function hookOutputFromError(err: unknown): string {
   if (err instanceof HookScriptError) return err.output;
   return '';
@@ -263,7 +298,7 @@ function parsePullRequestReviewStateComment(body: string): PullRequestReviewStat
     const parsed = JSON.parse(match[1]) as Partial<PullRequestReviewState>;
     if (parsed.version !== 1) return null;
     if (typeof parsed.pr_number !== 'number') return null;
-    if (parsed.verdict !== 'pass' && parsed.verdict !== 'block') return null;
+    if (parsed.verdict !== 'pass' && parsed.verdict !== 'block' && parsed.verdict !== 'error' && parsed.verdict !== 'unavailable') return null;
     return {
       version: 1,
       pr_number: parsed.pr_number,
@@ -349,6 +384,17 @@ function freshPassingReceiptCount(config: WorkflowConfig, pr: PullRequestRef, st
       )
       .map((receipt) => config.merge.require_independent_reviews ? receipt.reviewer!.execution_id : receipt.receipt_id),
   ).size;
+}
+
+function upsertVerificationReceipt(receipts: VerificationReceipt[], receipt: VerificationReceipt): VerificationReceipt[] {
+  const key = (candidate: VerificationReceipt) => fingerprint({
+    head: candidate.head_sha,
+    base: candidate.base_sha,
+    policy: candidate.policy_version ?? 'v1',
+    workflow: candidate.workflow_sha ?? null,
+    lens: candidate.reviewer?.lens ?? candidate.verifier,
+  });
+  return [...receipts.filter((candidate) => key(candidate) !== key(receipt)), receipt].slice(-20);
 }
 
 function shouldWaitForMergeState(value: string | null): boolean {
@@ -453,10 +499,6 @@ function selectAgentProvider(config: WorkflowConfig, issue: Issue): AgentProvide
   return provider;
 }
 
-function resolveAgentLogPath(workspacePath: string, provider: AgentProviderConfig): string {
-  return path.isAbsolute(provider.output_log) ? provider.output_log : path.join(workspacePath, provider.output_log);
-}
-
 function isCodexProvider(provider: AgentProviderConfig): boolean {
   return provider.provider_kind === 'codex' || provider.extract_codex_thread_id;
 }
@@ -503,6 +545,7 @@ export class Orchestrator {
   private githubRateLimitBackoffUntilMs = 0;
   private workflowLock: WorkflowLock | null = null;
   private liveOrphanClaims = new Map<string, LiveOrphanClaim>();
+  private recoveringFinalizations = new Set<string>();
 
   private stopped = false;
   private shutdownController = new AbortController();
@@ -514,8 +557,46 @@ export class Orchestrator {
     this.maxConcurrentAgentsOverride = options.maxConcurrentAgents ?? null;
   }
 
+  private storePath(config: WorkflowConfig): string {
+    return path.join(config.workspace.root, '.symphony', 'episodes.sqlite');
+  }
+
+  private durableRepoId(config: WorkflowConfig): string {
+    return this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`;
+  }
+
+  private loadDurableRetries(config: WorkflowConfig): void {
+    const store = new EpisodeStore(this.storePath(config));
+    try {
+      this.retries = new Map(
+        store.listRetries(this.durableRepoId(config)).map((entry) => [entry.issue_id, {
+          attempt: entry.attempt,
+          next_run_at_ms: Date.parse(entry.next_run_at),
+          issue_number: entry.issue_number,
+          issue_id: entry.issue_id,
+          issue_identifier: entry.issue_identifier,
+          reason: entry.reason,
+          workspace_path: entry.workspace_path,
+          mode: entry.mode as AgentMode,
+        }]),
+      );
+    } finally {
+      store.close();
+    }
+  }
+
+  private deleteDurableRetry(config: WorkflowConfig, issueId: string): void {
+    this.retries.delete(issueId);
+    const store = new EpisodeStore(this.storePath(config));
+    try {
+      store.deleteRetry(this.durableRepoId(config), issueId);
+    } finally {
+      store.close();
+    }
+  }
+
   getRunningCount(): number {
-    return this.running.size + this.runningLoops.size + this.liveOrphanClaims.size;
+    return this.running.size + this.runningLoops.size + this.liveOrphanClaims.size + this.recoveringFinalizations.size;
   }
 
   getRepoId(): string | null {
@@ -589,7 +670,9 @@ export class Orchestrator {
 
     try {
       await this.reconcileRunning(config, trackerClient, workspaceManager);
+      await this.recoverFinalizingRuns(config, trackerClient);
       await this.reconcileOrphanedClaims(config, trackerClient, workspaceManager);
+      this.loadDurableRetries(config);
       await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
       await this.refreshProviderUsageLimitChecks(config);
       const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
@@ -616,6 +699,17 @@ export class Orchestrator {
         });
         return;
       }
+
+      log('info', candidates.length === 0 ? 'candidate_poll_empty' : 'candidate_poll_completed', {
+        repo_id: this.repoId ?? undefined,
+        owner: config.tracker.owner,
+        repo: config.tracker.repo,
+        event: candidates.length === 0 ? 'candidate_poll_empty' : 'candidate_poll_completed',
+        candidate_count: candidates.length,
+        active_count: this.getRunningCount(),
+        retry_count: this.retries.size,
+        capacity_remaining: capacity.remaining,
+      });
 
       if (config.tracker.epics.enabled) await this.reconcileClosedEpicParents(config, trackerClient, candidates);
       const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
@@ -874,8 +968,13 @@ export class Orchestrator {
     this.liveOrphanClaims.clear();
 
     for (const issue of issues) {
+      if (issue.number && issue.labels.includes(LABEL_READY) && hasNonQueueableLifecycleLabel(issue.labels)) {
+        await this.applyLabels(config, issue.number, { remove: [LABEL_READY] });
+        continue;
+      }
       if (!issue.labels.includes(LABEL_RUNNING)) continue;
       if (this.running.has(issue.id)) continue;
+      if (this.recoveringFinalizations.has(issue.id)) continue;
 
       const existingState = await this.readRunStateForIssue(config, issue);
       const { workspace_path: fallbackWorkspacePath } = existingState
@@ -930,6 +1029,79 @@ export class Orchestrator {
             }
           : null,
       );
+    }
+  }
+
+  private async recoverFinalizingRuns(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void> {
+    const states = await scanRunStates(config.workspace.root);
+    for (const state of states.filter((candidate) => candidate.status === 'finalizing' && candidate.issue_number)) {
+      if (this.running.has(state.issue_id) || this.recoveringFinalizations.has(state.issue_id)) continue;
+      const issue = await tracker.fetchIssueByNumber(state.issue_number!).catch(() => null);
+      if (!issue) continue;
+      this.recoveringFinalizations.add(state.issue_id);
+      try {
+        const pauseRequest = parsePauseRequest(await this.readLastMessage(state.last_message_path ?? ''));
+        if (pauseRequest) {
+          await tracker.createIssueComment(issue.number!, formatPauseComment(pauseRequest));
+          await this.applyLabels(config, issue.number!, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING] });
+          await this.updateLifecycleState(state.workspace_path, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING], workflowState: LABEL_NEEDS_INFO });
+          await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'paused', pause_reason: 'needs-info', workflow_outcome: 'paused', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
+          this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.paused', { issue_number: issue.number, session_id: state.session_id, recovered: true });
+          continue;
+        }
+
+        const reviewPr = await this.findReviewPullRequest(config, issue, undefined);
+        let reviewResult: StructuredReviewResult | null = null;
+        if (config.hooks.after_run) {
+          const reviewPrompt = reviewPr ? await this.writePullRequestReviewPrompt(config, state.workspace_path, issue, reviewPr) : null;
+          const context = {
+            workspace_path: state.workspace_path,
+            workspace_strategy: state.workspace_strategy ?? 'durable_issue_workspace',
+            agent_provider: state.agent_provider ?? 'codex',
+            agent_provider_group: state.agent_provider_group ?? '',
+            agent_provider_kind: state.agent_provider_kind ?? '',
+            review_prompt_path: reviewPrompt?.path ?? '',
+            review_pr_number: reviewPr?.number ?? '',
+            review_pr_url: reviewPr?.url ?? '',
+            review_pr_head_ref: reviewPr?.head_ref ?? '',
+            review_pr_head_sha: reviewPr?.head_sha ?? '',
+            review_pr_base_ref: reviewPr?.base_ref ?? '',
+            review_pr_base_sha: reviewPr?.base_sha ?? '',
+            review_issue_number: issueNumberFromPullRequestBody(reviewPr?.body ?? null) ?? issue.number ?? '',
+          };
+          const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: context });
+          const result = await runHookScript(rendered, state.workspace_path, config.hooks.timeout_ms, {
+            env: {
+              SYMPHONY_REVIEW_PROMPT_PATH: reviewPrompt?.path ?? '',
+              SYMPHONY_REVIEW_PR_NUMBER: String(reviewPr?.number ?? ''),
+              SYMPHONY_REVIEW_PR_URL: reviewPr?.url ?? '',
+              SYMPHONY_REVIEW_PR_HEAD_REF: reviewPr?.head_ref ?? '',
+              SYMPHONY_REVIEW_PR_HEAD_SHA: reviewPr?.head_sha ?? '',
+              SYMPHONY_REVIEW_PR_BASE_REF: reviewPr?.base_ref ?? '',
+              SYMPHONY_REVIEW_PR_BASE_SHA: reviewPr?.base_sha ?? '',
+              SYMPHONY_REVIEW_ISSUE_NUMBER: String(context.review_issue_number),
+              SYMPHONY_REVIEW_LENS: reviewPrompt?.lens ?? 'staff-engineer',
+              SYMPHONY_RUN_ARTIFACT_DIR: state.session_artifact_dir ?? path.join(state.workspace_path, '.symphony'),
+              SYMPHONY_LAST_MESSAGE_PATH: state.last_message_path ?? '',
+            },
+            logPath: path.join(state.session_artifact_dir ?? path.join(state.workspace_path, '.symphony'), 'after_run-recovered.log'),
+            signal: this.shutdownController.signal,
+          });
+          reviewResult = reviewPr ? parseStructuredReviewResult(result.output) : null;
+        }
+        if (reviewPr && reviewResult?.verdict === 'block') await this.handleBlockingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
+        if (reviewPr && reviewResult?.verdict === 'pass') await this.handlePassingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
+        if (reviewPr && (!reviewResult || reviewResult.verdict === 'retry')) throw new Error('Recovered finalization did not produce a terminal review verdict');
+
+        if (!reviewPr) await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+        await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'completed', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
+        this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, session_id: state.session_id, recovered: true });
+      } catch (err) {
+        await this.scheduleRetry(config, issue, state.attempt, 'finalization_recovery_failed', state.workspace_path);
+        log('error', 'finalization_recovery_failed', { ...getIssueLogFields(config, issue, this.repoId), error: err instanceof Error ? err.message : String(err) });
+      } finally {
+        this.recoveringFinalizations.delete(state.issue_id);
+      }
     }
   }
 
@@ -1216,6 +1388,24 @@ export class Orchestrator {
 
       const provider = selectAgentProvider(config, issue);
       if (this.dispatchBlockReason(config, issue, provider, capacity)) continue;
+      const lens = nextReviewLens(config, pr, reviewState);
+      const reviewKey = reviewExecutionKey(config, pr, lens);
+      const store = new EpisodeStore(this.storePath(config));
+      let claimed = false;
+      try {
+        claimed = store.claimReview(this.durableRepoId(config), reviewKey, 'running');
+      } finally {
+        store.close();
+      }
+      if (!claimed) {
+        log('info', 'pr_review_skipped_duplicate_execution', {
+          repo_id: this.repoId ?? undefined,
+          pr_number: pr.number,
+          head_sha: pr.head_sha ?? '',
+          lens,
+        });
+        continue;
+      }
 
       try {
         await this.dispatchIssue(config, issue, workspaceManager, {
@@ -1228,10 +1418,20 @@ export class Orchestrator {
             head_ref: pr.head_ref,
             head_sha: pr.head_sha,
             base_ref: pr.base_ref || 'main',
+            base_sha: pr.base_sha,
+            originating_issue_number: issueNumberFromPullRequestBody(pr.body) ?? issue.number,
+            review_key: reviewKey,
+            lens,
           },
         });
         if (capacity.remaining !== null) capacity.remaining -= 1;
       } catch (err) {
+        const failedStore = new EpisodeStore(this.storePath(config));
+        try {
+          failedStore.completeReviewClaim(this.durableRepoId(config), reviewKey, 'error');
+        } finally {
+          failedStore.close();
+        }
         log('error', 'pr_review_dispatch_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
           event: 'pr_review_dispatch_failed',
@@ -1412,7 +1612,7 @@ export class Orchestrator {
       skippedReason = 'terminal_state';
     } else if (!config.tracker.active_states.includes(issue.state)) {
       skippedReason = 'inactive_state';
-    } else if (hasAnyLabel(labels, config.tracker.ignored_labels)) {
+    } else if (hasNonQueueableLifecycleLabel(labels) || hasAnyLabel(labels, config.tracker.ignored_labels)) {
       skippedReason = 'ignored_label';
     } else if (stackPlan && !stackPlan.can_queue) {
       skippedReason = stackPlan.skipped_reason;
@@ -1460,7 +1660,8 @@ export class Orchestrator {
     const now = nowMs();
     for (const entry of [...this.retries.values()].sort((a, b) => a.next_run_at_ms - b.next_run_at_ms)) {
       if (entry.next_run_at_ms > now) continue;
-      const candidate = candidates.find((c) => c.id === entry.issue_id || c.number === entry.issue_number);
+      let candidate = candidates.find((c) => c.id === entry.issue_id || c.number === entry.issue_number) ??
+        await tracker.fetchIssueByNumber(entry.issue_number).catch(() => null);
       if (!candidate) {
         log('info', 'retry_released', {
           repo_id: this.repoId ?? undefined,
@@ -1472,8 +1673,18 @@ export class Orchestrator {
           issue_number: entry.issue_number,
           reason: 'issue_not_candidate',
         });
-        this.retries.delete(entry.issue_id);
+        this.deleteDurableRetry(config, entry.issue_id);
         continue;
+      }
+
+      if (!config.tracker.active_states.includes(candidate.state) || hasNonQueueableLifecycleLabel(candidate.labels) || hasAnyLabel(candidate.labels, config.tracker.ignored_labels)) {
+        this.deleteDurableRetry(config, entry.issue_id);
+        continue;
+      }
+
+      if (!candidate.labels.includes(LABEL_READY)) {
+        await this.applyLabels(config, candidate.number!, { add: [LABEL_READY] });
+        candidate = { ...candidate, labels: [...candidate.labels, LABEL_READY] };
       }
 
       const provider = selectAgentProvider(config, candidate);
@@ -1482,8 +1693,48 @@ export class Orchestrator {
       if (blocked === 'provider_capacity' || blocked === 'usage_limit') continue;
       const stackContext = await this.resolveStackContext(config, tracker, candidate, provider.id);
       if (stackContext?.blocked_reason) continue;
+      let prReview: PullRequestReviewDispatchOptions | undefined;
+      if (entry.mode === 'pr-review') {
+        const pr = await tracker.fetchPullRequest(entry.issue_number).catch(() => null);
+        if (!pr) {
+          this.deleteDurableRetry(config, entry.issue_id);
+          continue;
+        }
+        const state = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+        const lens = nextReviewLens(config, pr, state);
+        const reviewKey = reviewExecutionKey(config, pr, lens);
+        const reviewStore = new EpisodeStore(this.storePath(config));
+        let claimed = false;
+        try {
+          claimed = reviewStore.claimReview(this.durableRepoId(config), reviewKey, 'running');
+        } finally {
+          reviewStore.close();
+        }
+        if (!claimed) {
+          this.deleteDurableRetry(config, entry.issue_id);
+          continue;
+        }
+        prReview = {
+          pr_number: pr.number,
+          pr_url: pr.url,
+          head_ref: pr.head_ref,
+          head_sha: pr.head_sha,
+          base_ref: pr.base_ref || 'main',
+          base_sha: pr.base_sha,
+          originating_issue_number: issueNumberFromPullRequestBody(pr.body) ?? candidate.number,
+          review_key: reviewKey,
+          lens,
+        };
+      }
+      this.deleteDurableRetry(config, entry.issue_id);
       try {
-        await this.dispatchIssue(config, candidate, workspaceManager, { attempt: entry.attempt, provider, stackContext: stackContext?.context ?? null });
+        await this.dispatchIssue(config, candidate, workspaceManager, {
+          attempt: entry.attempt,
+          mode: entry.mode,
+          provider,
+          prReview,
+          stackContext: stackContext?.context ?? null,
+        });
         if (capacity.remaining !== null) capacity.remaining -= 1;
         if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
@@ -1494,7 +1745,6 @@ export class Orchestrator {
         });
         await this.scheduleRetry(config, candidate, entry.attempt, 'dispatch_error');
       }
-      this.retries.delete(entry.issue_id);
     }
   }
 
@@ -1602,6 +1852,8 @@ export class Orchestrator {
       review_pr_head_ref: '',
       review_pr_head_sha: '',
       review_pr_base_ref: '',
+      review_pr_base_sha: '',
+      review_issue_number: '',
     };
     const hookEnv: Record<string, string> = {
       SYMPHONY_REPO_ID: this.repoId ?? '',
@@ -1631,6 +1883,8 @@ export class Orchestrator {
       SYMPHONY_REVIEW_PR_HEAD_REF: '',
       SYMPHONY_REVIEW_PR_HEAD_SHA: '',
       SYMPHONY_REVIEW_PR_BASE_REF: '',
+      SYMPHONY_REVIEW_PR_BASE_SHA: '',
+      SYMPHONY_REVIEW_ISSUE_NUMBER: '',
     };
 
     const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
@@ -1741,14 +1995,19 @@ export class Orchestrator {
     if (opts.mode === 'pr-review' && opts.prReview) {
       pullRequestReviewComments = await new GithubIssueTrackerClient(config.tracker).listPullRequestReviewComments(opts.prReview.pr_number);
     }
-    const lastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
+    const sessionId = randomUUID();
+    const sessionArtifactDir = sessionArtifactDirectory(workspacePath, opts.attempt, sessionId);
+    await fs.mkdir(sessionArtifactDir, { recursive: true });
+    await pruneSessionArtifacts(path.join(workspacePath, '.symphony', 'runs'), { activeDir: sessionArtifactDir });
+    const stableLastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
+    const lastMessagePath = path.join(sessionArtifactDir, 'last_message.md');
     const runContext = await buildRunContext({
       workspacePath,
       comments,
       lastSeenCommentId: existingState?.last_seen_comment_id ?? null,
       pullRequestReviewComments,
       lastSeenPullRequestReviewCommentId: existingState?.last_seen_pr_review_comment_id ?? null,
-      lastMessagePath: existingState?.last_message_path ?? lastMessagePath,
+      lastMessagePath: existingState?.last_message_path ?? stableLastMessagePath,
     });
 
     const handoffInstructions = isInteractiveHandoff
@@ -1788,8 +2047,10 @@ export class Orchestrator {
           runContext.text,
         )
       : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue, { symphony: symphonyContext })}${runContext.text}${stackInstructions}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}`;
-    const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
-    const agentLogPath = resolveAgentLogPath(workspacePath, provider);
+    const generatedPromptPath = await workspaceManager.writePrompt(workspacePath, prompt);
+    const promptPath = path.join(sessionArtifactDir, 'prompt.md');
+    await fs.copyFile(generatedPromptPath, promptPath);
+    const agentLogPath = path.join(sessionArtifactDir, isCodexProvider(provider) ? 'agent.jsonl' : 'agent.stdout.log');
     await fs.mkdir(path.dirname(agentLogPath), { recursive: true });
     const codexCompatible = isCodexProvider(provider);
     const codexJsonlPath = codexCompatible ? agentLogPath : path.join(workspacePath, '.symphony', 'codex.jsonl');
@@ -1809,6 +2070,12 @@ export class Orchestrator {
         ? provider.resume_command
         : provider.command;
     symphonyContext.prompt_path = promptPath;
+    Object.assign(symphonyContext, {
+      session_id: sessionId,
+      run_artifact_dir: sessionArtifactDir,
+      agent_log_path: agentLogPath,
+      last_message_path: lastMessagePath,
+    });
     symphonyContext.agent_thread_id = agentThreadId ?? '';
     symphonyContext.codex_thread_id = codexThreadId ?? '';
     const renderedCommand = await renderTemplate(commandTemplate, {
@@ -1819,6 +2086,10 @@ export class Orchestrator {
     const env: Record<string, string> = {
       ...hookEnv,
       SYMPHONY_PROMPT_PATH: promptPath,
+      SYMPHONY_SESSION_ID: sessionId,
+      SYMPHONY_RUN_ARTIFACT_DIR: sessionArtifactDir,
+      SYMPHONY_AGENT_LOG_PATH: agentLogPath,
+      SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
       SYMPHONY_AGENT_THREAD_ID: agentThreadId ?? '',
       SYMPHONY_CODEX_THREAD_ID: codexThreadId ?? '',
     };
@@ -1850,7 +2121,13 @@ export class Orchestrator {
       codex_mode: codexCompatible ? agentMode : null,
       pause_reason: pauseReason,
       worker_pid: null,
-      status: 'running',
+      session_artifact_dir: sessionArtifactDir,
+      agent_finished_at: null,
+      agent_outcome: null,
+      workflow_outcome: null,
+      retry_reason: null,
+      retry_not_before: null,
+      status: 'agent-running',
       started_at: new Date().toISOString(),
       finished_at: null,
       last_exit_code: null,
@@ -1868,6 +2145,19 @@ export class Orchestrator {
     };
 
     await writeRunState(workspacePath, initialState);
+    await fs.writeFile(path.join(sessionArtifactDir, 'manifest.json'), `${JSON.stringify({
+      version: 1,
+      session_id: sessionId,
+      issue_identifier: issue.identifier,
+      issue_number: issue.number,
+      attempt: opts.attempt,
+      mode: agentMode,
+      provider: provider.id,
+      created_at: initialState.started_at,
+      prompt_path: promptPath,
+      agent_log_path: agentLogPath,
+      last_message_path: lastMessagePath,
+    }, null, 2)}\n`, { mode: 0o600 });
 
     try {
       if (isInteractiveHandoff) {
@@ -1923,6 +2213,9 @@ export class Orchestrator {
       cwd: workspacePath,
       env,
       turnTimeoutMs: provider.turn_timeout_ms,
+      sessionId,
+      stdoutPath: agentLogPath,
+      stderrPath: path.join(sessionArtifactDir, 'agent.stderr.log'),
       logFields: { ...workspaceFields, event: 'worker_started', status: 'running', attempt: opts.attempt, agent_provider: provider.id },
       onStdoutLine: (line) => {
         if (!provider.extract_codex_thread_id) return;
@@ -1942,7 +2235,16 @@ export class Orchestrator {
       },
     });
     const episodeId = `${issue.identifier}:attempt:${opts.attempt}`;
-    this.appendEpisodeEvent(config, episodeId, 'run.started', {
+    this.appendEpisodeEvent(config, episodeId, 'workflow.started', {
+      issue_number: issue.number,
+      issue_identifier: issue.identifier,
+      attempt: opts.attempt,
+      mode: agentMode,
+      provider: provider.id,
+      session_id: agent.session_id,
+      workspace_path: workspacePath,
+    });
+    this.appendEpisodeEvent(config, episodeId, 'agent.started', {
       issue_number: issue.number,
       issue_identifier: issue.identifier,
       attempt: opts.attempt,
@@ -1984,8 +2286,10 @@ export class Orchestrator {
     const done = agent.exit
       .then(async ({ code, signal }) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
-        this.running.delete(issue.id);
-        this.appendEpisodeEvent(config, episodeId, code === 0 && !signal ? 'run.completed' : 'run.failed', {
+        await fs.access(lastMessagePath).catch(async () => {
+          await fs.copyFile(stableLastMessagePath, lastMessagePath).catch(() => {});
+        });
+        this.appendEpisodeEvent(config, episodeId, code === 0 && !signal ? 'agent.completed' : 'agent.failed', {
           issue_number: issue.number,
           issue_identifier: issue.identifier,
           attempt: opts.attempt,
@@ -2002,8 +2306,10 @@ export class Orchestrator {
           if (!cur) return null;
           return {
             ...cur,
-            status: cancelledReason ? 'cancelled' : code === 0 && !signal ? 'completed' : 'failed',
-            finished_at: new Date().toISOString(),
+            status: cancelledReason ? 'cancelled' : code === 0 && !signal ? 'finalizing' : 'failed',
+            agent_finished_at: new Date().toISOString(),
+            agent_outcome: cancelledReason ? 'cancelled' : code === 0 && !signal ? 'completed' : 'failed',
+            finished_at: null,
             last_exit_code: code ?? null,
             last_signal: signal ?? null,
             updated_at: new Date().toISOString(),
@@ -2023,6 +2329,10 @@ export class Orchestrator {
             await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Autonomous run was interrupted. Symphony will retry.');
             await this.scheduleRetry(config, issue, opts.attempt, 'cancelled', workspacePath);
+          } else {
+            this.appendEpisodeEvent(config, episodeId, 'workflow.cancelled', {
+              issue_number: issue.number, session_id: agent.session_id, reason: cancelledReason,
+            });
           }
           return;
         }
@@ -2037,15 +2347,23 @@ export class Orchestrator {
         }
 
         if (code === 0) {
+          this.appendEpisodeEvent(config, episodeId, 'workflow.finalizing', {
+            issue_number: issue.number,
+            issue_identifier: issue.identifier,
+            session_id: agent.session_id,
+            workspace_path: workspacePath,
+          });
           log('info', 'worker_completed', { ...endFields, event: 'worker_completed', status: 'completed', code });
           if (isInteractiveHandoff) {
             await this.pauseForInteractive(config, issue, workspacePath, 'Interactive handoff is ready.');
+            this.appendEpisodeEvent(config, episodeId, 'workflow.paused', { issue_number: issue.number, session_id: agent.session_id, reason: 'interactive' });
             return;
           }
 
           const latestIssue = issue.number ? await new GithubIssueTrackerClient(config.tracker).fetchIssueByNumber(issue.number) : null;
           if (latestIssue?.labels.includes(LABEL_INTERACTIVE)) {
             await this.pauseForInteractive(config, latestIssue, workspacePath, 'Interactive label detected after the autonomous run completed.');
+            this.appendEpisodeEvent(config, episodeId, 'workflow.paused', { issue_number: issue.number, session_id: agent.session_id, reason: 'interactive' });
             return;
           }
 
@@ -2062,6 +2380,7 @@ export class Orchestrator {
               cur ? { ...cur, status: 'paused', pause_reason: 'needs-info', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null,
             );
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Paused for user input. Symphony posted a question on this issue.');
+            this.appendEpisodeEvent(config, episodeId, 'workflow.paused', { issue_number: issue.number, session_id: agent.session_id, reason: 'needs-info' });
             return;
           }
 
@@ -2074,29 +2393,35 @@ export class Orchestrator {
               workflowState: LABEL_READY_FOR_HUMAN,
             });
             await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), 'Planning run completed. Symphony posted the technical specification to this issue.');
+            await this.completeWorkflowState(workspacePath);
+            this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id, outcome: 'planning-posted' });
             return;
           }
 
           const reviewPr = await this.findReviewPullRequest(config, issue, opts.prReview);
           if (reviewPr) {
-            const { path: reviewPromptPath, lens: reviewLens } = await this.writePullRequestReviewPrompt(config, workspacePath, issue, reviewPr);
+            const { path: reviewPromptPath, lens: reviewLens } = await this.writePullRequestReviewPrompt(config, workspacePath, issue, reviewPr, opts.prReview?.lens);
             hookSymphonyContext.review_prompt_path = reviewPromptPath;
             hookSymphonyContext.review_pr_number = String(reviewPr.number);
             hookSymphonyContext.review_pr_url = reviewPr.url ?? '';
             hookSymphonyContext.review_pr_head_ref = reviewPr.head_ref;
             hookSymphonyContext.review_pr_head_sha = reviewPr.head_sha ?? '';
             hookSymphonyContext.review_pr_base_ref = reviewPr.base_ref || 'main';
+            hookSymphonyContext.review_pr_base_sha = reviewPr.base_sha ?? opts.prReview?.base_sha ?? '';
+            hookSymphonyContext.review_issue_number = String(opts.prReview?.originating_issue_number ?? issue.number ?? '');
             env.SYMPHONY_REVIEW_PROMPT_PATH = reviewPromptPath;
             env.SYMPHONY_REVIEW_PR_NUMBER = String(reviewPr.number);
             env.SYMPHONY_REVIEW_PR_URL = reviewPr.url ?? '';
             env.SYMPHONY_REVIEW_PR_HEAD_REF = reviewPr.head_ref;
             env.SYMPHONY_REVIEW_PR_HEAD_SHA = reviewPr.head_sha ?? '';
             env.SYMPHONY_REVIEW_PR_BASE_REF = reviewPr.base_ref || 'main';
+            env.SYMPHONY_REVIEW_PR_BASE_SHA = reviewPr.base_sha ?? opts.prReview?.base_sha ?? '';
+            env.SYMPHONY_REVIEW_ISSUE_NUMBER = String(opts.prReview?.originating_issue_number ?? issue.number ?? '');
             env.SYMPHONY_REVIEW_LENS = reviewLens;
           }
 
           if (config.hooks.after_run) {
-            const afterRunLogPath = hookLogPath(workspacePath, 'after_run');
+            const afterRunLogPath = path.join(sessionArtifactDir, 'after_run.log');
             log('info', 'workspace_after_run_hook_started', { ...endFields, event: 'workspace_after_run_hook_started', hook_log_path: afterRunLogPath });
             try {
               const rendered = await renderTemplate(config.hooks.after_run, { issue, symphony: hookSymphonyContext });
@@ -2110,6 +2435,8 @@ export class Orchestrator {
                 const reviewResult = parseStructuredReviewResult(hookResult.output);
                 if (reviewResult?.verdict === 'block') {
                   await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
+                  await this.completeWorkflowState(workspacePath);
+                  this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id, outcome: 'review-blocked' });
                   return;
                 }
                 if (reviewResult?.verdict === 'pass') {
@@ -2131,6 +2458,14 @@ export class Orchestrator {
             } catch (err) {
               const error = err instanceof Error ? err.message : String(err);
               const reviewResult = reviewPr ? parseStructuredReviewResult(hookOutputFromError(err)) : null;
+              if (opts.prReview?.review_key) {
+                const reviewStore = new EpisodeStore(this.storePath(config));
+                try {
+                  reviewStore.completeReviewClaim(this.durableRepoId(config), opts.prReview.review_key, reviewResult?.verdict === 'block' ? 'block' : 'error');
+                } finally {
+                  reviewStore.close();
+                }
+              }
               if (reviewPr && reviewResult?.verdict === 'block') {
                 log('info', 'workspace_after_run_hook_review_blocked', {
                   ...endFields,
@@ -2140,6 +2475,8 @@ export class Orchestrator {
                   error,
                 });
                 await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
+                await this.completeWorkflowState(workspacePath);
+                this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id, outcome: 'review-blocked' });
                 return;
               }
               log('error', 'workspace_after_run_hook_failed', {
@@ -2183,6 +2520,8 @@ export class Orchestrator {
               await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
               await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
               await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `PR #${dirtyPr.number} has merge conflicts. Symphony queued conflict-resolution mode.`);
+              await this.completeWorkflowState(workspacePath);
+              this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id, outcome: 'conflict-queued' });
               return;
             }
           }
@@ -2213,6 +2552,8 @@ export class Orchestrator {
             await this.mustReadRunState(workspacePath),
             isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
           );
+          await updateRunState(workspacePath, (cur) => cur ? { ...cur, status: 'completed', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
+          this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id });
           return;
         }
 
@@ -2247,17 +2588,6 @@ export class Orchestrator {
       })
       .catch(async (err) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
-        this.running.delete(issue.id);
-        this.appendEpisodeEvent(config, episodeId, 'run.failed', {
-          issue_number: issue.number,
-          issue_identifier: issue.identifier,
-          attempt: opts.attempt,
-          mode: agentMode,
-          provider: provider.id,
-          session_id: agent.session_id,
-          error: err instanceof Error ? err.message : String(err),
-          workspace_path: workspacePath,
-        });
         await updateRunState(workspacePath, (cur) => {
           if (!cur) return null;
           return {
@@ -2282,6 +2612,9 @@ export class Orchestrator {
             .catch(() => {});
         }
         await this.scheduleRetry(config, issue, opts.attempt, 'runner_error', workspacePath);
+      })
+      .finally(() => {
+        this.running.delete(issue.id);
       });
 
     session.done = done;
@@ -2324,6 +2657,20 @@ export class Orchestrator {
       if (!detailed) continue;
       const reviewState = await this.readPullRequestReviewState(config, detailed.number).catch(() => null);
       if (!reviewState || reviewState.verdict !== 'pass') continue;
+      const inputFingerprint = fingerprint({
+        head: detailed.head_sha,
+        base: detailed.base_sha,
+        policy: config.merge.policy_version ?? 'v1',
+        workflow: config.workflow_sha ?? null,
+        receipts: reviewState.receipts,
+      });
+      const assessmentStore = new EpisodeStore(this.storePath(config));
+      try {
+        const previous = assessmentStore.getMergeAssessment(this.durableRepoId(config), detailed.number);
+        if (previous?.input_fingerprint === inputFingerprint && Date.parse(previous.next_check_at) > nowMs()) continue;
+      } finally {
+        assessmentStore.close();
+      }
       await this.assessAutonomousMerge(config, tracker, detailed, reviewState).catch((err) => {
         log('warn', 'autonomous_merge_assessment_failed', {
           repo_id: this.repoId ?? undefined,
@@ -2451,12 +2798,24 @@ export class Orchestrator {
     try {
       store = new EpisodeStore(databasePath);
       for (const loop of config.loops) {
-        const event = store.latest({
+        const triggered = store.latest({
           repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
           episode_id: `loop-${loop.id}`,
           event: 'loop.triggered',
         });
-        if (event) lastTriggeredAt.set(loop.id, event.created_at);
+        const completed = store.latest({ repo_id: this.durableRepoId(config), episode_id: `loop-${loop.id}`, event: 'loop.completed' });
+        const failed = store.latest({ repo_id: this.durableRepoId(config), episode_id: `loop-${loop.id}`, event: 'loop.failed' });
+        const latestTerminal = [completed, failed].filter((event): event is NonNullable<typeof event> => Boolean(event)).sort((a, b) => b.sequence - a.sequence)[0];
+        if (triggered && latestTerminal && latestTerminal.sequence > triggered.sequence) {
+          lastTriggeredAt.set(loop.id, triggered.created_at);
+        } else if (triggered) {
+          store.append({
+            repo_id: this.durableRepoId(config),
+            episode_id: `loop-${loop.id}`,
+            event: 'loop.failed',
+            payload: { loop_id: loop.id, reason: 'orphaned_trigger_recovered' },
+          });
+        }
       }
       recentEvents = store.list({
         repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
@@ -2658,7 +3017,14 @@ ${JSON.stringify(episodeSummary, null, 2)}
       receipts: reviewState.receipts,
       github: tracker,
     });
-    this.appendEpisodeEvent(config, `pr-${pr.number}`, `merge.${result.action}`, {
+    const inputFingerprint = fingerprint({
+      head: pr.head_sha,
+      base: pr.base_sha,
+      policy: config.merge.policy_version ?? 'v1',
+      workflow: config.workflow_sha ?? null,
+      receipts: reviewState.receipts,
+    });
+    const decisionPayload = {
       pr_number: pr.number,
       issue_number: linkedIssueNumber,
       head_sha: pr.head_sha,
@@ -2674,7 +3040,28 @@ ${JSON.stringify(episodeSummary, null, 2)}
       reasons: result.decision.reasons,
       merge_sha: result.merge_result?.sha ?? null,
       message: result.merge_result?.message ?? null,
-    });
+    };
+    const decisionFingerprint = fingerprint({ action: result.action, ...decisionPayload });
+    const store = new EpisodeStore(this.storePath(config));
+    try {
+      const previous = store.getMergeAssessment(this.durableRepoId(config), pr.number);
+      if (result.action !== 'blocked' || previous?.decision_fingerprint !== decisionFingerprint) {
+        this.appendEpisodeEvent(config, `pr-${pr.number}`, `merge.${result.action}`, decisionPayload);
+      }
+      if (result.action === 'merged') {
+        store.clearMergeAssessment(this.durableRepoId(config), pr.number);
+      } else {
+        store.upsertMergeAssessment({
+          repo_id: this.durableRepoId(config),
+          pr_number: pr.number,
+          input_fingerprint: inputFingerprint,
+          decision_fingerprint: decisionFingerprint,
+          next_check_at: new Date(nowMs() + 5 * 60 * 1000).toISOString(),
+        });
+      }
+    } finally {
+      store.close();
+    }
     log(result.action === 'merged' ? 'info' : 'debug', `autonomous_merge_${result.action}`, {
       repo_id: this.repoId ?? undefined,
       owner: config.tracker.owner,
@@ -2772,10 +3159,11 @@ ${JSON.stringify(episodeSummary, null, 2)}
       auto_fix_iterations: previousState?.auto_fix_iterations ?? reviewAutoFixIteration(pr.labels),
       reviewed_at: reviewedAt,
       reason: reviewResult.summary,
-      receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+      receipts: upsertVerificationReceipt(previousState?.receipts ?? [], receipt),
       last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     };
     await this.writePullRequestReviewState(config, nextState);
+    this.completeReviewExecution(config, pr, receipt, 'pass');
 
     let requiresAnotherReview = false;
     if (config.merge.enabled) {
@@ -2884,9 +3272,10 @@ ${JSON.stringify(episodeSummary, null, 2)}
       auto_fix_iterations: nextIteration,
       reviewed_at: reviewedAt,
       reason: reviewResult.summary,
-      receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+      receipts: upsertVerificationReceipt(previousState?.receipts ?? [], receipt),
       last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     });
+    this.completeReviewExecution(config, pr, receipt, 'block');
     this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
       pr_number: pr.number,
       issue_number: issue.number ?? previousState?.issue_number ?? null,
@@ -2955,13 +3344,14 @@ ${JSON.stringify(episodeSummary, null, 2)}
       head_sha: pr.head_sha,
       base_ref: pr.base_ref || 'main',
       base_sha: pr.base_sha,
-      verdict: 'block',
+      verdict,
       auto_fix_iterations: previousState?.auto_fix_iterations ?? reviewAutoFixIteration(pr.labels),
       reviewed_at: reviewedAt,
       reason,
-      receipts: [...(previousState?.receipts ?? []), receipt].slice(-20),
+      receipts: upsertVerificationReceipt(previousState?.receipts ?? [], receipt),
       last_review_comment_id: runState?.last_seen_pr_review_comment_id ?? previousState?.last_review_comment_id ?? null,
     });
+    this.completeReviewExecution(config, pr, receipt, verdict);
     this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
       pr_number: pr.number,
       issue_number: issue.number ?? previousState?.issue_number ?? null,
@@ -2979,6 +3369,16 @@ ${JSON.stringify(episodeSummary, null, 2)}
     return null;
   }
 
+  private completeReviewExecution(config: WorkflowConfig, pr: PullRequestRef, receipt: VerificationReceipt, status: string): void {
+    const lens = receipt.reviewer?.lens ?? receipt.verifier;
+    const store = new EpisodeStore(this.storePath(config));
+    try {
+      store.completeReviewClaim(this.durableRepoId(config), reviewExecutionKey(config, pr, lens), status);
+    } finally {
+      store.close();
+    }
+  }
+
   private async writePullRequestReviewState(config: WorkflowConfig, state: PullRequestReviewState): Promise<void> {
     const client = new GithubIssueTrackerClient(config.tracker);
     await client.upsertStatusComment(state.pr_number, REVIEW_STATE_MARKER, formatPullRequestReviewStateComment(state));
@@ -2989,8 +3389,10 @@ ${JSON.stringify(episodeSummary, null, 2)}
     workspacePath: string,
     issue: Issue,
     pr: PullRequestRef,
+    preferredLens?: string,
   ): Promise<{ path: string; lens: string }> {
-    const symphonyDir = path.join(workspacePath, '.symphony');
+    const runState = await readRunState(workspacePath).catch(() => null);
+    const symphonyDir = runState?.session_artifact_dir ?? path.join(workspacePath, '.symphony');
     await fs.mkdir(symphonyDir, { recursive: true });
     const reviewPromptPath = path.join(symphonyDir, 'review_prompt.md');
     const baseRef = pr.base_ref || 'main';
@@ -3000,7 +3402,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
         .filter((receipt) => receipt.head_sha === pr.head_sha && receipt.base_sha === pr.base_sha && receipt.reviewer?.execution_id)
         .map((receipt) => receipt.reviewer!.execution_id),
     ).size;
-    const lens = config.review.lenses[priorReviewExecutions % config.review.lenses.length] ?? 'staff-engineer';
+    const lens = preferredLens ?? config.review.lenses[priorReviewExecutions % config.review.lenses.length] ?? 'staff-engineer';
     const prompt = `You are performing Symphony's post-run review for PR #${pr.number}${pr.url ? ` (${pr.url})` : ''}.
 
 Review from the perspective of a staff engineer. Prioritize actionable issues that matter before merge: correctness bugs, regressions, incomplete requirements, missing or weak tests, maintainability risks, code quality gaps, security or data-safety issues, and avoidable architectural complexity.
@@ -3035,6 +3437,9 @@ Final response requirements:
 - Use \`REVIEW_VERDICT: PASS\` when there are no blocking findings. Non-blocking notes are fine, but keep them clearly labeled.
 `;
     await fs.writeFile(reviewPromptPath, prompt, 'utf8');
+    if (runState?.session_artifact_dir) {
+      await fs.writeFile(path.join(workspacePath, '.symphony', 'review_prompt.md'), prompt, 'utf8');
+    }
     return { path: reviewPromptPath, lens };
   }
 
@@ -3278,6 +3683,16 @@ ${runContext}`;
     });
   }
 
+  private async completeWorkflowState(workspacePath: string): Promise<void> {
+    await updateRunState(workspacePath, (cur) => cur ? {
+      ...cur,
+      status: 'completed',
+      workflow_outcome: 'completed',
+      finished_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    } : null);
+  }
+
   private async upsertStatus(config: WorkflowConfig, issue: Issue, state: RunState, message: string): Promise<void> {
     if (!issue.number) return;
     const client = new GithubIssueTrackerClient(config.tracker);
@@ -3349,8 +3764,8 @@ ${runContext}`;
   private async scheduleRetry(config: WorkflowConfig, issue: Issue, attempt: number, reason: string, workspacePath?: string): Promise<void> {
     const nextAttempt = attempt + 1;
     if (config.agent.max_attempts !== null && nextAttempt > config.agent.max_attempts) {
-      this.retries.delete(issue.id);
-      this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${attempt}`, 'repair.exhausted', {
+      this.deleteDurableRetry(config, issue.id);
+      this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${attempt}`, 'workflow.failed', {
         issue_number: issue.number,
         issue_identifier: issue.identifier,
         attempt,
@@ -3390,13 +3805,52 @@ ${runContext}`;
     const delayMs = computeBackoffMs(nextAttempt, config.agent.max_retry_backoff_ms);
     const nextAt = nowMs() + delayMs;
 
+    if (issue.number) {
+      await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] }).catch(() => {});
+    }
+    if (workspacePath) {
+      await this.updateLifecycleState(workspacePath, { remove: [LABEL_READY, LABEL_RUNNING], workflowState: 'retry-wait' });
+    }
+
     this.retries.set(issue.id, {
       attempt: nextAttempt,
       next_run_at_ms: nextAt,
       issue_number: issue.number ?? -1,
       issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      reason,
+      workspace_path: workspacePath ?? null,
+      mode: ((workspacePath ? await readRunState(workspacePath) : null)?.agent_mode ?? 'autonomous') as AgentMode,
     });
-    this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${attempt}`, 'repair.scheduled', {
+    const retry = this.retries.get(issue.id)!;
+    const store = new EpisodeStore(this.storePath(config));
+    try {
+      store.upsertRetry({
+        repo_id: this.durableRepoId(config),
+        issue_id: issue.id,
+        issue_number: issue.number ?? -1,
+        issue_identifier: issue.identifier,
+        attempt: nextAttempt,
+        reason,
+        next_run_at: new Date(nextAt).toISOString(),
+        workspace_path: workspacePath ?? null,
+        mode: retry.mode,
+      });
+    } finally {
+      store.close();
+    }
+    if (workspacePath) {
+      await updateRunState(workspacePath, (cur) => cur ? {
+        ...cur,
+        status: 'retry-wait',
+        workflow_outcome: 'retry-scheduled',
+        retry_reason: reason,
+        retry_not_before: new Date(nextAt).toISOString(),
+        worker_pid: null,
+        updated_at: new Date().toISOString(),
+      } : null);
+    }
+    this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${attempt}`, 'workflow.retry_scheduled', {
       issue_number: issue.number,
       issue_identifier: issue.identifier,
       attempt: nextAttempt,

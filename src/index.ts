@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { Orchestrator } from './orchestrator/orchestrator.js';
 import { MultiRepoOrchestrator } from './orchestrator/multiRepoOrchestrator.js';
 import { GithubIssueTrackerClient } from './github/githubClient.js';
-import { log } from './utils/log.js';
+import { configurePersistentLogging, log } from './utils/log.js';
 import { resolveWorkflowPath } from './workflow/resolveWorkflowPath.js';
 import { loadWorkflowFromFile } from './workflow/loadWorkflow.js';
 import { scanRunStates } from './status/scanRunStates.js';
@@ -218,9 +218,11 @@ async function main(): Promise<void> {
     .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
     .option('--once', 'Run a single poll tick, then exit', false)
     .action(async (options: { config?: string; workflow: string; once: boolean }) => {
+      const controlPath = options.config ? resolveConfigPath(options.config) : await resolveWorkflowPath(options.workflow);
+      await configurePersistentLogging(path.join(path.dirname(controlPath), '.symphony', 'logs'), 30);
       const orchestrator = options.config
-        ? new MultiRepoOrchestrator({ configPath: resolveConfigPath(options.config) })
-        : new Orchestrator({ workflowPath: await resolveWorkflowPath(options.workflow) });
+        ? new MultiRepoOrchestrator({ configPath: controlPath })
+        : new Orchestrator({ workflowPath: controlPath });
 
       let shutdownStarted = false;
       let forceExitTimer: NodeJS.Timeout | null = null;
@@ -421,6 +423,37 @@ async function main(): Promise<void> {
         child.on('error', reject);
         child.on('exit', () => resolve());
       });
+    });
+
+  program
+    .command('history')
+    .description('List retained per-session artifacts for an issue number')
+    .argument('<issue_ref>', 'GitHub issue number or repo-qualified ref')
+    .option('-c, --config <path>', 'Path to symphony.config.yml')
+    .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
+    .action(async (issueRef: string, options: { config?: string; workflow: string }) => {
+      const states = await scanStates({ config: options.config, workflow: options.workflow });
+      const selection = selectRunState(states, issueRef);
+      if (!selection.state) {
+        console.log(`No run state found for issue ${issueRef}.`);
+        return;
+      }
+      const root = path.join(selection.state.workspace_path, '.symphony', 'runs');
+      const names = await fs.readdir(root).catch(() => []);
+      const rows = [];
+      for (const name of names.sort().reverse()) {
+        const artifactDir = path.join(root, name);
+        const manifest = await fs.readFile(path.join(artifactDir, 'manifest.json'), 'utf8').then((raw) => JSON.parse(raw) as Record<string, unknown>).catch(() => null);
+        if (!manifest) continue;
+        rows.push({
+          session: manifest.session_id,
+          attempt: manifest.attempt,
+          mode: manifest.mode,
+          created: manifest.created_at,
+          artifacts: artifactDir,
+        });
+      }
+      console.table(rows);
     });
 
   program

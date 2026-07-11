@@ -65,7 +65,11 @@ Symphony writes per-issue artifacts under each workspace:
 - `.symphony/last_message.md` (final agent message)
 - `.symphony/run.json` (run metadata used by `symphony status/open/tail`)
 
+Each dispatch also gets an immutable `.symphony/runs/<timestamp>-<attempt>-<session-id>/` directory containing its manifest, prompt, stdout/stderr, final message, review artifacts, verification snapshot, and hook log. Symphony retains 30 days and at most 50 sessions per active work item.
+
 It also keeps an append-only local event ledger at `<workspace.root>/.symphony/episodes.sqlite`. The ledger stores structured run, verification, loop-trigger, and merge outcome metadata; large prompts and agent output remain file artifacts referenced by path.
+
+Workflow events distinguish agent execution from orchestration finalization: `workflow.started`, `agent.started`, `agent.completed`/`agent.failed`, `workflow.finalizing`, and one terminal or retry workflow event. Historical `run.*` rows remain readable but are no longer emitted. The same database stores durable retries, review claims, and merge-assessment state.
 
 Helper commands:
 
@@ -73,6 +77,7 @@ Helper commands:
 yarn cli -- status --workflow ../mdedit/WORKFLOW.md
 yarn cli -- open 264 --workflow ../mdedit/WORKFLOW.md
 yarn cli -- tail 264 --workflow ../mdedit/WORKFLOW.md
+yarn cli -- history 264 --workflow ../mdedit/WORKFLOW.md
 yarn cli -- dashboard --workflow ../mdedit/WORKFLOW.md
 ```
 
@@ -277,8 +282,11 @@ One due trigger starts one agent run in a durable `_loops/<id>` workspace. The t
   If it can parse a `resetsAt` value for a blocked window, it uses that as a short-lived block backoff until that window resets.
 - `workspace.strategy` is optional and defaults to today's durable per-issue workspace behavior. Supported strategies are `durable_issue_workspace`, `pooled_isolated`, `none_or_readonly`, and `durable_epic_workspace`; hooks and agent commands receive the selected value as `symphony.workspace_strategy` / `SYMPHONY_WORKSPACE_STRATEGY`. Planning agents that must inspect repository files should use `durable_issue_workspace` together with a read-only `handoff_command`; `none_or_readonly` intentionally creates no checkout and is only suitable for source-independent prompts.
 - Each workflow workspace root has a single-runner lock at `.symphony/orchestrator.lock`; a second Symphony process for the same repo skips dispatch while the live owner is running. After a restart, Symphony recovers orphaned `agent-running` claims from older runs by cancelling the stale worker PID when possible, clearing `agent-running`, and re-queueing the issue unless it now has an ignored label.
+- `needs-info`, `interactive`, `ready-for-human`, and `blocked` are always non-queueable, including for epic auto-labeling and durable retries.
+- `run` writes daily structured logs beside its controlling config under `.symphony/logs/`, with owner-only permissions, sensitive-field redaction, and 30-day retention.
 - If a workspace exists but is missing `.git`, Symphony will clear the workspace contents and re-run `hooks.after_create` (to recover from interrupted runs).
 - Hook scripts (`hooks.after_create`, `hooks.before_run`, `hooks.after_run`) are rendered as Liquid templates with `issue.*` available.
 - Agent commands are rendered as Liquid templates with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` / `symphony.agent_provider` / `symphony.agent_thread_id` available.
+- Agent commands also receive `symphony.session_id` plus `SYMPHONY_SESSION_ID`, `SYMPHONY_RUN_ARTIFACT_DIR`, `SYMPHONY_AGENT_LOG_PATH`, and `SYMPHONY_LAST_MESSAGE_PATH`. Review hooks should treat `SYMPHONY_REVIEW_PR_*` as authoritative in PR-review mode.
 - Legacy `codex.command` workflows still work; Symphony converts them into a default `codex` provider internally.
 - Issue and PR creation remain agent/toolchain responsibilities (`gh`, MCP, etc.); Symphony itself owns lifecycle comments/labels and policy-gated merges.

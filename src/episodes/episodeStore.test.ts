@@ -36,3 +36,61 @@ test('persists append-only episode events across store instances', async () => {
   assert.match(events[0]?.created_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(latest?.event, 'run_completed');
 });
+
+test('persists retry queue entries across store instances and removes them explicitly', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-retries-'));
+  const databasePath = path.join(root, 'episodes.sqlite');
+  const first = new EpisodeStore(databasePath);
+  first.upsertRetry({
+    repo_id: 'mdedit',
+    issue_id: 'I_42',
+    issue_number: 42,
+    issue_identifier: 'mangoappstudio/mdedit#42',
+    attempt: 2,
+    reason: 'after_run_failed',
+    next_run_at: '2026-07-11T12:00:00.000Z',
+    workspace_path: '/tmp/workspace',
+    mode: 'autonomous',
+  });
+  first.close();
+
+  const reopened = new EpisodeStore(databasePath);
+  assert.deepEqual(reopened.listRetries('mdedit'), [
+    {
+      repo_id: 'mdedit',
+      issue_id: 'I_42',
+      issue_number: 42,
+      issue_identifier: 'mangoappstudio/mdedit#42',
+      attempt: 2,
+      reason: 'after_run_failed',
+      next_run_at: '2026-07-11T12:00:00.000Z',
+      workspace_path: '/tmp/workspace',
+      mode: 'autonomous',
+    },
+  ]);
+  reopened.deleteRetry('mdedit', 'I_42');
+  assert.deepEqual(reopened.listRetries('mdedit'), []);
+  reopened.close();
+});
+
+test('upserts review claims and merge assessments by durable identity', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-dedup-'));
+  const store = new EpisodeStore(path.join(root, 'episodes.sqlite'));
+  const reviewKey = '646:head:base:policy:workflow:security';
+  assert.equal(store.claimReview('mdedit', reviewKey, 'running'), true);
+  assert.equal(store.claimReview('mdedit', reviewKey, 'running'), false);
+  store.completeReviewClaim('mdedit', reviewKey, 'block');
+  assert.equal(store.getReviewClaim('mdedit', reviewKey)?.status, 'block');
+
+  store.upsertMergeAssessment({
+    repo_id: 'mdedit',
+    pr_number: 650,
+    input_fingerprint: 'input-1',
+    decision_fingerprint: 'decision-1',
+    next_check_at: '2026-07-11T12:05:00.000Z',
+  });
+  assert.equal(store.getMergeAssessment('mdedit', 650)?.decision_fingerprint, 'decision-1');
+  store.clearMergeAssessment('mdedit', 650);
+  assert.equal(store.getMergeAssessment('mdedit', 650), null);
+  store.close();
+});

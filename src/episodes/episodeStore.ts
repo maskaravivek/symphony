@@ -25,6 +25,33 @@ export interface EpisodeEventFilter {
   order?: 'asc' | 'desc';
 }
 
+export interface RetryRecord {
+  repo_id: string;
+  issue_id: string;
+  issue_number: number;
+  issue_identifier: string;
+  attempt: number;
+  reason: string;
+  next_run_at: string;
+  workspace_path: string | null;
+  mode: string;
+}
+
+export interface ReviewClaim {
+  repo_id: string;
+  review_key: string;
+  status: string;
+  updated_at: string;
+}
+
+export interface MergeAssessmentRecord {
+  repo_id: string;
+  pr_number: number;
+  input_fingerprint: string;
+  decision_fingerprint: string;
+  next_check_at: string;
+}
+
 interface EpisodeEventRow {
   sequence: number;
   repo_id: string;
@@ -54,6 +81,33 @@ export class EpisodeStore {
         ON episode_events (repo_id, episode_id, sequence);
       CREATE INDEX IF NOT EXISTS episode_events_event
         ON episode_events (repo_id, event, sequence);
+      CREATE TABLE IF NOT EXISTS retry_queue (
+        repo_id TEXT NOT NULL,
+        issue_id TEXT NOT NULL,
+        issue_number INTEGER NOT NULL,
+        issue_identifier TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        next_run_at TEXT NOT NULL,
+        workspace_path TEXT,
+        mode TEXT NOT NULL,
+        PRIMARY KEY (repo_id, issue_id)
+      );
+      CREATE TABLE IF NOT EXISTS review_claims (
+        repo_id TEXT NOT NULL,
+        review_key TEXT NOT NULL,
+        status TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repo_id, review_key)
+      );
+      CREATE TABLE IF NOT EXISTS merge_assessments (
+        repo_id TEXT NOT NULL,
+        pr_number INTEGER NOT NULL,
+        input_fingerprint TEXT NOT NULL,
+        decision_fingerprint TEXT NOT NULL,
+        next_check_at TEXT NOT NULL,
+        PRIMARY KEY (repo_id, pr_number)
+      );
     `);
   }
 
@@ -145,6 +199,88 @@ export class EpisodeStore {
       payload: JSON.parse(row.payload_json) as Record<string, unknown>,
       created_at: row.created_at,
     };
+  }
+
+  upsertRetry(record: RetryRecord): void {
+    this.database.prepare(`
+      INSERT INTO retry_queue
+        (repo_id, issue_id, issue_number, issue_identifier, attempt, reason, next_run_at, workspace_path, mode)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(repo_id, issue_id) DO UPDATE SET
+        issue_number=excluded.issue_number,
+        issue_identifier=excluded.issue_identifier,
+        attempt=excluded.attempt,
+        reason=excluded.reason,
+        next_run_at=excluded.next_run_at,
+        workspace_path=excluded.workspace_path,
+        mode=excluded.mode
+    `).run(
+      record.repo_id,
+      record.issue_id,
+      record.issue_number,
+      record.issue_identifier,
+      record.attempt,
+      record.reason,
+      record.next_run_at,
+      record.workspace_path,
+      record.mode,
+    );
+  }
+
+  listRetries(repoId: string): RetryRecord[] {
+    const rows = this.database.prepare(`
+      SELECT repo_id, issue_id, issue_number, issue_identifier, attempt, reason, next_run_at, workspace_path, mode
+      FROM retry_queue WHERE repo_id = ? ORDER BY next_run_at, issue_number
+    `).all(repoId) as unknown as RetryRecord[];
+    return rows.map((row) => ({ ...row }));
+  }
+
+  deleteRetry(repoId: string, issueId: string): void {
+    this.database.prepare('DELETE FROM retry_queue WHERE repo_id = ? AND issue_id = ?').run(repoId, issueId);
+  }
+
+  claimReview(repoId: string, reviewKey: string, status: string): boolean {
+    const result = this.database.prepare(`
+      INSERT INTO review_claims (repo_id, review_key, status, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(repo_id, review_key) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
+      WHERE review_claims.status IN ('error', 'unavailable')
+    `).run(repoId, reviewKey, status, new Date().toISOString());
+    return Number(result.changes) === 1;
+  }
+
+  completeReviewClaim(repoId: string, reviewKey: string, status: string): void {
+    this.database.prepare(`
+      INSERT INTO review_claims (repo_id, review_key, status, updated_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(repo_id, review_key) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at
+    `).run(repoId, reviewKey, status, new Date().toISOString());
+  }
+
+  getReviewClaim(repoId: string, reviewKey: string): ReviewClaim | null {
+    return (this.database.prepare(`
+      SELECT repo_id, review_key, status, updated_at FROM review_claims WHERE repo_id = ? AND review_key = ?
+    `).get(repoId, reviewKey) as unknown as ReviewClaim | undefined) ?? null;
+  }
+
+  upsertMergeAssessment(record: MergeAssessmentRecord): void {
+    this.database.prepare(`
+      INSERT INTO merge_assessments (repo_id, pr_number, input_fingerprint, decision_fingerprint, next_check_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(repo_id, pr_number) DO UPDATE SET
+        input_fingerprint=excluded.input_fingerprint,
+        decision_fingerprint=excluded.decision_fingerprint,
+        next_check_at=excluded.next_check_at
+    `).run(record.repo_id, record.pr_number, record.input_fingerprint, record.decision_fingerprint, record.next_check_at);
+  }
+
+  getMergeAssessment(repoId: string, prNumber: number): MergeAssessmentRecord | null {
+    return (this.database.prepare(`
+      SELECT repo_id, pr_number, input_fingerprint, decision_fingerprint, next_check_at
+      FROM merge_assessments WHERE repo_id = ? AND pr_number = ?
+    `).get(repoId, prNumber) as unknown as MergeAssessmentRecord | undefined) ?? null;
+  }
+
+  clearMergeAssessment(repoId: string, prNumber: number): void {
+    this.database.prepare('DELETE FROM merge_assessments WHERE repo_id = ? AND pr_number = ?').run(repoId, prNumber);
   }
 
   close(): void {

@@ -2,7 +2,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export type RunStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+export type RunStatus = 'agent-running' | 'finalizing' | 'retry-wait' | 'completed' | 'failed' | 'cancelled' | 'paused' | 'running';
+
+export type AgentOutcome = 'completed' | 'failed' | 'cancelled' | null;
+export type WorkflowOutcome = 'completed' | 'failed' | 'cancelled' | 'paused' | 'retry-scheduled' | null;
 
 export type AgentMode = 'autonomous' | 'interactive-handoff' | 'planning' | 'resolve-conflicts' | 'pr-review';
 export type CodexMode = AgentMode;
@@ -38,6 +41,12 @@ export interface RunState {
   codex_mode: CodexMode | null;
   pause_reason: PauseReason;
   worker_pid: number | null;
+  session_artifact_dir?: string | null;
+  agent_finished_at?: string | null;
+  agent_outcome?: AgentOutcome;
+  workflow_outcome?: WorkflowOutcome;
+  retry_reason?: string | null;
+  retry_not_before?: string | null;
 
   status: RunStatus;
   started_at: string | null;

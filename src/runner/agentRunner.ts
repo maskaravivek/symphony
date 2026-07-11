@@ -2,6 +2,7 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import type { Readable } from 'node:stream';
+import fs from 'node:fs';
 
 import { SymphonyRuntimeError } from '../utils/errors.js';
 import { log, type LogFields } from '../utils/log.js';
@@ -13,6 +14,9 @@ export interface AgentRunOptions {
   turnTimeoutMs: number;
   logFields: LogFields;
   onStdoutLine?: (line: string) => void;
+  sessionId?: string;
+  stdoutPath?: string;
+  stderrPath?: string;
 }
 
 export interface AgentRunResult {
@@ -27,13 +31,19 @@ function attachOutputLogger(
   stream: 'stdout' | 'stderr',
   fields: LogFields,
   onLine?: (line: string) => void,
+  outputPath?: string,
 ): void {
+  const output = outputPath ? fs.createWriteStream(outputPath, { flags: 'a', mode: 0o600 }) : null;
+  if (output) child[stream].pipe(output);
   const rl = createInterface({ input: child[stream] });
   rl.on('line', (line) => {
     log('debug', 'agent_output', { ...fields, event: 'agent_output', stream, line });
     if (stream === 'stdout') onLine?.(line);
   });
-  child.on('exit', () => rl.close());
+  child.on('exit', () => {
+    rl.close();
+    output?.end();
+  });
 }
 
 function signalProcessGroup(child: ChildProcessByStdio<null, Readable, Readable>, signal: NodeJS.Signals): void {
@@ -73,7 +83,7 @@ async function killProcess(
 }
 
 export function runAgent(options: AgentRunOptions): AgentRunResult {
-  const sessionId = randomUUID();
+  const sessionId = options.sessionId ?? randomUUID();
 
   const child = spawn(options.command, {
     cwd: options.cwd,
@@ -84,8 +94,8 @@ export function runAgent(options: AgentRunOptions): AgentRunResult {
   });
 
   const fields = { ...options.logFields, session_id: sessionId };
-  attachOutputLogger(child, 'stdout', fields, options.onStdoutLine);
-  attachOutputLogger(child, 'stderr', fields);
+  attachOutputLogger(child, 'stdout', fields, options.onStdoutLine, options.stdoutPath);
+  attachOutputLogger(child, 'stderr', fields, undefined, options.stderrPath);
 
   const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.on('error', (err) => reject(err));

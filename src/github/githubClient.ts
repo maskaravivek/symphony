@@ -1,4 +1,5 @@
 import type { Issue } from '../domain/issue.js';
+import { hasNonQueueableLifecycleLabel } from '../orchestrator/lifecycle.js';
 import type { EpicTreeNode } from '../domain/epic.js';
 import type { GithubTrackerConfig } from '../workflow/types.js';
 import { SymphonyRuntimeError } from '../utils/errors.js';
@@ -697,6 +698,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
 
     const filtered: Issue[] = [];
     for (const issue of issues) {
+      if (hasNonQueueableLifecycleLabel(issue.labels)) continue;
       const labels = new Set(issue.labels);
       let hasAllRequired = true;
       for (const r of required) {

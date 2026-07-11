@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type LogFormat = 'pretty' | 'json';
 type LogDetail = 'compact' | 'full';
@@ -30,6 +34,36 @@ const COLOR: Record<LogLevel | 'muted' | 'field', string> = {
 };
 
 const RESET = '\u001b[0m';
+let persistentLogDirectory: string | null = null;
+
+function redactFields(fields: LogFields): LogFields {
+  return Object.fromEntries(Object.entries(fields).map(([key, value]) => {
+    if (/(token|secret|password|authorization|cookie)/i.test(key)) return [key, '[REDACTED]'];
+    return [key, value];
+  }));
+}
+
+export async function configurePersistentLogging(directory: string, retentionDays = 30): Promise<void> {
+  persistentLogDirectory = path.resolve(directory);
+  await fsp.mkdir(persistentLogDirectory, { recursive: true, mode: 0o700 });
+  await fsp.chmod(persistentLogDirectory, 0o700);
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  for (const name of await fsp.readdir(persistentLogDirectory)) {
+    if (!/^symphony-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) continue;
+    const file = path.join(persistentLogDirectory, name);
+    const stat = await fsp.stat(file).catch(() => null);
+    if (stat && stat.mtimeMs < cutoff) await fsp.rm(file, { force: true });
+  }
+}
+
+function persistLog(level: LogLevel, message: string, fields: LogFields): void {
+  if (!persistentLogDirectory) return;
+  const now = new Date();
+  const file = path.join(persistentLogDirectory, `symphony-${now.toISOString().slice(0, 10)}.jsonl`);
+  const payload = JSON.stringify({ ts: now.toISOString(), level, message, ...redactFields(fields) });
+  fs.appendFileSync(file, `${payload}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(file, 0o600);
+}
 
 function currentLogLevel(): LogLevel {
   const raw = process.env.SYMPHONY_LOG_LEVEL?.trim().toLowerCase();
@@ -188,6 +222,7 @@ export function formatPrettyLogLine(level: LogLevel, message: string, fields: Lo
 
 export function log(level: LogLevel, message: string, fields: LogFields = {}): void {
   if (LEVEL_PRIORITY[level] < LEVEL_PRIORITY[currentLogLevel()]) return;
+  persistLog(level, message, fields);
   const line =
     currentLogFormat() === 'json'
       ? JSON.stringify({
