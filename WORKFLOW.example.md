@@ -74,7 +74,9 @@ workspace:
   clean_on_terminal: false
   strategy:
     implementation: pooled_isolated
-    planning: none_or_readonly
+    # Planning still needs repository context; the agent uses handoff_command
+    # below, which runs Codex with a read-only sandbox.
+    planning: durable_issue_workspace
     epic:
       stacked: durable_epic_workspace
       independent: pooled_isolated

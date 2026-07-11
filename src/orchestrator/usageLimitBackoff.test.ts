@@ -534,7 +534,18 @@ tracker:
   ignored_labels: [blocked, ready-for-human, wontfix]
 workspace:
   root: ${workspaceRoot}
+  strategy:
+    planning: durable_issue_workspace
 hooks:
+  after_create: |
+    git init -q
+    printf "checked out" > repository-context.txt
+    git add repository-context.txt
+    git -c user.name=Symphony -c user.email=symphony@localhost commit -qm "fixture checkout"
+  before_run: |
+    test -d .git
+    mkdir -p .symphony
+    printf "prepared" > .symphony/planning-workspace.txt
   after_run: exit 1
 agent:
   max_concurrent_agents: 1
@@ -544,8 +555,8 @@ agents:
     codex:
       provider_group: codex
       provider_kind: codex
-      command: bash -c 'printf "Detailed plan" > .symphony/last_message.md'
-      handoff_command: bash -c 'printf "Detailed plan" > .symphony/last_message.md'
+      command: bash -c 'exit 9'
+      handoff_command: bash -c 'test -d .git && printf "Detailed plan" > .symphony/last_message.md'
       output_log: .symphony/codex.jsonl
 ---
 
@@ -644,6 +655,9 @@ test('planning issues post the final message as an issue comment and skip after_
     await orchestrator.tickOnce();
     await waitFor(() => commentBodies(calls, 50).some((body) => body.includes('## Symphony Technical Specification') && body.includes('Detailed plan')));
     assert.ok(commentBodies(calls, 50).some((body) => body.includes('Detailed plan')), 'planning result should be posted as an issue comment');
+    const workspacePath = path.join(workspaceRoot, 'mangoappstudio_mdedit_50');
+    assert.equal(await fs.stat(path.join(workspacePath, '.git')).then((value) => value.isDirectory()), true);
+    assert.equal(await fs.readFile(path.join(workspacePath, '.symphony', 'planning-workspace.txt'), 'utf8'), 'prepared');
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;

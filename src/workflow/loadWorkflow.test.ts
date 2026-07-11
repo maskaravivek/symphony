@@ -284,6 +284,13 @@ codex:
   });
 });
 
+test('ships checked-out read-only planning runs in the example workflow', async () => {
+  const loaded = await loadWorkflowFromFile(path.resolve('WORKFLOW.example.md'));
+
+  assert.equal(loaded.config.workspace.strategy.planning, 'durable_issue_workspace');
+  assert.match(loaded.config.agents.providers.codex?.handoff_command ?? '', /-s read-only/);
+});
+
 test('loads workspace strategies', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:
