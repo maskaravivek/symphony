@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import type { Issue } from '../domain/issue.js';
 import { writeRunState, type RunState } from '../status/runState.js';
 import type { WorkspaceConfig } from '../workflow/types.js';
 import { WorkspaceManager } from './workspaceManager.js';
+
+const execFileAsync = promisify(execFile);
 
 function issue(number: number): Issue {
   return {
@@ -111,4 +115,18 @@ test('pooled workspaces skip running slots', async () => {
   assert.equal(allocated.workspace_path, path.join(root, '_pool_2'));
   assert.equal(allocated.strategy, 'pooled_isolated');
   assert.equal(allocated.is_new, true);
+});
+
+test('hasGitRepo rejects leftover .git directories that are not worktrees', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-workspace-git-validation-'));
+  const manager = new WorkspaceManager(workspaceConfig(root));
+  const brokenWorkspace = path.join(root, 'broken');
+  const validWorkspace = path.join(root, 'valid');
+
+  await fs.mkdir(path.join(brokenWorkspace, '.git'), { recursive: true });
+  await fs.mkdir(validWorkspace, { recursive: true });
+  await execFileAsync('git', ['init', '--quiet'], { cwd: validWorkspace });
+
+  assert.equal(await manager.hasGitRepo(brokenWorkspace), false);
+  assert.equal(await manager.hasGitRepo(validWorkspace), true);
 });

@@ -3047,6 +3047,7 @@ export class Orchestrator {
     const provider = config.agents.providers[loop.provider ?? config.agents.default];
     if (!provider) throw new SymphonyConfigError(`scheduled loop ${loop.id} references an unknown provider`);
     const workspacePath = path.join(config.workspace.root, '_loops', loop.id);
+    const lastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
     const workspaceManager = new WorkspaceManager(config.workspace, 1);
     await fs.mkdir(workspacePath, { recursive: true });
 
@@ -3078,6 +3079,7 @@ export class Orchestrator {
       agent_provider_group: provider.provider_group,
       agent_provider_kind: provider.provider_kind,
       loop_id: loop.id,
+      last_message_path: lastMessagePath,
     };
     const env: Record<string, string> = {
       SYMPHONY_REPO_ID: this.repoId ?? '',
@@ -3090,6 +3092,7 @@ export class Orchestrator {
       SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
       SYMPHONY_AGENT_PROVIDER_KIND: provider.provider_kind,
       SYMPHONY_LOOP_ID: loop.id,
+      SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
     };
 
     const hasGitRepo = await workspaceManager.hasGitRepo(workspacePath);

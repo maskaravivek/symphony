@@ -39,14 +39,17 @@ loops:
     interval_ms: 86400000
     prompt: Run one quality pass.
 codex:
-  command: bash -lc 'echo run >> loop-runs.txt; echo done > .symphony/last_message.md'
+  command: bash -lc 'printf "%s" "$SYMPHONY_LAST_MESSAGE_PATH" > loop-last-message-path.txt; echo run >> loop-runs.txt; echo done > "$SYMPHONY_LAST_MESSAGE_PATH"'
 ---
 
 Issue prompt.
 `,
     'utf8',
   );
-  const marker = path.join(root, 'workspaces', '_loops', 'quality', 'loop-runs.txt');
+  const loopWorkspace = path.join(root, 'workspaces', '_loops', 'quality');
+  const marker = path.join(loopWorkspace, 'loop-runs.txt');
+  const observedLastMessagePath = path.join(loopWorkspace, 'loop-last-message-path.txt');
+  const expectedLastMessagePath = path.join(loopWorkspace, '.symphony', 'last_message.md');
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
 
@@ -64,4 +67,6 @@ Issue prompt.
   }
 
   assert.equal((await fs.readFile(marker, 'utf8')).trim(), 'run');
+  assert.equal(await fs.readFile(observedLastMessagePath, 'utf8'), expectedLastMessagePath);
+  assert.equal((await fs.readFile(expectedLastMessagePath, 'utf8')).trim(), 'done');
 });

@@ -1,11 +1,15 @@
+import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type { Issue } from '../domain/issue.js';
 import { readRunState } from '../status/runState.js';
 import { SymphonyConfigError } from '../utils/errors.js';
 import type { WorkspaceConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { assertPathWithinRoot } from '../utils/fs.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface WorkspaceInfo {
   workspace_path: string;
@@ -97,8 +101,15 @@ export class WorkspaceManager {
   async hasGitRepo(workspacePath: string): Promise<boolean> {
     assertPathWithinRoot(this.config.root, workspacePath);
     try {
-      await fs.access(path.join(workspacePath, '.git'));
-      return true;
+      const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: workspacePath,
+        timeout: 10_000,
+      });
+      const [gitTopLevel, canonicalWorkspacePath] = await Promise.all([
+        fs.realpath(stdout.trim()),
+        fs.realpath(workspacePath),
+      ]);
+      return gitTopLevel === canonicalWorkspacePath;
     } catch {
       return false;
     }
