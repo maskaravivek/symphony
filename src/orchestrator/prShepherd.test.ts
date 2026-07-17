@@ -61,6 +61,7 @@ Prompt.
     if (url.endsWith('/pulls/42/comments?per_page=50')) {
       return jsonResponse([{ id: 11, body: '**P2 Badge** Please cover the empty state.', user: { login: 'chatgpt-codex-connector[bot]' } }]);
     }
+    if (url.endsWith('/issues/42/reactions?per_page=50')) return jsonResponse([]);
     if (url.endsWith('/issues/42/comments') && method === 'POST') return jsonResponse({ id: 13, body: String(body) });
     if (url.endsWith('/issues/42/labels') && method === 'POST') return jsonResponse([]);
     if (url.endsWith('/issues/42/labels/ready-for-human') && method === 'DELETE') return new Response(null, { status: 204 });
@@ -85,6 +86,7 @@ Prompt.
   assert.match(JSON.stringify(stateUpdate?.body), /last_review_comment_id.*11/);
   assert.match(JSON.stringify(stateUpdate?.body), /pending.*true/);
   assert.match(JSON.stringify(stateUpdate?.body), /feedback_round.*1/);
+  assert.match(JSON.stringify(stateUpdate?.body), /blocking_feedback_round.*0/);
   assert.match(JSON.stringify(stateUpdate?.body), /has_blocking_feedback.*false/);
 });
 
@@ -147,9 +149,11 @@ Prompt.
     }
     if (url.endsWith('/issues/42/comments?per_page=50')) return jsonResponse([{ id: 1, body: feedbackState }]);
     if (url.endsWith('/pulls/42/comments?per_page=50')) return jsonResponse([{ id: 11, body: '[P1] Still broken.' }]);
+    if (url.endsWith('/issues/42/reactions?per_page=50')) return jsonResponse([]);
     if (url.endsWith('/issues/42/labels') && method === 'POST') return jsonResponse([]);
     if (url.endsWith('/issues/42/labels/ready-for-agent') && method === 'DELETE') return new Response(null, { status: 204 });
     if (url.endsWith('/issues/42/labels/agent-running') && method === 'DELETE') return new Response(null, { status: 204 });
+    if (url.endsWith('/issues/42/labels/symphony-review%3Apassed') && method === 'DELETE') return new Response(null, { status: 204 });
     if (url.endsWith('/issues/comments/1') && method === 'PATCH') return jsonResponse({ id: 1, body: String(body) });
     throw new Error(`Unexpected fetch ${method} ${url}`);
   };
@@ -165,9 +169,14 @@ Prompt.
     globalThis.fetch = originalFetch;
   }
 
-  assert.ok(calls.some((call) => call.url.endsWith('/issues/42/labels') && JSON.stringify(call.body) === JSON.stringify({ labels: ['ready-for-human'] })));
+  assert.ok(calls.some(
+    (call) =>
+      call.url.endsWith('/issues/42/labels') &&
+      JSON.stringify(call.body) === JSON.stringify({ labels: ['ready-for-human', 'symphony-review:blocking'] }),
+  ));
   const stateUpdate = calls.find((call) => call.url.endsWith('/issues/comments/1') && call.method === 'PATCH');
   assert.match(JSON.stringify(stateUpdate?.body), /feedback_round.*2/);
+  assert.match(JSON.stringify(stateUpdate?.body), /blocking_feedback_round.*2/);
   assert.match(JSON.stringify(stateUpdate?.body), /exhausted.*true/);
   assert.match(JSON.stringify(stateUpdate?.body), /pending.*false/);
 });
@@ -261,7 +270,7 @@ Prompt.
   assert.ok(!calls.some((call) => call.url.endsWith('/issues/42/labels') && /ready-for-agent/.test(JSON.stringify(call.body))));
 });
 
-test('does not reuse a Codex thumbs-up that predates the current head', async () => {
+test('does not reuse a Codex thumbs-up when the observed PR head changed', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-shepherd-stale-codex-pass-'));
   const workflowPath = path.join(root, 'WORKFLOW.md');
   await fs.writeFile(workflowPath, `---
@@ -283,12 +292,28 @@ codex:
 Prompt.
 `, 'utf8');
   const { config } = await loadWorkflowFromFile(workflowPath);
-  const calls: Array<{ url: string; method: string }> = [];
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const feedbackState = `<!-- symphony-pr-feedback-state:v1 -->\n\`\`\`json\n${JSON.stringify({
+    version: 1,
+    pr_number: 42,
+    last_issue_comment_id: null,
+    last_review_comment_id: null,
+    pending: false,
+    feedback_round: 1,
+    blocking_feedback_round: 0,
+    observed_head_sha: 'old-head',
+    priorities: [],
+    has_blocking_feedback: false,
+    exhausted: false,
+    last_codex_approval_reaction_id: null,
+    updated_at: '2026-07-17T04:00:00Z',
+  })}\n\`\`\``;
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? 'GET';
-    calls.push({ url, method });
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
     if (url.endsWith('/pulls?state=open&per_page=50')) {
       return jsonResponse([{
         number: 42,
@@ -303,14 +328,17 @@ Prompt.
         mergeable_state: 'clean',
       }]);
     }
-    if (url.endsWith('/issues/42/comments?per_page=50')) return jsonResponse([]);
+    if (url.endsWith('/issues/42/comments?per_page=50')) return jsonResponse([{ id: 1, body: feedbackState }]);
     if (url.endsWith('/pulls/42/comments?per_page=50')) return jsonResponse([]);
     if (url.endsWith('/issues/42/reactions?per_page=50')) {
-      return jsonResponse([{ id: 91, content: '+1', created_at: '2026-07-17T04:19:12Z', user: { login: 'chatgpt-codex-connector[bot]' } }]);
+      return jsonResponse([{ id: 91, content: '+1', created_at: '2026-07-17T04:30:00Z', user: { login: 'chatgpt-codex-connector[bot]' } }]);
     }
     if (url.endsWith('/pulls/42/commits?per_page=50')) {
       return jsonResponse([{ sha: 'new-head', commit: { committer: { date: '2026-07-17T04:25:00Z' } } }]);
     }
+    if (url.endsWith('/issues/comments/1') && method === 'PATCH') return jsonResponse({ id: 1, body: String(body) });
+    if (url.endsWith('/issues/42/labels') && method === 'POST') return jsonResponse([]);
+    if (url.startsWith('https://api.github.test/repos/example/app/issues/42/labels/') && method === 'DELETE') return new Response(null, { status: 204 });
     throw new Error(`Unexpected fetch ${method} ${url}`);
   };
 
@@ -325,5 +353,11 @@ Prompt.
     globalThis.fetch = originalFetch;
   }
 
-  assert.ok(!calls.some((call) => call.method !== 'GET'));
+  assert.ok(!calls.some((call) => /symphony-review-state:v1/.test(JSON.stringify(call.body))));
+  const stateUpdate = calls.find((call) => call.url.endsWith('/issues/comments/1') && call.method === 'PATCH');
+  assert.match(JSON.stringify(stateUpdate?.body), /observed_head_sha.*new-head/);
+  assert.match(JSON.stringify(stateUpdate?.body), /last_codex_approval_reaction_id.*91/);
+  assert.ok(calls.some(
+    (call) => call.url.endsWith('/issues/42/labels') && /ready-for-human/.test(JSON.stringify(call.body)),
+  ));
 });

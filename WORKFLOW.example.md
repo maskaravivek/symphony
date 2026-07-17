@@ -88,13 +88,34 @@ hooks:
     cache_root="${SYMPHONY_CACHE_ROOT:-$HOME/.symphony/cache/mdedit}"
     mirror="$cache_root/repo.git"
     mirror_lock="$cache_root/repo.git.lock"
+    mirror_lock_stale_after=900
+    mirror_lock_wait_timeout=1200
+    mirror_lock_wait_started="$(date +%s)"
     mkdir -p "$cache_root"
 
     until mkdir "$mirror_lock" 2>/dev/null; do
+      now="$(date +%s)"
+      lock_mtime="$(stat -f %m "$mirror_lock" 2>/dev/null || echo 0)"
+      lock_pid="$(cat "$mirror_lock/pid" 2>/dev/null || true)"
+      lock_is_live=0
+      if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+        lock_is_live=1
+      fi
+      if [ "$lock_is_live" -eq 0 ] && [ "$lock_mtime" -gt 0 ] && [ $((now - lock_mtime)) -ge "$mirror_lock_stale_after" ]; then
+        echo "Recovering stale shared Git cache lock: $mirror_lock"
+        rm -f "$mirror_lock/pid"
+        rmdir "$mirror_lock" 2>/dev/null || true
+        continue
+      fi
+      if [ $((now - mirror_lock_wait_started)) -ge "$mirror_lock_wait_timeout" ]; then
+        echo "ERROR: timed out waiting for shared Git cache lock: $mirror_lock"
+        exit 1
+      fi
       echo "Waiting for shared Git cache lock: $mirror_lock"
       sleep 2
     done
-    trap 'rmdir "$mirror_lock" 2>/dev/null || true' EXIT
+    printf '%s\n' "$$" > "$mirror_lock/pid"
+    trap 'rm -f "$mirror_lock/pid"; rmdir "$mirror_lock" 2>/dev/null || true' EXIT
 
     if [ -d "$mirror" ]; then
       git -C "$mirror" remote update --prune
@@ -102,6 +123,7 @@ hooks:
       git clone --mirror git@github.com:mangoappstudio/mdedit.git "$mirror"
     fi
 
+    rm -f "$mirror_lock/pid"
     rmdir "$mirror_lock"
     trap - EXIT
 

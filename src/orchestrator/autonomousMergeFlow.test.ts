@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { GithubIssueTrackerClient } from '../github/githubClient.js';
+import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
+import type { WorkflowConfig } from '../workflow/types.js';
 import { Orchestrator } from './orchestrator.js';
 
 function jsonResponse(value: unknown): Response {
@@ -108,4 +111,79 @@ ${JSON.stringify({
     sha: 'head-sha',
     merge_method: 'squash',
   });
+});
+
+test('does not merge while external PR feedback is pending', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pending-feedback-merge-flow-'));
+  const workflowPath = path.join(root, 'WORKFLOW.md');
+  await fs.writeFile(workflowPath, `---
+tracker:
+  kind: github
+  owner: example
+  repo: app
+  token: token
+  api_base_url: https://api.github.test
+  branch_prefix: symphony
+workspace:
+  root: ${path.join(root, 'workspaces')}
+merge:
+  enabled: true
+codex:
+  command: echo unused
+---
+Prompt.
+`, 'utf8');
+  const { config } = await loadWorkflowFromFile(workflowPath);
+  const feedbackState = `<!-- symphony-pr-feedback-state:v1 -->\n\`\`\`json\n${JSON.stringify({
+    version: 1,
+    pr_number: 42,
+    last_issue_comment_id: null,
+    last_review_comment_id: 11,
+    pending: true,
+    feedback_round: 1,
+    blocking_feedback_round: 1,
+    observed_head_sha: 'head-sha',
+    priorities: ['p1'],
+    has_blocking_feedback: true,
+    exhausted: false,
+    last_codex_approval_reaction_id: null,
+    updated_at: '2026-07-17T00:00:00Z',
+  })}\n\`\`\``;
+  const calls: Array<{ url: string; method: string }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    calls.push({ url, method });
+    const pr = {
+      number: 42,
+      title: 'Fix',
+      body: 'Fixes #17',
+      state: 'open',
+      draft: false,
+      labels: [{ name: 'symphony-review:passed' }],
+      html_url: 'https://github.test/example/app/pull/42',
+      head: { ref: 'symphony-17-fix', sha: 'head-sha' },
+      base: { ref: 'main', sha: 'base-sha' },
+      mergeable_state: 'clean',
+    };
+    if (url.endsWith('/pulls?state=open&per_page=50')) return jsonResponse([pr]);
+    if (url.endsWith('/pulls/42')) return jsonResponse(pr);
+    if (url.endsWith('/issues/42/comments?per_page=50')) return jsonResponse([{ id: 1, body: feedbackState }]);
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath, repoId: 'app' });
+    const mergeReconciler = orchestrator as unknown as {
+      reconcileAutonomousMerges(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void>;
+    };
+    await mergeReconciler.reconcileAutonomousMerges(config, new GithubIssueTrackerClient(config.tracker));
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.ok(!calls.some((call) => call.url.endsWith('/pulls/42/merge')));
+  assert.ok(!calls.some((call) => call.url.includes('/check-runs')));
 });

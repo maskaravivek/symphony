@@ -726,6 +726,28 @@ test('blocks dispatch when a codexbar usage payload is at or above 90%', async (
   }
 });
 
+test('blocks dispatch when codexbar cannot return a parseable usage snapshot', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-codexbar-unavailable-workspace-'));
+  const workflowPath = await writeWorkflowWithCheckCommand(
+    workspaceRoot,
+    `bash -lc "codexbar() { return 127; }; codexbar --provider codex --format json --json-only --no-color"`,
+  );
+
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = buildMockFetch([44], calls);
+
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
+  try {
+    await orchestrator.tickOnce();
+    assert.equal(wasDispatched(calls, 44), false, 'issue should not dispatch when codexbar is unavailable');
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+    await fs.rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test('allows dispatch when a codexbar usage payload is below 90%', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-codexbar-allowed-workspace-'));
   const workflowPath = await writeWorkflowWithCheckCommand(workspaceRoot, mockCodexBarCheckCommand(89));

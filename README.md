@@ -218,9 +218,9 @@ Labels are not the source of truth for whether a PR has already been reviewed. S
 
 If `review.auto_fix_review_comments` is true, blocking reviews remove `ready-for-human`, add `ready-for-agent`, and add `symphony-review:auto-fix-N` until `review.number_of_auto_fix_iterations` is exhausted. If a blocking review repeats on the same head SHA, Symphony waits for a human immediately instead of spending more iterations on a PR that did not change. Once exhausted, Symphony leaves the PR `ready-for-human` instead of reviewing or fixing the same PR forever.
 
-`review.shepherd_pull_requests` is independent of `review.enabled`. With shepherding enabled, Symphony performs a lightweight five-minute reconciliation of its open PRs. New external inline review feedback or PR conversation comments re-queue the existing PR branch through the ordinary review-fix path, including feedback from GitHub review bots such as Codex. A Codex `P0`/`P1` finding is blocking, while a fresh Codex thumbs-up reaction posted after the current head commit is treated as a passing external review and bound to that head SHA. Feedback cursors and round counts are stored in a dedicated durable PR comment, so shepherding works even when Symphony's own reviewer is disabled and unchanged PRs stay quiet. The JSON is bookkeeping for deduplication and merge receipts; the external comment or reaction supplies the verdict.
+`review.shepherd_pull_requests` is independent of `review.enabled`. With shepherding enabled, Symphony performs a lightweight five-minute reconciliation of its open PRs. New external inline review feedback or prioritized PR conversation comments re-queue the existing PR branch through the ordinary review-fix path, including feedback from GitHub review bots such as Codex. A configured blocking priority such as Codex `P0`/`P1` blocks; unprioritized inline review comments also block, while unprioritized PR conversation chatter is ignored. A fresh Codex thumbs-up reaction posted after the current head commit is treated as a passing external review. Feedback cursors, the observed head SHA, reaction baselines, and round counts are stored in a dedicated durable PR comment, so shepherding works even when Symphony's own reviewer is disabled and unchanged PRs stay quiet. A head change invalidates pending feedback and requires a newly observed approval reaction. The JSON is bookkeeping for deduplication and merge receipts; the external comment or reaction supplies the verdict.
 
-`review.max_feedback_rounds` bounds repeated repair attempts for blocking external feedback. Priorities listed in `review.non_blocking_feedback_priorities` are routed as follow-up work rather than merge blockers; the repair agent is instructed to create a linked issue instead of extending the PR. If that follow-up pass leaves the reviewed head unchanged, Symphony records the external review as passing evidence and can continue through the normal deterministic merge policy. Unprioritized feedback remains blocking. CI interpretation and flaky-job reruns remain repository-owned rather than generic Symphony behavior.
+`review.max_feedback_rounds` bounds repeated repair attempts for blocking external feedback. Non-blocking follow-up batches do not consume that blocking-round budget. Priorities listed in `review.non_blocking_feedback_priorities` are routed as follow-up work rather than merge blockers; the repair agent is instructed to create a linked issue instead of extending the PR. If that follow-up pass leaves the reviewed head unchanged, Symphony records the external review as passing evidence and can continue through the normal deterministic merge policy. CI interpretation and flaky-job reruns remain repository-owned rather than generic Symphony behavior.
 
 When GitHub rejects a label write because a managed label does not exist yet, Symphony creates the missing label and retries the write. Hook output is streamed live, but Symphony only retains a bounded tail in memory for verdict parsing and error messages; override the default with `SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES` if needed.
 
@@ -280,8 +280,9 @@ One due trigger starts one agent run in a durable `_loops/<id>` workspace. The t
 - If `tracker.token` resolves to null, Symphony will try `gh auth token` and use that token (and set `GITHUB_TOKEN` for hooks/agent subprocesses for this run).
 - GitHub API rate-limit responses pause repo polling until GitHub's reset/retry window instead of continuing to fan out failed issue fetches.
 - `usage_limit_check_command` is optional and provider-specific: exit `0` allows dispatch, exit `1` blocks dispatch for that provider group, and exit `2` means "unknown" so Symphony logs the check result but does not block.
-- `codexbar` commands are supported directly at runtime: when a check command invokes `codexbar` with `--provider` and `--format json`, Symphony parses usage percentages and blocks when any active window is at or above 90% used.
+- `codexbar` commands are supported directly at runtime: when a check command invokes `codexbar` with `--provider` and `--format json`, Symphony parses usage percentages and blocks when any active window is at or above 90% used. A missing command, non-zero exit, or unparseable snapshot blocks that provider group instead of dispatching without quota information.
   If it can parse a `resetsAt` value for a blocked window, it uses that as a short-lived block backoff until that window resets.
+- `symphony doctor` checks tools referenced inside shell-wrapped providers and hooks (including `codex`, `claude`, `codexbar`, `jq`, and package managers), verifies at least 5 GiB is free under each workspace root, confirms lifecycle labels, and exits non-zero when a required dependency is missing.
 - `workspace.strategy` is optional and defaults to today's durable per-issue workspace behavior. Supported strategies are `durable_issue_workspace`, `pooled_isolated`, `none_or_readonly`, and `durable_epic_workspace`; hooks and agent commands receive the selected value as `symphony.workspace_strategy` / `SYMPHONY_WORKSPACE_STRATEGY`. Planning agents that must inspect repository files should use `durable_issue_workspace` together with a read-only `handoff_command`; `none_or_readonly` intentionally creates no checkout and is only suitable for source-independent prompts.
 - Each workflow workspace root has a single-runner lock at `.symphony/orchestrator.lock`; a second Symphony process for the same repo skips dispatch while the live owner is running. After a restart, Symphony recovers orphaned `agent-running` claims from older runs by cancelling the stale worker PID when possible, clearing `agent-running`, and re-queueing the issue unless it now has an ignored label.
 - `needs-info`, `interactive`, `ready-for-human`, and `blocked` are always non-queueable, including for epic auto-labeling and durable retries.
@@ -292,3 +293,32 @@ One due trigger starts one agent run in a durable `_loops/<id>` workspace. The t
 - Agent commands also receive `symphony.session_id` plus `SYMPHONY_SESSION_ID`, `SYMPHONY_RUN_ARTIFACT_DIR`, `SYMPHONY_AGENT_LOG_PATH`, and `SYMPHONY_LAST_MESSAGE_PATH`. Review hooks should treat `SYMPHONY_REVIEW_PR_*` as authoritative in PR-review mode.
 - Legacy `codex.command` workflows still work; Symphony converts them into a default `codex` provider internally.
 - Issue and PR creation remain agent/toolchain responsibilities (`gh`, MCP, etc.); Symphony itself owns lifecycle comments/labels and policy-gated merges.
+
+## Unattended macOS operation
+
+Before leaving a Mac unattended, run the repository tests/build and then run the doctor against the exact multi-repo config that the service will use:
+
+```bash
+yarn install --frozen-lockfile
+yarn typecheck
+yarn test
+yarn build
+yarn cli doctor --config ./symphony.config.yml
+codexbar --provider codex --format json --json-only --no-color
+codexbar --provider claude --format json --json-only --no-color
+gh auth status -h github.com
+git ls-remote git@github.com:mangoappstudio/mdedit.git HEAD
+```
+
+Run Symphony under a supervisor rather than from an interactive terminal. [`ops/com.mangoappstudio.symphony.plist.example`](ops/com.mangoappstudio.symphony.plist.example) is a launchd template with `RunAtLoad`, `KeepAlive`, throttled restart, fixed working directory/PATH, and persistent stdout/stderr logs. Replace every `__...__` placeholder on the runner Mac, copy it to `~/Library/LaunchAgents/com.mangoappstudio.symphony.plist`, then load and inspect it:
+
+```bash
+mkdir -p "$HOME/Library/Logs/Symphony"
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.mangoappstudio.symphony.plist" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.mangoappstudio.symphony.plist"
+launchctl kickstart -k "gui/$(id -u)/com.mangoappstudio.symphony"
+launchctl print "gui/$(id -u)/com.mangoappstudio.symphony"
+tail -F "$HOME/Library/Logs/Symphony/symphony.out.log" "$HOME/Library/Logs/Symphony/symphony.err.log"
+```
+
+Keep the runner on AC power and disable system sleep while plugged in (`pmset -g custom` should show AC sleep disabled). Verify that the checkout, Node binary, configured tools, and log paths in the plist all exist on that Mac. After startup, confirm the logs show successful polling and no repeated `usage_limit`, GitHub authentication/rate-limit, workspace-lock, or hook failures before leaving it unattended.

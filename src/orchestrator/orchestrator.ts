@@ -178,6 +178,7 @@ interface PullRequestFeedbackState {
   last_review_comment_id: number | null;
   pending: boolean;
   feedback_round: number;
+  blocking_feedback_round: number;
   observed_head_sha: string | null;
   priorities: string[];
   has_blocking_feedback: boolean;
@@ -399,6 +400,14 @@ function parsePullRequestFeedbackStateComment(body: string): PullRequestFeedback
       last_review_comment_id: typeof parsed.last_review_comment_id === 'number' ? parsed.last_review_comment_id : null,
       pending: parsed.pending,
       feedback_round: Number.isInteger(parsed.feedback_round) && parsed.feedback_round! >= 0 ? parsed.feedback_round! : 0,
+      blocking_feedback_round:
+        Number.isInteger(parsed.blocking_feedback_round) && parsed.blocking_feedback_round! >= 0
+          ? parsed.blocking_feedback_round!
+          : parsed.has_blocking_feedback
+            ? Number.isInteger(parsed.feedback_round) && parsed.feedback_round! >= 0
+              ? parsed.feedback_round!
+              : 0
+            : 0,
       observed_head_sha: typeof parsed.observed_head_sha === 'string' ? parsed.observed_head_sha : null,
       priorities: Array.isArray(parsed.priorities)
         ? parsed.priorities.filter((priority): priority is string => typeof priority === 'string' && /^p[0-3]$/.test(priority))
@@ -838,8 +847,8 @@ export class Orchestrator {
       const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
       await this.promoteStackedPullRequests(config, trackerClient);
       await this.scanOpenPullRequestsForConflicts(config, trackerClient);
-      await this.reconcileAutonomousMerges(config, trackerClient);
       await this.reconcilePullRequestFeedback(config, trackerClient);
+      await this.reconcileAutonomousMerges(config, trackerClient);
       await this.dispatchConflictResolutions(config, trackerClient, workspaceManager, capacity);
       await this.dispatchPullRequestReviews(config, trackerClient, workspaceManager, capacity);
       await this.dispatchScheduledLoops(config, capacity);
@@ -1237,7 +1246,9 @@ export class Orchestrator {
           : '';
         if (reviewPr && completedHookOutput) reviewResult = parseStructuredReviewResult(completedHookOutput);
         if (config.hooks.after_run && state.finalization_step !== 'hook-completed') {
-          const reviewPrompt = reviewPr ? await this.writePullRequestReviewPrompt(config, state.workspace_path, issue, reviewPr, savedReview?.lens) : null;
+          const reviewPrompt = reviewPr && config.review.enabled
+            ? await this.writePullRequestReviewPrompt(config, state.workspace_path, issue, reviewPr, savedReview?.lens)
+            : null;
           const context = {
             workspace_path: state.workspace_path,
             workspace_strategy: state.workspace_strategy ?? 'durable_issue_workspace',
@@ -1630,7 +1641,7 @@ export class Orchestrator {
             originating_issue_number: issueNumberFromPullRequestBody(pr.body) ?? issue.number,
             review_key: reviewKey,
             lens,
-            feedback_round: feedbackState?.feedback_round,
+            feedback_round: feedbackState?.blocking_feedback_round,
             max_feedback_rounds: config.review.max_feedback_rounds,
             feedback_priorities: feedbackState?.priorities,
             has_blocking_feedback: feedbackState?.has_blocking_feedback,
@@ -2273,9 +2284,14 @@ export class Orchestrator {
     const planningInstructions = isPlanningRun
       ? '\n\n---\n\n## Planning / Technical Specification Instructions\n\nThis is a planning-only Symphony run. These instructions supersede any workflow instructions that ask you to edit files, commit, push, or open a pull request.\n\n- Inspect the repository and issue context enough to produce a concrete technical specification.\n- Do not edit files, run write commands, commit, push, create branches, or open a pull request.\n- Write the final answer as a detailed technical specification suitable for the issue thread.\n- Include: problem statement, relevant existing code/architecture, proposed implementation, files likely to change, API/data model implications, UX implications when relevant, test plan, risks, open questions, and suggested implementation tickets if the work should be split.\n- If implementation needs a product, architecture, security, data-loss, cost, or irreversible decision, use the SYMPHONY_PAUSE protocol instead of guessing.\n'
       : '';
+    const nonBlockingPriorityText = config.review.non_blocking_feedback_priorities.map((priority) => priority.toUpperCase()).join('/');
+    const blockingPriorityText = ['p0', 'p1', 'p2', 'p3']
+      .filter((priority) => !config.review.non_blocking_feedback_priorities.includes(priority))
+      .map((priority) => priority.toUpperCase())
+      .join('/');
     const pullRequestReviewInstructions =
       isPullRequestReview && opts.prReview
-        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- This is feedback round ${opts.prReview.feedback_round ?? 1}/${opts.prReview.max_feedback_rounds ?? config.review.max_feedback_rounds}.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- P0/P1 or unprioritized correctness, security, data-loss, and regression findings are blocking: fix them, verify the fix, commit, and push to the existing PR branch.\n- ${opts.prReview.has_blocking_feedback === false ? 'This batch contains only configured non-blocking feedback.' : 'This batch contains blocking or unprioritized feedback.'}\n- P2/P3 cosmetic, polish, or maintainability suggestions are non-blocking. Prefer creating a focused linked follow-up issue with exactly one priority label over extending the PR or causing another review cycle. Only fix one inline when it is truly trivial and cannot destabilize the reviewed change.\n- Before creating a follow-up issue, search open issues to avoid duplicates. Link both the PR and its originating issue, preserve enough context to implement it independently, and do not add \`ready-for-agent\` unless it is genuinely implementation-ready.\n- Do not open a replacement PR.\n`
+        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- This is blocking-feedback round ${opts.prReview.feedback_round ?? 1}/${opts.prReview.max_feedback_rounds ?? config.review.max_feedback_rounds}.\n- Address the new PR review comments and prioritized PR conversation comments included in the run context.\n- ${blockingPriorityText || 'No configured priority'} and unprioritized inline correctness, security, data-loss, and regression findings are blocking: fix them, verify the fix, commit, and push to the existing PR branch.\n- ${opts.prReview.has_blocking_feedback === false ? 'This batch contains only configured non-blocking feedback.' : 'This batch contains blocking or unprioritized inline feedback.'}\n- ${nonBlockingPriorityText || 'No priority'} findings are configured as non-blocking. Prefer creating a focused linked follow-up issue with exactly one priority label over extending the PR or causing another review cycle. Only fix one inline when it is truly trivial and cannot destabilize the reviewed change.\n- Before creating a follow-up issue, search open issues to avoid duplicates. Link both the PR and its originating issue, preserve enough context to implement it independently, and do not add \`ready-for-agent\` unless it is genuinely implementation-ready.\n- Do not open a replacement PR.\n`
         : '';
     const stackInstructions = stackContext ? this.formatStackInstructions(stackContext) : '';
     const symphonyContext = {
@@ -2673,9 +2689,14 @@ export class Orchestrator {
             return;
           }
 
+          let continuationQueued = false;
           const reviewPr = await this.findReviewPullRequest(config, issue, opts.prReview);
           if (reviewPr) {
-            const { path: reviewPromptPath, lens: reviewLens } = await this.writePullRequestReviewPrompt(config, workspacePath, issue, reviewPr, opts.prReview?.lens);
+            const reviewPrompt = config.review.enabled
+              ? await this.writePullRequestReviewPrompt(config, workspacePath, issue, reviewPr, opts.prReview?.lens)
+              : null;
+            const reviewPromptPath = reviewPrompt?.path ?? '';
+            const reviewLens = reviewPrompt?.lens ?? opts.prReview?.lens ?? config.review.lenses[0] ?? 'staff-engineer';
             const capturedReview: PullRequestReviewDispatchOptions = {
               pr_number: reviewPr.number,
               pr_url: reviewPr.url,
@@ -2738,7 +2759,7 @@ export class Orchestrator {
                   return;
                 }
                 if (reviewResult?.verdict === 'pass') {
-                  await this.handlePassingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
+                  continuationQueued = await this.handlePassingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
                 } else if (reviewResult?.verdict === 'retry') {
                   await this.recordNonPassingVerificationReceipt(config, issue, reviewPr, workspacePath, 'error', reviewResult.summary, reviewResult);
                 } else {
@@ -2805,7 +2826,7 @@ export class Orchestrator {
             }
           }
 
-          if (!isConflictResolution && !isPullRequestReview) {
+          if (!isConflictResolution && !isPullRequestReview && !continuationQueued) {
             const dirtyPr = await this.findDirtyPullRequestForIssue(config, issue);
             if (dirtyPr) {
               this.conflictQueue.set(dirtyPr.number, {
@@ -2848,7 +2869,7 @@ export class Orchestrator {
               latestPr?.head_sha &&
               feedbackState.observed_head_sha === latestPr.head_sha
             ) {
-              await this.handlePassingPullRequestReview(
+              continuationQueued = await this.handlePassingPullRequestReview(
                 config,
                 issue,
                 latestPr,
@@ -2865,6 +2886,8 @@ export class Orchestrator {
               });
             });
           }
+
+          if (continuationQueued) return;
 
           await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
           await this.updateLifecycleState(workspacePath, {
@@ -2997,9 +3020,31 @@ export class Orchestrator {
     }
     for (const pr of pullRequests) {
       if (!this.isSymphonyPullRequest(config, pr)) continue;
-      const detailed = await tracker.fetchPullRequest(pr.number).catch(() => null);
+      const detailed = await tracker.fetchPullRequest(pr.number).catch((err) => {
+        if (isGithubRateLimitError(err)) throw err;
+        return null;
+      });
       if (!detailed) continue;
-      const reviewState = await this.readPullRequestReviewState(config, detailed.number).catch(() => null);
+      let feedbackState: PullRequestFeedbackState | null;
+      try {
+        feedbackState = await this.readPullRequestFeedbackState(config, detailed.number);
+      } catch (err) {
+        if (isGithubRateLimitError(err)) throw err;
+        log('warn', 'pr_feedback_state_read_failed', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: 'pr_feedback_state_read_failed',
+          pr_number: detailed.number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      if (feedbackState?.pending) continue;
+      const reviewState = await this.readPullRequestReviewState(config, detailed.number).catch((err) => {
+        if (isGithubRateLimitError(err)) throw err;
+        return null;
+      });
       if (!reviewState || reviewState.verdict !== 'pass') continue;
       const inputFingerprint = fingerprint({
         head: detailed.head_sha,
@@ -3050,14 +3095,32 @@ export class Orchestrator {
     }
     for (const pr of pullRequests) {
       if (!this.isSymphonyPullRequest(config, pr) || pr.labels.includes(LABEL_RUNNING)) continue;
-      const [conversationComments, reviewComments, reactions] = await Promise.all([
-        tracker.listIssueComments(pr.number).catch(() => []),
-        tracker.listPullRequestReviewComments(pr.number).catch(() => []),
-        tracker.listIssueReactions(pr.number).catch(() => []),
-      ]);
+      let conversationComments: IssueComment[];
+      let reviewComments: IssueComment[];
+      let reactions: IssueReaction[];
+      try {
+        [conversationComments, reviewComments, reactions] = await Promise.all([
+          tracker.listIssueComments(pr.number),
+          tracker.listPullRequestReviewComments(pr.number),
+          tracker.listIssueReactions(pr.number),
+        ]);
+      } catch (err) {
+        if (isGithubRateLimitError(err)) throw err;
+        log('warn', 'pr_feedback_scan_incomplete', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: 'pr_feedback_scan_incomplete',
+          pr_number: pr.number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
       const feedbackState = conversationComments.map((comment) => parsePullRequestFeedbackStateComment(comment.body)).find(Boolean) ?? null;
       const reviewState = conversationComments.map((comment) => parsePullRequestReviewStateComment(comment.body)).find(Boolean) ?? null;
-      const externalConversationComments = conversationComments.filter(isExternalPullRequestConversationComment);
+      const externalConversationComments = conversationComments.filter(
+        (comment) => isExternalPullRequestConversationComment(comment) && feedbackPriority(comment.body) !== null,
+      );
       const latestIssueCommentId = externalConversationComments.reduce((latest, comment) => Math.max(latest, comment.id), 0);
       const latestReviewCommentId = reviewComments.reduce((latest, comment) => Math.max(latest, comment.id), 0);
       const previousIssueCommentId = feedbackState?.last_issue_comment_id ?? null;
@@ -3067,12 +3130,56 @@ export class Orchestrator {
       const newReviewComments = reviewComments.filter((comment) => comment.id > (previousReviewCommentId ?? 0));
       const hasNewIssueComment = newIssueComments.length > 0;
       const hasNewReviewComment = newReviewComments.length > 0;
+      const latestCodexApprovalReactionId = reactions
+        .filter(isCodexApprovalReaction)
+        .reduce((latest, reaction) => Math.max(latest, reaction.id), 0);
+
+      if (feedbackState?.observed_head_sha && feedbackState.observed_head_sha !== pr.head_sha) {
+        await this.writePullRequestFeedbackState(config, {
+          ...feedbackState,
+          pending: false,
+          observed_head_sha: pr.head_sha,
+          priorities: [],
+          has_blocking_feedback: false,
+          exhausted: false,
+          last_codex_approval_reaction_id: latestCodexApprovalReactionId || previousCodexApprovalReactionId,
+          updated_at: new Date().toISOString(),
+        });
+        await this.applyLabels(config, pr.number, {
+          add: [LABEL_READY_FOR_HUMAN],
+          remove: [LABEL_REVIEW_PASSED, LABEL_REVIEW_BLOCKING, LABEL_READY, LABEL_RUNNING],
+        });
+        log('info', 'pr_feedback_head_rebased', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: 'pr_feedback_head_rebased',
+          pr_number: pr.number,
+          previous_head_sha: feedbackState.observed_head_sha,
+          head_sha: pr.head_sha,
+        });
+        continue;
+      }
       const latestCodexApproval = reactions
         .filter((reaction) => isCodexApprovalReaction(reaction) && reaction.id > (previousCodexApprovalReactionId ?? 0))
         .sort((left, right) => right.id - left.id)[0] ?? null;
       let freshCodexApproval: IssueReaction | null = null;
       if (latestCodexApproval && pr.head_sha) {
-        const commits = await tracker.listPullRequestCommits(pr.number).catch(() => []);
+        let commits;
+        try {
+          commits = await tracker.listPullRequestCommits(pr.number);
+        } catch (err) {
+          if (isGithubRateLimitError(err)) throw err;
+          log('warn', 'pr_feedback_commit_scan_failed', {
+            repo_id: this.repoId ?? undefined,
+            owner: config.tracker.owner,
+            repo: config.tracker.repo,
+            event: 'pr_feedback_commit_scan_failed',
+            pr_number: pr.number,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          continue;
+        }
         const headCommit = commits.find((commit) => commit.sha === pr.head_sha) ?? null;
         if (isReactionFreshForHead(latestCodexApproval, headCommit?.committed_at ?? null)) {
           const approvalAt = Date.parse(latestCodexApproval.created_at!);
@@ -3113,6 +3220,7 @@ export class Orchestrator {
           last_review_comment_id: latestReviewCommentId || previousReviewCommentId,
           pending: false,
           feedback_round: feedbackState?.feedback_round ?? 0,
+          blocking_feedback_round: feedbackState?.blocking_feedback_round ?? 0,
           observed_head_sha: pr.head_sha,
           priorities: [],
           has_blocking_feedback: false,
@@ -3143,7 +3251,9 @@ export class Orchestrator {
         config.review.non_blocking_feedback_priorities,
       );
       const feedbackRound = (feedbackState?.feedback_round ?? 0) + 1;
-      const exhausted = classification.has_blocking_feedback && feedbackRound > config.review.max_feedback_rounds;
+      const blockingFeedbackRound =
+        (feedbackState?.blocking_feedback_round ?? 0) + (classification.has_blocking_feedback ? 1 : 0);
+      const exhausted = classification.has_blocking_feedback && blockingFeedbackRound > config.review.max_feedback_rounds;
       const nextState: PullRequestFeedbackState = {
         version: 1,
         pr_number: pr.number,
@@ -3151,6 +3261,7 @@ export class Orchestrator {
         last_review_comment_id: latestReviewCommentId || previousReviewCommentId,
         pending: !exhausted,
         feedback_round: feedbackRound,
+        blocking_feedback_round: blockingFeedbackRound,
         observed_head_sha: pr.head_sha,
         priorities: classification.priorities,
         has_blocking_feedback: classification.has_blocking_feedback,
@@ -3158,9 +3269,19 @@ export class Orchestrator {
         last_codex_approval_reaction_id: previousCodexApprovalReactionId,
         updated_at: new Date().toISOString(),
       };
-      await this.applyLabels(config, pr.number, exhausted
-        ? { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] }
-        : { add: [LABEL_READY], remove: [LABEL_READY_FOR_HUMAN] });
+      await this.applyLabels(
+        config,
+        pr.number,
+        exhausted
+          ? {
+              add: [LABEL_READY_FOR_HUMAN, ...(classification.has_blocking_feedback ? [LABEL_REVIEW_BLOCKING] : [])],
+              remove: [LABEL_READY, LABEL_RUNNING, LABEL_REVIEW_PASSED],
+            }
+          : {
+              add: [LABEL_READY, ...(classification.has_blocking_feedback ? [LABEL_REVIEW_BLOCKING] : [])],
+              remove: [LABEL_READY_FOR_HUMAN, ...(classification.has_blocking_feedback ? [LABEL_REVIEW_PASSED] : [])],
+            },
+      );
       await this.writePullRequestFeedbackState(config, nextState);
       this.appendEpisodeEvent(config, `pr-${pr.number}`, exhausted ? 'pr.feedback_exhausted' : 'pr.feedback_queued', {
         pr_number: pr.number,
@@ -3170,6 +3291,7 @@ export class Orchestrator {
         previous_review_comment_id: previousReviewCommentId,
         latest_review_comment_id: latestReviewCommentId || null,
         feedback_round: feedbackRound,
+        blocking_feedback_round: blockingFeedbackRound,
         max_feedback_rounds: config.review.max_feedback_rounds,
         priorities: classification.priorities,
         blocking: classification.has_blocking_feedback,
@@ -3185,6 +3307,7 @@ export class Orchestrator {
         issue_comments: hasNewIssueComment,
         review_comments: hasNewReviewComment,
         feedback_round: feedbackRound,
+        blocking_feedback_round: blockingFeedbackRound,
         max_feedback_rounds: config.review.max_feedback_rounds,
         priorities: classification.priorities,
         blocking: classification.has_blocking_feedback,
@@ -3604,7 +3727,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
     pr: PullRequestRef,
     workspacePath: string,
     reviewResult: StructuredReviewResult,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const previousState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
     const runState = await readRunState(workspacePath).catch(() => null);
     const receipt = await this.createVerificationReceipt(config, pr, workspacePath, 'pass', reviewResult.summary, reviewResult);
@@ -3628,6 +3751,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
     this.completeReviewExecution(config, pr, receipt, 'pass');
 
     let requiresAnotherReview = false;
+    let queuedForAnotherRun = false;
     if (config.merge.enabled) {
       const tracker = new GithubIssueTrackerClient(config.tracker);
       const changedFiles = await tracker.listPullRequestFileDetails(pr.number).catch(() => []);
@@ -3639,6 +3763,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
         ...summarizeSubstantiveChanges(config.merge, changedFiles),
       });
       requiresAnotherReview = risk === 'elevated' && freshPassingReceiptCount(config, pr, nextState) < 2;
+      queuedForAnotherRun = requiresAnotherReview;
     }
 
     await this.applyLabels(config, pr.number, {
@@ -3696,10 +3821,12 @@ ${JSON.stringify(episodeSummary, null, 2)}
               await this.mustReadRunState(workspacePath),
               `Code review passed, but merge evidence is incomplete. Symphony queued evidence remediation ${nextIteration}/${config.review.number_of_auto_fix_iterations}: ${missingEvidence.join('; ')}`,
             );
+            queuedForAnotherRun = true;
           }
         }
       }
     }
+    return queuedForAnotherRun;
   }
 
   private async handleBlockingPullRequestReview(
@@ -4493,7 +4620,7 @@ ${runContext}`;
     if (this.isCodexBarUsageCheckCommand(command)) {
       const parsed = this.parseCodexBarUsageLimit(command, result.stdout);
       if (parsed !== null) return parsed;
-      return { decision: result.code === 0 ? 'allowed' : 'unknown' };
+      return { decision: 'blocked' };
     }
 
     if (result.code === 0) return { decision: 'allowed' };

@@ -18,6 +18,7 @@ import type { RunState } from './status/runState.js';
 import type { LoadedWorkflow } from './workflow/types.js';
 import { startDashboardServer } from './dashboard/server.js';
 import { SymphonyConfigError } from './utils/errors.js';
+import { requiredToolsForWorkflow } from './doctor/requiredTools.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -131,11 +132,10 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
   for (const entry of entries) {
     const config = entry.loaded.config;
     const prefix = `${entry.id} (${config.tracker.owner}/${config.tracker.repo})`;
-    const providerCommands = new Set(Object.values(config.agents.providers).map((provider) => provider.command.trim().split(/\s+/)[0]).filter(Boolean));
-    for (const tool of providerCommands) {
+    for (const tool of requiredToolsForWorkflow(config).filter((candidate) => !tools.includes(candidate))) {
       const ok = await commandExists(tool);
       // eslint-disable-next-line no-console
-      console.log(`${ok ? 'ok' : 'fail'} provider tool ${tool}`);
+      console.log(`${ok ? 'ok' : 'fail'} configured tool ${tool}`);
       if (!ok) failures += 1;
     }
     // eslint-disable-next-line no-console
@@ -147,6 +147,17 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
       await fs.mkdir(config.workspace.root, { recursive: true });
       // eslint-disable-next-line no-console
       console.log(`ok workspace root ${config.workspace.root}`);
+      const stats = await fs.statfs(config.workspace.root);
+      const freeBytes = stats.bavail * stats.bsize;
+      const freeGiB = freeBytes / 1024 ** 3;
+      if (freeGiB < 5) {
+        failures += 1;
+        // eslint-disable-next-line no-console
+        console.log(`fail workspace free disk ${freeGiB.toFixed(1)} GiB (minimum 5 GiB)`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.log(`ok workspace free disk ${freeGiB.toFixed(1)} GiB`);
+      }
     } catch (err) {
       failures += 1;
       // eslint-disable-next-line no-console
