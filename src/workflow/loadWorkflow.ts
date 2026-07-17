@@ -504,8 +504,23 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
     : null;
 
   const reviewRaw = isRecord(raw.review) ? raw.review : {};
+  const reviewEnabled = asBoolean(reviewRaw.enabled, 'review.enabled') ?? true;
   const autoFixReviewComments = asBoolean(reviewRaw.auto_fix_review_comments, 'review.auto_fix_review_comments') ?? false;
   const shepherdPullRequests = asBoolean(reviewRaw.shepherd_pull_requests, 'review.shepherd_pull_requests') ?? false;
+  const maxFeedbackRounds = asNumber(reviewRaw.max_feedback_rounds, 'review.max_feedback_rounds') ?? 5;
+  if (!Number.isFinite(maxFeedbackRounds) || maxFeedbackRounds < 1 || Math.floor(maxFeedbackRounds) !== maxFeedbackRounds) {
+    throw new SymphonyConfigError('review.max_feedback_rounds must be a positive integer');
+  }
+  const nonBlockingFeedbackPriorities = (asStringArray(
+    reviewRaw.non_blocking_feedback_priorities,
+    'review.non_blocking_feedback_priorities',
+  ) ?? ['p2', 'p3']).map((priority) => normalizeIdentifier(priority));
+  if (
+    nonBlockingFeedbackPriorities.length === 0 ||
+    nonBlockingFeedbackPriorities.some((priority) => !/^p[0-3]$/.test(priority))
+  ) {
+    throw new SymphonyConfigError('review.non_blocking_feedback_priorities must contain one or more of p0, p1, p2, p3');
+  }
   const reviewLenses = (asStringArray(reviewRaw.lenses, 'review.lenses') ?? ['staff-engineer'])
     .map((lens) => normalizeIdentifier(lens))
     .filter(Boolean);
@@ -581,9 +596,12 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       max_concurrent_agents_by_state: maxConcurrentAgentsByState,
     },
     review: {
+      enabled: reviewEnabled,
       auto_fix_review_comments: autoFixReviewComments,
       number_of_auto_fix_iterations: numberOfAutoFixIterations,
       shepherd_pull_requests: shepherdPullRequests,
+      max_feedback_rounds: Math.floor(maxFeedbackRounds),
+      non_blocking_feedback_priorities: [...new Set(nonBlockingFeedbackPriorities)],
       lenses: reviewLenses,
     },
     merge,

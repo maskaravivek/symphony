@@ -10,7 +10,16 @@ test('includes new PR review comments in run context', async () => {
   const workspacePath = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-run-context-'));
   const result = await buildRunContext({
     workspacePath,
-    comments: [],
+    comments: [
+      {
+        id: 20,
+        body: '<!-- symphony-pr-feedback-state:v1 -->\nmanaged cursor',
+        url: null,
+        author: 'symphony',
+        created_at: '2026-07-05T12:04:00Z',
+        updated_at: '2026-07-05T12:04:00Z',
+      },
+    ],
     lastSeenCommentId: null,
     pullRequestReviewComments: [
       {
@@ -38,4 +47,5 @@ test('includes new PR review comments in run context', async () => {
   assert.match(result.text, /New PR review comments:/);
   assert.match(result.text, /Please handle retry comments\./);
   assert.doesNotMatch(result.text, /old review note/);
+  assert.doesNotMatch(result.text, /managed cursor/);
 });

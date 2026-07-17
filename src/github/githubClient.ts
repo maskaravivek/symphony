@@ -17,6 +17,21 @@ type GithubCommentPayload = {
   user?: GithubUser | null;
 };
 
+type GithubReactionPayload = {
+  id?: number;
+  content?: string;
+  created_at?: string;
+  user?: GithubUser | null;
+};
+
+type GithubPullRequestCommitPayload = {
+  sha?: string;
+  commit?: {
+    committer?: { date?: string } | null;
+    author?: { date?: string } | null;
+  } | null;
+};
+
 type GithubIssuePayload = {
   id?: number;
   node_id?: string;
@@ -71,6 +86,18 @@ export interface IssueComment {
   author: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface IssueReaction {
+  id: number;
+  content: string;
+  author: string | null;
+  created_at: string | null;
+}
+
+export interface PullRequestCommit {
+  sha: string;
+  committed_at: string | null;
 }
 
 export interface RepositoryLabel {
@@ -453,6 +480,36 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     url.searchParams.set('per_page', String(this.tracker.page_size));
     const raw = await this.fetchAllPages(url.toString());
     return raw.map((p) => normalizeGithubCommentPayload(p as GithubCommentPayload));
+  }
+
+  async listIssueReactions(number: number): Promise<IssueReaction[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/reactions`, this.tracker.api_base_url);
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages(url.toString());
+    return raw.flatMap((entry) => {
+      const reaction = entry as GithubReactionPayload;
+      if (typeof reaction.id !== 'number' || typeof reaction.content !== 'string') return [];
+      return [{
+        id: reaction.id,
+        content: reaction.content,
+        author: reaction.user?.login ?? null,
+        created_at: reaction.created_at ?? null,
+      }];
+    });
+  }
+
+  async listPullRequestCommits(number: number): Promise<PullRequestCommit[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/pulls/${number}/commits`, this.tracker.api_base_url);
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages(url.toString());
+    return raw.flatMap((entry) => {
+      const commit = entry as GithubPullRequestCommitPayload;
+      if (typeof commit.sha !== 'string') return [];
+      return [{
+        sha: commit.sha,
+        committed_at: commit.commit?.committer?.date ?? commit.commit?.author?.date ?? null,
+      }];
+    });
   }
 
   async listOpenPullRequests(): Promise<PullRequestRef[]> {

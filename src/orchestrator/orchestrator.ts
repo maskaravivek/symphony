@@ -1,6 +1,12 @@
 import type { Issue } from '../domain/issue.js';
 import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
-import { GithubIssueTrackerClient, isGithubRateLimitError, type IssueComment, type PullRequestRef } from '../github/githubClient.js';
+import {
+  GithubIssueTrackerClient,
+  isGithubRateLimitError,
+  type IssueComment,
+  type IssueReaction,
+  type PullRequestRef,
+} from '../github/githubClient.js';
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
 import { classifyMergeRisk, summarizeSubstantiveChanges, type VerificationReceipt } from '../merge/mergePolicy.js';
@@ -97,6 +103,10 @@ interface PullRequestReviewDispatchOptions {
   originating_issue_number: number | null;
   review_key: string;
   lens: string;
+  feedback_round?: number;
+  max_feedback_rounds?: number;
+  feedback_priorities?: string[];
+  has_blocking_feedback?: boolean;
 }
 
 interface RunningSession {
@@ -161,6 +171,21 @@ interface PullRequestReviewState {
   last_review_comment_id?: number | null;
 }
 
+interface PullRequestFeedbackState {
+  version: 1;
+  pr_number: number;
+  last_issue_comment_id: number | null;
+  last_review_comment_id: number | null;
+  pending: boolean;
+  feedback_round: number;
+  observed_head_sha: string | null;
+  priorities: string[];
+  has_blocking_feedback: boolean;
+  exhausted: boolean;
+  last_codex_approval_reaction_id: number | null;
+  updated_at: string;
+}
+
 type EpicExecutionMode = WorkflowConfig['tracker']['epics']['execution_mode'];
 
 const LABEL_READY = 'ready-for-agent';
@@ -176,6 +201,7 @@ const LABEL_REVIEW_PASSED = 'symphony-review:passed';
 const LABEL_REVIEW_BLOCKING = 'symphony-review:blocking';
 const LABEL_REVIEW_AUTO_FIX_PREFIX = 'symphony-review:auto-fix-';
 const REVIEW_STATE_MARKER = '<!-- symphony-review-state:v1 -->';
+const PR_FEEDBACK_STATE_MARKER = '<!-- symphony-pr-feedback-state:v1 -->';
 
 function nowMs(): number {
   return Date.now();
@@ -357,6 +383,87 @@ This comment is managed by Symphony. It records the PR head SHA that was reviewe
 ${JSON.stringify(state, null, 2)}
 \`\`\`
 `;
+}
+
+function parsePullRequestFeedbackStateComment(body: string): PullRequestFeedbackState | null {
+  if (!body.includes(PR_FEEDBACK_STATE_MARKER)) return null;
+  const match = /```json\s*([\s\S]*?)```/i.exec(body);
+  if (!match) return null;
+  try {
+    const parsed = JSON.parse(match[1]) as Partial<PullRequestFeedbackState>;
+    if (parsed.version !== 1 || typeof parsed.pr_number !== 'number' || typeof parsed.pending !== 'boolean') return null;
+    return {
+      version: 1,
+      pr_number: parsed.pr_number,
+      last_issue_comment_id: typeof parsed.last_issue_comment_id === 'number' ? parsed.last_issue_comment_id : null,
+      last_review_comment_id: typeof parsed.last_review_comment_id === 'number' ? parsed.last_review_comment_id : null,
+      pending: parsed.pending,
+      feedback_round: Number.isInteger(parsed.feedback_round) && parsed.feedback_round! >= 0 ? parsed.feedback_round! : 0,
+      observed_head_sha: typeof parsed.observed_head_sha === 'string' ? parsed.observed_head_sha : null,
+      priorities: Array.isArray(parsed.priorities)
+        ? parsed.priorities.filter((priority): priority is string => typeof priority === 'string' && /^p[0-3]$/.test(priority))
+        : [],
+      has_blocking_feedback: typeof parsed.has_blocking_feedback === 'boolean' ? parsed.has_blocking_feedback : true,
+      exhausted: typeof parsed.exhausted === 'boolean' ? parsed.exhausted : false,
+      last_codex_approval_reaction_id:
+        typeof parsed.last_codex_approval_reaction_id === 'number' ? parsed.last_codex_approval_reaction_id : null,
+      updated_at: typeof parsed.updated_at === 'string' ? parsed.updated_at : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatPullRequestFeedbackStateComment(state: PullRequestFeedbackState): string {
+  return `${PR_FEEDBACK_STATE_MARKER}
+### Symphony PR Feedback State
+
+This comment is managed by Symphony. It records external PR feedback cursors independently of Symphony's own reviewer.
+
+\`\`\`json
+${JSON.stringify(state, null, 2)}
+\`\`\`
+`;
+}
+
+function isExternalPullRequestConversationComment(comment: IssueComment): boolean {
+  return !comment.body.includes('<!-- symphony-');
+}
+
+function isCodexApprovalReaction(reaction: IssueReaction): boolean {
+  return reaction.content === '+1' && /^chatgpt-codex-connector(?:\[bot\])?$/i.test(reaction.author ?? '');
+}
+
+function isReactionFreshForHead(reaction: IssueReaction, headCommittedAt: string | null): boolean {
+  if (!reaction.created_at || !headCommittedAt) return false;
+  const reactionAt = Date.parse(reaction.created_at);
+  const commitAt = Date.parse(headCommittedAt);
+  return Number.isFinite(reactionAt) && Number.isFinite(commitAt) && reactionAt >= commitAt;
+}
+
+function feedbackPriority(body: string): string | null {
+  const badge = /\bP([0-3])\s+Badge\b/i.exec(body);
+  if (badge) return `p${badge[1]}`;
+  const bracketed = /\[P([0-3])\]/i.exec(body);
+  if (bracketed) return `p${bracketed[1]}`;
+  const standalone = /(?:^|\s)P([0-3])(?:\s|:|-|$)/i.exec(body);
+  return standalone ? `p${standalone[1]}` : null;
+}
+
+function classifyPullRequestFeedback(
+  comments: IssueComment[],
+  nonBlockingPriorities: string[],
+): { priorities: string[]; has_blocking_feedback: boolean } {
+  const priorities = [...new Set(comments.map((comment) => feedbackPriority(comment.body)).filter((value): value is string => value !== null))];
+  return {
+    priorities,
+    has_blocking_feedback:
+      comments.length === 0 ||
+      comments.some((comment) => {
+        const priority = feedbackPriority(comment.body);
+        return priority === null || !nonBlockingPriorities.includes(priority);
+      }),
+  };
 }
 
 function pullRequestHeadMatchesState(pr: PullRequestRef, state: PullRequestReviewState | null): boolean {
@@ -1436,6 +1543,15 @@ export class Orchestrator {
 
       const pr = await tracker.fetchPullRequest(issue.number).catch(() => null);
       if (!pr || pr.is_draft || !pr.head_ref) continue;
+      const feedbackState = await this.readPullRequestFeedbackState(config, pr.number).catch((err) => {
+        log('warn', 'pr_feedback_state_read_failed', {
+          ...getIssueLogFields(config, issue, this.repoId),
+          event: 'pr_feedback_state_read_failed',
+          pr_number: pr.number,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      });
       const reviewState = await this.readPullRequestReviewState(config, pr.number).catch((err) => {
         log('warn', 'pr_review_state_read_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
@@ -1445,7 +1561,7 @@ export class Orchestrator {
         });
         return null;
       });
-      if (reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
+      if (!feedbackState?.pending && reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
         if (config.merge.enabled) {
           const changedFiles = await tracker.listPullRequestFileDetails(pr.number).catch(() => []);
           const changedPaths = changedFiles.map((file) => file.path);
@@ -1514,6 +1630,10 @@ export class Orchestrator {
             originating_issue_number: issueNumberFromPullRequestBody(pr.body) ?? issue.number,
             review_key: reviewKey,
             lens,
+            feedback_round: feedbackState?.feedback_round,
+            max_feedback_rounds: config.review.max_feedback_rounds,
+            feedback_priorities: feedbackState?.priorities,
+            has_blocking_feedback: feedbackState?.has_blocking_feedback,
           },
         });
         if (capacity.remaining !== null) capacity.remaining -= 1;
@@ -2008,6 +2128,7 @@ export class Orchestrator {
       SYMPHONY_STACK_PREDECESSOR_THREAD_ID: stackContext?.reusable_thread_id ?? '',
       SYMPHONY_STACK_POSITION: String(stackContext?.position ?? ''),
       SYMPHONY_STACK_TOTAL: String(stackContext?.total ?? ''),
+      SYMPHONY_REVIEW_ENABLED: config.review.enabled ? '1' : '0',
       SYMPHONY_REVIEW_PROMPT_PATH: '',
       SYMPHONY_REVIEW_PR_NUMBER: '',
       SYMPHONY_REVIEW_PR_URL: '',
@@ -2154,7 +2275,7 @@ export class Orchestrator {
       : '';
     const pullRequestReviewInstructions =
       isPullRequestReview && opts.prReview
-        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- Commit changes to the existing PR branch and push back to origin.\n- Do not open a replacement PR.\n`
+        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- This is feedback round ${opts.prReview.feedback_round ?? 1}/${opts.prReview.max_feedback_rounds ?? config.review.max_feedback_rounds}.\n- Address the new PR review comments and PR conversation comments included in the run context.\n- P0/P1 or unprioritized correctness, security, data-loss, and regression findings are blocking: fix them, verify the fix, commit, and push to the existing PR branch.\n- ${opts.prReview.has_blocking_feedback === false ? 'This batch contains only configured non-blocking feedback.' : 'This batch contains blocking or unprioritized feedback.'}\n- P2/P3 cosmetic, polish, or maintainability suggestions are non-blocking. Prefer creating a focused linked follow-up issue with exactly one priority label over extending the PR or causing another review cycle. Only fix one inline when it is truly trivial and cannot destabilize the reviewed change.\n- Before creating a follow-up issue, search open issues to avoid duplicates. Link both the PR and its originating issue, preserve enough context to implement it independently, and do not add \`ready-for-agent\` unless it is genuinely implementation-ready.\n- Do not open a replacement PR.\n`
         : '';
     const stackInstructions = stackContext ? this.formatStackInstructions(stackContext) : '';
     const symphonyContext = {
@@ -2565,6 +2686,10 @@ export class Orchestrator {
               originating_issue_number: opts.prReview?.originating_issue_number ?? issue.number ?? null,
               review_key: opts.prReview?.review_key ?? reviewExecutionKey(config, reviewPr, reviewLens),
               lens: reviewLens,
+              feedback_round: opts.prReview?.feedback_round,
+              max_feedback_rounds: opts.prReview?.max_feedback_rounds,
+              feedback_priorities: opts.prReview?.feedback_priorities,
+              has_blocking_feedback: opts.prReview?.has_blocking_feedback,
             };
             await updateRunState(workspacePath, (cur) => cur ? {
               ...cur,
@@ -2604,7 +2729,7 @@ export class Orchestrator {
                 streamOutput: shouldStreamHookOutput(),
                 signal: this.shutdownController.signal,
               });
-              if (reviewPr) {
+              if (reviewPr && config.review.enabled) {
                 const reviewResult = parseStructuredReviewResult(hookResult.output);
                 if (reviewResult?.verdict === 'block') {
                   await this.handleBlockingPullRequestReview(config, issue, reviewPr, workspacePath, reviewResult);
@@ -2659,7 +2784,7 @@ export class Orchestrator {
                 hook_log_path: afterRunLogPath,
                 error,
               });
-              if (reviewPr) {
+              if (reviewPr && config.review.enabled) {
                 await this.recordNonPassingVerificationReceipt(config, issue, reviewPr, workspacePath, 'error', reviewResult?.summary ?? error, reviewResult).catch(() => {});
               }
               await updateRunState(workspacePath, (cur) =>
@@ -2712,6 +2837,33 @@ export class Orchestrator {
                 });
               });
             }
+          }
+
+          if (isPullRequestReview && opts.prReview) {
+            const feedbackState = await this.readPullRequestFeedbackState(config, opts.prReview.pr_number).catch(() => null);
+            const latestPr = await new GithubIssueTrackerClient(config.tracker).fetchPullRequest(opts.prReview.pr_number).catch(() => reviewPr);
+            if (
+              feedbackState?.pending &&
+              !feedbackState.has_blocking_feedback &&
+              latestPr?.head_sha &&
+              feedbackState.observed_head_sha === latestPr.head_sha
+            ) {
+              await this.handlePassingPullRequestReview(
+                config,
+                issue,
+                latestPr,
+                workspacePath,
+                this.externalNonBlockingReviewResult(feedbackState),
+              );
+            }
+            await this.markPullRequestFeedbackAddressed(config, opts.prReview.pr_number).catch((err) => {
+              log('warn', 'pr_feedback_state_update_failed', {
+                ...getIssueLogFields(config, issue, this.repoId),
+                event: 'pr_feedback_state_update_failed',
+                pr_number: opts.prReview!.pr_number,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
           }
 
           await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
@@ -2898,37 +3050,144 @@ export class Orchestrator {
     }
     for (const pr of pullRequests) {
       if (!this.isSymphonyPullRequest(config, pr) || pr.labels.includes(LABEL_RUNNING)) continue;
-      const reviewState = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
-      if (!reviewState) continue;
-      const comments = await tracker.listPullRequestReviewComments(pr.number).catch(() => []);
-      const latestCommentId = comments.reduce((latest, comment) => Math.max(latest, comment.id), 0);
-      if (latestCommentId === 0) continue;
+      const [conversationComments, reviewComments, reactions] = await Promise.all([
+        tracker.listIssueComments(pr.number).catch(() => []),
+        tracker.listPullRequestReviewComments(pr.number).catch(() => []),
+        tracker.listIssueReactions(pr.number).catch(() => []),
+      ]);
+      const feedbackState = conversationComments.map((comment) => parsePullRequestFeedbackStateComment(comment.body)).find(Boolean) ?? null;
+      const reviewState = conversationComments.map((comment) => parsePullRequestReviewStateComment(comment.body)).find(Boolean) ?? null;
+      const externalConversationComments = conversationComments.filter(isExternalPullRequestConversationComment);
+      const latestIssueCommentId = externalConversationComments.reduce((latest, comment) => Math.max(latest, comment.id), 0);
+      const latestReviewCommentId = reviewComments.reduce((latest, comment) => Math.max(latest, comment.id), 0);
+      const previousIssueCommentId = feedbackState?.last_issue_comment_id ?? null;
+      const previousReviewCommentId = feedbackState?.last_review_comment_id ?? reviewState?.last_review_comment_id ?? null;
+      const previousCodexApprovalReactionId = feedbackState?.last_codex_approval_reaction_id ?? null;
+      const newIssueComments = externalConversationComments.filter((comment) => comment.id > (previousIssueCommentId ?? 0));
+      const newReviewComments = reviewComments.filter((comment) => comment.id > (previousReviewCommentId ?? 0));
+      const hasNewIssueComment = newIssueComments.length > 0;
+      const hasNewReviewComment = newReviewComments.length > 0;
+      const latestCodexApproval = reactions
+        .filter((reaction) => isCodexApprovalReaction(reaction) && reaction.id > (previousCodexApprovalReactionId ?? 0))
+        .sort((left, right) => right.id - left.id)[0] ?? null;
+      let freshCodexApproval: IssueReaction | null = null;
+      if (latestCodexApproval && pr.head_sha) {
+        const commits = await tracker.listPullRequestCommits(pr.number).catch(() => []);
+        const headCommit = commits.find((commit) => commit.sha === pr.head_sha) ?? null;
+        if (isReactionFreshForHead(latestCodexApproval, headCommit?.committed_at ?? null)) {
+          const approvalAt = Date.parse(latestCodexApproval.created_at!);
+          const commentsAfterApproval = [...newIssueComments, ...newReviewComments].some((comment) => {
+            const commentAt = comment.created_at ? Date.parse(comment.created_at) : Number.NaN;
+            return !Number.isFinite(commentAt) || commentAt > approvalAt;
+          });
+          if (!commentsAfterApproval) freshCodexApproval = latestCodexApproval;
+        }
+      }
+      if (!hasNewIssueComment && !hasNewReviewComment && !freshCodexApproval) continue;
 
-      const previousCommentId = reviewState.last_review_comment_id ?? null;
-      if (previousCommentId === null) {
-        await this.writePullRequestReviewState(config, { ...reviewState, last_review_comment_id: latestCommentId });
+      if (freshCodexApproval) {
+        const issueNumber = issueNumberFromPullRequestBody(pr.body);
+        const issue = issueNumber ? await tracker.fetchIssueByNumber(issueNumber).catch(() => null) : null;
+        if (!issue) {
+          log('warn', 'codex_approval_issue_lookup_failed', {
+            repo_id: this.repoId ?? undefined,
+            owner: config.tracker.owner,
+            repo: config.tracker.repo,
+            event: 'codex_approval_issue_lookup_failed',
+            pr_number: pr.number,
+            issue_number: issueNumber ?? undefined,
+          });
+          continue;
+        }
+        await this.handlePassingPullRequestReview(
+          config,
+          issue,
+          pr,
+          workspacePathForIssue(config.workspace.root, issue),
+          this.externalCodexApprovalResult(freshCodexApproval),
+        );
+        await this.writePullRequestFeedbackState(config, {
+          version: 1,
+          pr_number: pr.number,
+          last_issue_comment_id: latestIssueCommentId || previousIssueCommentId,
+          last_review_comment_id: latestReviewCommentId || previousReviewCommentId,
+          pending: false,
+          feedback_round: feedbackState?.feedback_round ?? 0,
+          observed_head_sha: pr.head_sha,
+          priorities: [],
+          has_blocking_feedback: false,
+          exhausted: false,
+          last_codex_approval_reaction_id: freshCodexApproval.id,
+          updated_at: new Date().toISOString(),
+        });
+        this.appendEpisodeEvent(config, `pr-${pr.number}`, 'pr.codex_approval_received', {
+          pr_number: pr.number,
+          issue_number: issue.number,
+          head_sha: pr.head_sha,
+          reaction_id: freshCodexApproval.id,
+        });
+        log('info', 'codex_approval_received', {
+          repo_id: this.repoId ?? undefined,
+          owner: config.tracker.owner,
+          repo: config.tracker.repo,
+          event: 'codex_approval_received',
+          pr_number: pr.number,
+          head_sha: pr.head_sha,
+          reaction_id: freshCodexApproval.id,
+        });
         continue;
       }
-      if (latestCommentId <= previousCommentId) continue;
 
-      await this.writePullRequestReviewState(config, { ...reviewState, last_review_comment_id: latestCommentId });
-      await this.applyLabels(config, pr.number, {
-        add: [LABEL_READY],
-        remove: [LABEL_READY_FOR_HUMAN],
-      });
-      this.appendEpisodeEvent(config, `pr-${pr.number}`, 'pr.feedback_queued', {
+      const classification = classifyPullRequestFeedback(
+        [...newIssueComments, ...newReviewComments],
+        config.review.non_blocking_feedback_priorities,
+      );
+      const feedbackRound = (feedbackState?.feedback_round ?? 0) + 1;
+      const exhausted = classification.has_blocking_feedback && feedbackRound > config.review.max_feedback_rounds;
+      const nextState: PullRequestFeedbackState = {
+        version: 1,
+        pr_number: pr.number,
+        last_issue_comment_id: latestIssueCommentId || previousIssueCommentId,
+        last_review_comment_id: latestReviewCommentId || previousReviewCommentId,
+        pending: !exhausted,
+        feedback_round: feedbackRound,
+        observed_head_sha: pr.head_sha,
+        priorities: classification.priorities,
+        has_blocking_feedback: classification.has_blocking_feedback,
+        exhausted,
+        last_codex_approval_reaction_id: previousCodexApprovalReactionId,
+        updated_at: new Date().toISOString(),
+      };
+      await this.applyLabels(config, pr.number, exhausted
+        ? { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] }
+        : { add: [LABEL_READY], remove: [LABEL_READY_FOR_HUMAN] });
+      await this.writePullRequestFeedbackState(config, nextState);
+      this.appendEpisodeEvent(config, `pr-${pr.number}`, exhausted ? 'pr.feedback_exhausted' : 'pr.feedback_queued', {
         pr_number: pr.number,
         head_sha: pr.head_sha,
-        previous_review_comment_id: previousCommentId,
-        latest_review_comment_id: latestCommentId,
+        previous_issue_comment_id: previousIssueCommentId,
+        latest_issue_comment_id: latestIssueCommentId || null,
+        previous_review_comment_id: previousReviewCommentId,
+        latest_review_comment_id: latestReviewCommentId || null,
+        feedback_round: feedbackRound,
+        max_feedback_rounds: config.review.max_feedback_rounds,
+        priorities: classification.priorities,
+        blocking: classification.has_blocking_feedback,
+        exhausted,
       });
-      log('info', 'pr_feedback_queued', {
+      log(exhausted ? 'warn' : 'info', exhausted ? 'pr_feedback_exhausted' : 'pr_feedback_queued', {
         repo_id: this.repoId ?? undefined,
         owner: config.tracker.owner,
         repo: config.tracker.repo,
-        event: 'pr_feedback_queued',
+        event: exhausted ? 'pr_feedback_exhausted' : 'pr_feedback_queued',
         pr_number: pr.number,
         head_sha: pr.head_sha ?? '',
+        issue_comments: hasNewIssueComment,
+        review_comments: hasNewReviewComment,
+        feedback_round: feedbackRound,
+        max_feedback_rounds: config.review.max_feedback_rounds,
+        priorities: classification.priorities,
+        blocking: classification.has_blocking_feedback,
       });
     }
   }
@@ -3591,6 +3850,67 @@ ${JSON.stringify(episodeSummary, null, 2)}
   private async writePullRequestReviewState(config: WorkflowConfig, state: PullRequestReviewState): Promise<void> {
     const client = new GithubIssueTrackerClient(config.tracker);
     await client.upsertStatusComment(state.pr_number, REVIEW_STATE_MARKER, formatPullRequestReviewStateComment(state));
+  }
+
+  private async readPullRequestFeedbackState(config: WorkflowConfig, prNumber: number): Promise<PullRequestFeedbackState | null> {
+    const client = new GithubIssueTrackerClient(config.tracker);
+    const comments = await client.listIssueComments(prNumber);
+    for (const comment of comments) {
+      const state = parsePullRequestFeedbackStateComment(comment.body);
+      if (state) return state;
+    }
+    return null;
+  }
+
+  private async writePullRequestFeedbackState(config: WorkflowConfig, state: PullRequestFeedbackState): Promise<void> {
+    const client = new GithubIssueTrackerClient(config.tracker);
+    await client.upsertStatusComment(state.pr_number, PR_FEEDBACK_STATE_MARKER, formatPullRequestFeedbackStateComment(state));
+  }
+
+  private async markPullRequestFeedbackAddressed(config: WorkflowConfig, prNumber: number): Promise<void> {
+    const state = await this.readPullRequestFeedbackState(config, prNumber);
+    if (!state?.pending) return;
+    await this.writePullRequestFeedbackState(config, {
+      ...state,
+      pending: false,
+      updated_at: new Date().toISOString(),
+    });
+  }
+
+  private externalNonBlockingReviewResult(state: PullRequestFeedbackState): StructuredReviewResult {
+    const priorities = state.priorities.length > 0 ? state.priorities.map((priority) => priority.toUpperCase()).join(', ') : 'configured non-blocking';
+    const executionId = `github-feedback-${state.last_review_comment_id ?? state.last_issue_comment_id ?? state.feedback_round}`;
+    const summary = `External PR review contains only non-blocking feedback (${priorities}); follow-up handling completed without changing the reviewed head.`;
+    return {
+      verdict: 'pass',
+      summary,
+      findings: [{ disposition: 'nit', severity: priorities, summary, file: null, line: null }],
+      evidence: [{ kind: 'review', summary, command: null, artifact: null }],
+      reviewer: {
+        execution_id: executionId,
+        provider: 'github-pr-review',
+        model: null,
+        lens: 'external-review-policy',
+      },
+      structured: true,
+    };
+  }
+
+  private externalCodexApprovalResult(reaction: IssueReaction): StructuredReviewResult {
+    const summary = 'Codex completed review of the current PR head without findings.';
+    return {
+      verdict: 'pass',
+      summary,
+      findings: [],
+      evidence: [{ kind: 'review', summary, command: null, artifact: null }],
+      reviewer: {
+        execution_id: `github-codex-reaction-${reaction.id}`,
+        provider: 'github-codex',
+        model: null,
+        lens: 'codex-review',
+      },
+      structured: true,
+    };
   }
 
   private async writePullRequestReviewPrompt(

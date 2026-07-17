@@ -6,6 +6,14 @@ import type { IssueComment } from '../github/githubClient.js';
 
 const execFileAsync = promisify(execFile);
 
+function isSymphonyStateComment(body: string): boolean {
+  return (
+    body.includes('<!-- symphony-status:') ||
+    body.includes('<!-- symphony-review-state:v1 -->') ||
+    body.includes('<!-- symphony-pr-feedback-state:v1 -->')
+  );
+}
+
 async function readText(path: string | null | undefined, maxChars: number): Promise<string> {
   if (!path) return '';
   try {
@@ -42,7 +50,7 @@ export async function buildRunContext(options: {
   lastMessagePath: string | null;
 }): Promise<{ text: string; lastSeenCommentId: number | null; lastSeenPullRequestReviewCommentId: number | null }> {
   const newComments = options.comments.filter(
-    (comment) => (options.lastSeenCommentId === null || comment.id > options.lastSeenCommentId) && !comment.body.includes('<!-- symphony-status:'),
+    (comment) => (options.lastSeenCommentId === null || comment.id > options.lastSeenCommentId) && !isSymphonyStateComment(comment.body),
   );
   const lastSeenCommentId = options.comments.reduce<number | null>((max, comment) => (max === null || comment.id > max ? comment.id : max), options.lastSeenCommentId);
   const pullRequestReviewComments = options.pullRequestReviewComments ?? [];
@@ -51,7 +59,9 @@ export async function buildRunContext(options: {
     options.lastSeenPullRequestReviewCommentId ?? null,
   );
   const newPullRequestReviewComments = pullRequestReviewComments.filter(
-    (comment) => (options.lastSeenPullRequestReviewCommentId == null || comment.id > options.lastSeenPullRequestReviewCommentId) && !comment.body.includes('<!-- symphony-status:'),
+    (comment) =>
+      (options.lastSeenPullRequestReviewCommentId == null || comment.id > options.lastSeenPullRequestReviewCommentId) &&
+      !isSymphonyStateComment(comment.body),
   );
 
   const [lastMessage, branch, status, recentCommits] = await Promise.all([

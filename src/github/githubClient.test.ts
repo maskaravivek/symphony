@@ -778,6 +778,37 @@ test('lists pull request review comments', async () => {
   ]);
 });
 
+test('lists PR reactions and commit timestamps for external review freshness', async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith('/issues/77/reactions?per_page=50')) {
+      return jsonResponse([{ id: 91, content: '+1', created_at: '2026-07-17T04:19:12Z', user: { login: 'chatgpt-codex-connector[bot]' } }]);
+    }
+    if (url.endsWith('/pulls/77/commits?per_page=50')) {
+      return jsonResponse([{ sha: 'head', commit: { committer: { date: '2026-07-17T04:15:28Z' } } }]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    assert.deepEqual(await client.listIssueReactions(77), [{
+      id: 91,
+      content: '+1',
+      author: 'chatgpt-codex-connector[bot]',
+      created_at: '2026-07-17T04:19:12Z',
+    }]);
+    assert.deepEqual(await client.listPullRequestCommits(77), [{ sha: 'head', committed_at: '2026-07-17T04:15:28Z' }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls.length, 2);
+});
+
 test('lists native sub-issues through paginated REST endpoint', async () => {
   const calls: string[] = [];
   const originalFetch = globalThis.fetch;

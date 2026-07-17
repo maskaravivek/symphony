@@ -133,9 +133,30 @@ ${JSON.stringify(
 test('dispatches ready-for-agent pull requests with review comments and returns them to human review', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-workspace-'));
   const originRepo = await createOriginRepo();
-  const workflowPath = await writeWorkflow(workspaceRoot, originRepo);
+  const workflowPath = await writeWorkflow(workspaceRoot, originRepo, {
+    reviewConfig: `review:
+  enabled: false`,
+    afterRun: `test "$SYMPHONY_REVIEW_ENABLED" = "0"
+test -z "$SYMPHONY_REVIEW_PROMPT_PATH"`,
+  });
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;
+  const feedbackStateComment = `<!-- symphony-pr-feedback-state:v1 -->
+\`\`\`json
+${JSON.stringify({
+  version: 1,
+  pr_number: 77,
+  last_issue_comment_id: null,
+  last_review_comment_id: 901,
+  pending: true,
+  feedback_round: 1,
+  observed_head_sha: 'reviewed-head',
+  priorities: ['p2'],
+  has_blocking_feedback: false,
+  exhausted: false,
+  updated_at: '2026-07-10T00:00:00.000Z',
+})}
+\`\`\``;
 
   globalThis.fetch = async (input, init) => {
     const url = String(input);
@@ -163,13 +184,16 @@ test('dispatches ready-for-agent pull requests with review comments and returns 
         state: 'open',
         draft: false,
         html_url: 'https://github.test/mangoappstudio/mdedit/pull/77',
-        head: { ref: 'codex-77-review-follow-up' },
+        head: { ref: 'codex-77-review-follow-up', sha: 'reviewed-head' },
         base: { ref: 'main' },
         mergeable_state: 'clean',
       });
     }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/comments?per_page=50') {
-      return jsonResponse([]);
+      return jsonResponse([
+        { id: 900, body: reviewStateComment({ prNumber: 77, issueNumber: 42, headSha: 'reviewed-head', verdict: 'pass', autoFixIterations: 0 }) },
+        { id: 902, body: feedbackStateComment },
+      ]);
     }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls/77/comments?per_page=50') {
       return jsonResponse([
@@ -195,6 +219,12 @@ test('dispatches ready-for-agent pull requests with review comments and returns 
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/501' && method === 'PATCH') {
       return jsonResponse({ id: 501, body: String(body), html_url: 'https://github.test/comment/501' });
     }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/902' && method === 'PATCH') {
+      return jsonResponse({ id: 902, body: String(body), html_url: 'https://github.test/comment/902' });
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/900' && method === 'PATCH') {
+      return jsonResponse({ id: 900, body: String(body), html_url: 'https://github.test/comment/900' });
+    }
 
     throw new Error(`Unexpected fetch ${method} ${url}`);
   };
@@ -218,6 +248,31 @@ test('dispatches ready-for-agent pull requests with review comments and returns 
   const prompt = await fs.readFile(path.join(workspaceRoot, 'mangoappstudio_mdedit_77', '.symphony', 'prompt.md'), 'utf8');
   assert.match(prompt, /Pull Request Review Instructions/);
   assert.match(prompt, /Please add the retry case\./);
+  await assert.rejects(() => fs.access(path.join(workspaceRoot, 'mangoappstudio_mdedit_77', '.symphony', 'review_prompt.md')));
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/labels' &&
+        call.method === 'POST' &&
+        JSON.stringify(call.body) === JSON.stringify({ labels: ['symphony-review:passed', 'ready-for-human'] }),
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/900' &&
+        call.method === 'PATCH' &&
+        /external-review-policy/.test(JSON.stringify(call.body)),
+    ),
+  );
+  assert.ok(
+    calls.some(
+      (call) =>
+        call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/902' &&
+        call.method === 'PATCH' &&
+        /pending.*false/.test(JSON.stringify(call.body)),
+    ),
+  );
   assert.ok(
     calls.some(
       (call) =>

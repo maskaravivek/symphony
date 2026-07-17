@@ -188,9 +188,12 @@ hooks:
   timeout_ms: 120000
 
 review:
+  enabled: true
   auto_fix_review_comments: false
   number_of_auto_fix_iterations: 1
   shepherd_pull_requests: false
+  max_feedback_rounds: 5
+  non_blocking_feedback_priorities: [p2, p3]
   lenses: [staff-engineer, security-and-data-safety]
 
 agent:

@@ -64,9 +64,12 @@ export interface AgentConfig {
 }
 
 export interface ReviewConfig {
+  enabled: boolean;
   auto_fix_review_comments: boolean;
   number_of_auto_fix_iterations: number;
   shepherd_pull_requests: boolean;
+  max_feedback_rounds: number;
+  non_blocking_feedback_priorities: string[];
   lenses: string[];
 }
 

@@ -24,6 +24,10 @@ export interface FinalizationContext {
     originating_issue_number: number | null;
     review_key: string;
     lens: string;
+    feedback_round?: number;
+    max_feedback_rounds?: number;
+    feedback_priorities?: string[];
+    has_blocking_feedback?: boolean;
   } | null;
 }
 

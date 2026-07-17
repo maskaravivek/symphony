@@ -111,9 +111,12 @@ function makeWorkflowConfig(workspaceRoot: string, repo = 'mdedit'): WorkflowCon
       max_concurrent_agents_by_state: null,
     },
     review: {
+      enabled: true,
       auto_fix_review_comments: false,
       number_of_auto_fix_iterations: 1,
       shepherd_pull_requests: false,
+      max_feedback_rounds: 5,
+      non_blocking_feedback_priorities: ['p2', 'p3'],
       lenses: ['staff-engineer'],
     },
     merge: { enabled: false, dry_run: false, method: 'squash', default_risk: 'standard', rules: [] },

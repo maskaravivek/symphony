@@ -38,9 +38,12 @@ tracker:
   repo: mdedit
   token: token
 review:
+  enabled: false
   auto_fix_review_comments: true
   number_of_auto_fix_iterations: 2
   shepherd_pull_requests: true
+  max_feedback_rounds: 4
+  non_blocking_feedback_priorities: [p2, p3]
   lenses: [staff-engineer, security]
 codex:
   command: codex exec -
@@ -48,9 +51,12 @@ codex:
 
   const loaded = await loadWorkflowFromFile(workflowPath);
   assert.deepEqual(loaded.config.review, {
+    enabled: false,
     auto_fix_review_comments: true,
     number_of_auto_fix_iterations: 2,
     shepherd_pull_requests: true,
+    max_feedback_rounds: 4,
+    non_blocking_feedback_priorities: ['p2', 'p3'],
     lenses: ['staff-engineer', 'security'],
   });
 });
@@ -68,9 +74,12 @@ codex:
 
   const loaded = await loadWorkflowFromFile(workflowPath);
   assert.deepEqual(loaded.config.review, {
+    enabled: true,
     auto_fix_review_comments: false,
     number_of_auto_fix_iterations: 1,
     shepherd_pull_requests: false,
+    max_feedback_rounds: 5,
+    non_blocking_feedback_priorities: ['p2', 'p3'],
     lenses: ['staff-engineer'],
   });
 });
@@ -245,6 +254,23 @@ codex:
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /review.number_of_auto_fix_iterations must be a non-negative integer/);
+});
+
+test('rejects invalid external feedback policy', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+review:
+  max_feedback_rounds: 0
+  non_blocking_feedback_priorities: [p4]
+codex:
+  command: codex exec -
+`);
+
+  await assert.rejects(() => loadWorkflowFromFile(workflowPath), /review.max_feedback_rounds must be a positive integer/);
 });
 
 test('defaults candidate ordering to priority then created_at', async () => {
