@@ -232,6 +232,7 @@ Autonomous merging is repository opt-in and deterministic:
 merge:
   enabled: true
   dry_run: false
+  require_checks: true
   method: squash
   default_risk: standard
   policy_version: my-repo-v1
@@ -253,7 +254,7 @@ merge:
 
 The highest matching risk wins. Rules may match labels, changed-file globs, target branches, or substantive line/file thresholds; matching rules may also add evidence requirements without raising the tier. `standard` requires one fresh passing review, `elevated` requires two, and `prohibited` never merges autonomously. With `require_independent_reviews`, reviewer execution IDs must be distinct and cannot equal the authoring execution. Changing `policy_version` invalidates older receipts, and Symphony automatically binds receipts to the SHA-256 of the complete workflow file so prompt or hook changes also require fresh verification.
 
-A merge also requires every configured evidence kind, an open non-draft PR, a clean merge state, a linked issue, available and successful GitHub checks, no blocking/pause label, current head/base SHAs, and an expected-head-SHA merge request. `dry_run: true` evaluates and records eligibility without merging. Every assessment, including blocked decisions, is written to the episode ledger with the policy version, substantive change size, evidence, and gate reasons. Symphony does not ask an LLM to loosen deterministic merge policy.
+A merge also requires every configured evidence kind, an open non-draft PR, a clean merge state, a linked issue, no blocking/pause label, current head/base SHAs, and an expected-head-SHA merge request. `require_checks` defaults to `true`; setting it to `false` allows a PR with no GitHub check results, while any check that does exist must still be successful. `dry_run: true` evaluates and records eligibility without merging. Every assessment, including blocked decisions, is written to the episode ledger with the policy version, substantive change size, evidence, and gate reasons. Symphony does not ask an LLM to loosen deterministic merge policy.
 
 When autonomous merge and native epics are both enabled, Symphony also promotes stacked PRs after a predecessor merges: it retargets the child to the surviving base branch, clears stale review labels, and queues fresh review. The prior receipts no longer count because the base changed.
 

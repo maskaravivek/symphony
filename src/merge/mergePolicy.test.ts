@@ -69,6 +69,48 @@ test('allows a standard PR only after all deterministic gates pass', () => {
   });
 });
 
+test('allows a standard PR without GitHub checks when checks are optional', () => {
+  const decision = evaluateMergeEligibility({
+    config: { ...config, require_checks: false },
+    risk: 'standard',
+    pull_request: {
+      state: 'open',
+      is_draft: false,
+      merge_state_status: 'clean',
+      head_sha: 'head-1',
+      base_sha: 'base-1',
+      linked_issue_number: 42,
+      labels: ['symphony-review:passed'],
+    },
+    checks: [],
+    receipts: [receipt('review-1')],
+  });
+
+  assert.equal(decision.eligible, true);
+  assert.deepEqual(decision.reasons, []);
+});
+
+test('blocks a known failing check even when checks are optional', () => {
+  const decision = evaluateMergeEligibility({
+    config: { ...config, require_checks: false },
+    risk: 'standard',
+    pull_request: {
+      state: 'open',
+      is_draft: false,
+      merge_state_status: 'clean',
+      head_sha: 'head-1',
+      base_sha: 'base-1',
+      linked_issue_number: 42,
+      labels: ['symphony-review:passed'],
+    },
+    checks: [{ name: 'preview', status: 'completed', conclusion: 'failure' }],
+    receipts: [receipt('review-1')],
+  });
+
+  assert.equal(decision.eligible, false);
+  assert.ok(decision.reasons.includes('check is not successful: preview (completed/failure)'));
+});
+
 test('requires two fresh receipts for elevated risk and rejects stale receipts', () => {
   const base = {
     config,

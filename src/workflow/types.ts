@@ -90,6 +90,7 @@ export interface MergeRiskRule {
 export interface MergeConfig {
   enabled: boolean;
   dry_run: boolean;
+  require_checks?: boolean;
   method: MergeMethod;
   default_risk: MergeRisk;
   policy_version?: string;

@@ -114,6 +114,7 @@ agents:
   assert.deepEqual(merge, {
     enabled: false,
     dry_run: false,
+    require_checks: true,
     method: 'squash',
     default_risk: 'standard',
     policy_version: 'v1',
@@ -135,6 +136,7 @@ tracker:
 merge:
   enabled: true
   dry_run: true
+  require_checks: false
   method: rebase
   default_risk: standard
   policy_version: mdedit-2026-07
@@ -172,6 +174,7 @@ agents:
   assert.deepEqual(merge, {
     enabled: true,
     dry_run: true,
+    require_checks: false,
     method: 'rebase',
     default_risk: 'standard',
     policy_version: 'mdedit-2026-07',

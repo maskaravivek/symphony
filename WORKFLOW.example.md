@@ -41,6 +41,7 @@ polling:
 merge:
   enabled: false
   dry_run: false
+  require_checks: true
   method: squash
   default_risk: standard
   policy_version: example-v1

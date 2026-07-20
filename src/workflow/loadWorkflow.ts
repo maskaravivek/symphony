@@ -365,6 +365,7 @@ function normalizeMergeConfig(value: unknown): WorkflowConfig['merge'] {
   return {
     enabled: asBoolean(raw.enabled, 'merge.enabled') ?? false,
     dry_run: asBoolean(raw.dry_run, 'merge.dry_run') ?? false,
+    require_checks: asBoolean(raw.require_checks, 'merge.require_checks') ?? true,
     method: method as MergeMethod,
     default_risk: normalizeMergeRisk(raw.default_risk, 'merge.default_risk', 'standard'),
     policy_version: asTrimmedStringOrNull(raw.policy_version, 'merge.policy_version') ?? 'v1',

@@ -182,7 +182,7 @@ export function evaluateMergeEligibility(input: {
     if (BLOCKING_LABELS.has(label)) reasons.push(`blocking workflow label: ${label}`);
   }
 
-  if (checks.length === 0) {
+  if (checks.length === 0 && config.require_checks !== false) {
     reasons.push('no check results available');
   } else {
     for (const check of checks) {

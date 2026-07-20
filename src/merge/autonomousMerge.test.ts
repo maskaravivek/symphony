@@ -61,6 +61,27 @@ test('assesses current GitHub evidence and merges with the expected head SHA', a
   assert.deepEqual(mergeCalls, [{ number: 42, options: { expectedHeadSha: 'head-sha', method: 'squash' } }]);
 });
 
+test('merges an eligible standard PR when GitHub checks are optional and absent', async () => {
+  const mergeCalls: unknown[] = [];
+  const result = await assessAndMaybeMerge({
+    config: { ...config, require_checks: false },
+    pull_request: pr,
+    linked_issue_number: 17,
+    receipts: [receipt],
+    github: {
+      listPullRequestFiles: async () => ['src/editor.ts'],
+      listPullRequestChecks: async () => [],
+      mergePullRequest: async (number, options) => {
+        mergeCalls.push({ number, options });
+        return { merged: true, message: 'merged', sha: 'merge-sha' };
+      },
+    },
+  });
+
+  assert.equal(result.action, 'merged');
+  assert.deepEqual(mergeCalls, [{ number: 42, options: { expectedHeadSha: 'head-sha', method: 'squash' } }]);
+});
+
 test('reports dry-run eligibility without calling merge', async () => {
   let merged = false;
   const result = await assessAndMaybeMerge({
