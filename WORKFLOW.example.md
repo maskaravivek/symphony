@@ -205,7 +205,7 @@ hooks:
     if [ -n "${SYMPHONY_REVIEW_PROMPT_PATH:-}" ] && [ -f "$SYMPHONY_REVIEW_PROMPT_PATH" ]; then
       echo "Review prompt: $SYMPHONY_REVIEW_PROMPT_PATH"
       echo "Review PR: ${SYMPHONY_REVIEW_PR_NUMBER:-} ${SYMPHONY_REVIEW_PR_HEAD_REF:-}@${SYMPHONY_REVIEW_PR_HEAD_SHA:-unknown}"
-      echo "Run your review agent with this prompt and print a final REVIEW_VERDICT: PASS or REVIEW_VERDICT: BLOCK line."
+      echo "Run your review agent with this prompt and print exactly one SYMPHONY_REVIEW_RESULT JSON payload."
     fi
   timeout_ms: 120000
 

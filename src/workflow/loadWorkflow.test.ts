@@ -22,8 +22,11 @@ tracker:
   token: token
 agent:
   max_attempts: 3
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -45,8 +48,11 @@ review:
   max_feedback_rounds: 4
   non_blocking_feedback_priorities: [p2, p3]
   lenses: [staff-engineer, security]
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -68,8 +74,11 @@ tracker:
   owner: mangoappstudio
   repo: mdedit
   token: token
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -91,8 +100,11 @@ tracker:
   owner: mangoappstudio
   repo: mdedit
   token: token
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -146,8 +158,11 @@ loops:
     interval_ms: 86400000
     prompt: Use the repository quality skill and create only evidence-backed issues.
     provider: codex
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -204,8 +219,11 @@ tracker:
   token: token
 merge:
   default_risk: dangerous
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
   await assert.rejects(() => loadWorkflowFromFile(invalidRiskPath), /merge.default_risk must be standard, elevated, or prohibited/);
 
@@ -219,8 +237,11 @@ merge:
   rules:
     - risk: elevated
       min_changed_lines: 0
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
   await assert.rejects(() => loadWorkflowFromFile(invalidSizePath), /merge.rules\[0\].min_changed_lines must be a positive integer/);
 
@@ -234,8 +255,11 @@ loops:
   - id: quality
     interval_ms: 0
     prompt: Run quality checks.
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
   await assert.rejects(() => loadWorkflowFromFile(invalidLoopPath), /loops\[0\]\.interval_ms must be a positive number/);
 });
@@ -249,8 +273,11 @@ tracker:
   token: token
 review:
   number_of_auto_fix_iterations: -1
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /review.number_of_auto_fix_iterations must be a non-negative integer/);
@@ -266,8 +293,11 @@ tracker:
 review:
   max_feedback_rounds: 0
   non_blocking_feedback_priorities: [p4]
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /review.max_feedback_rounds must be a positive integer/);
@@ -280,8 +310,11 @@ tracker:
   owner: mangoappstudio
   repo: mdedit
   token: token
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -295,8 +328,11 @@ tracker:
   owner: mangoappstudio
   repo: mdedit
   token: token
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -331,8 +367,11 @@ workspace:
     epic:
       stacked: durable_epic_workspace
       independent: pooled_isolated
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -356,8 +395,11 @@ tracker:
 workspace:
   strategy:
     implementation: shared_checkout
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /workspace.strategy.implementation must be/);
@@ -371,8 +413,11 @@ tracker:
   repo: mdedit
   token: token
   candidate_order: ready_for_agent_labeled_at
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -387,8 +432,11 @@ tracker:
   repo: mdedit
   token: token
   candidate_order: newest_first
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(
@@ -406,8 +454,11 @@ tracker:
   token: token
 agent:
   max_attempts: 0
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /agent.max_attempts must be a positive number/);
@@ -427,8 +478,11 @@ tracker:
     parent_mode: coordinator_only
     execution_mode: stacked
     max_depth: 4
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -449,8 +503,11 @@ tracker:
   owner: mangoappstudio
   repo: mdedit
   token: token
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -474,14 +531,17 @@ tracker:
   epics:
     enabled: true
     execution_mode: pipeline
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /tracker.epics.execution_mode must be independent or stacked/);
 });
 
-test('creates a default codex agent provider from legacy codex config', async () => {
+test('rejects the removed top-level codex provider config', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:
   kind: github
@@ -495,16 +555,10 @@ codex:
   turn_timeout_ms: 1234
 `);
 
-  const loaded = await loadWorkflowFromFile(workflowPath);
-  assert.equal(loaded.config.agents.default, 'codex');
-  assert.equal(loaded.config.agents.providers.codex.provider_group, 'codex');
-  assert.equal(loaded.config.agents.providers.codex.provider_kind, 'codex');
-  assert.equal(loaded.config.agents.providers.codex.command, 'codex exec -');
-  assert.equal(loaded.config.agents.providers.codex.resume_command, 'codex exec resume "{{ symphony.codex_thread_id }}" -');
-  assert.equal(loaded.config.agents.providers.codex.handoff_command, 'codex exec --readonly -');
-  assert.equal(loaded.config.agents.providers.codex.turn_timeout_ms, 1234);
-  assert.equal(loaded.config.agents.providers.codex.output_log, '.symphony/codex.jsonl');
-  assert.equal(loaded.config.agents.providers.codex.extract_codex_thread_id, true);
+  await assert.rejects(
+    () => loadWorkflowFromFile(workflowPath),
+    /top-level codex config was removed; configure agents.providers instead/,
+  );
 });
 
 test('loads label-routed agent providers', async () => {
@@ -550,6 +604,29 @@ agents:
     none_labels: ['agent:codex'],
     default: false,
   });
+});
+
+test('rejects the removed agents.routes labels alias', async () => {
+  const workflowPath = await writeWorkflow(`
+tracker:
+  kind: github
+  owner: mangoappstudio
+  repo: mdedit
+  token: token
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
+  routes:
+    - provider: codex
+      labels: [docs]
+`);
+
+  await assert.rejects(
+    () => loadWorkflowFromFile(workflowPath),
+    /agents.routes\[0\].labels was removed; use any_labels instead/,
+  );
 });
 
 test('defaults codex thread extraction from provider_kind codex', async () => {
@@ -601,8 +678,11 @@ tracker:
   owner: mangoappstudio
   repo: mdedit
   token: token
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
@@ -674,8 +754,11 @@ tracker:
   epics:
     enabled: true
     relationship_source: markdown_tasks
-codex:
-  command: codex exec -
+agents:
+  default: codex
+  providers:
+    codex:
+      command: codex exec -
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /tracker.epics.relationship_source must be native_subissues/);

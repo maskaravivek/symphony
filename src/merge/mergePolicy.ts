@@ -70,7 +70,7 @@ export interface MergeChangedFile {
 }
 
 const RISK_RANK: Record<MergeRisk, number> = { standard: 0, elevated: 1, prohibited: 2 };
-const BLOCKING_LABELS = new Set(['blocked', 'needs-info', 'interactive', 'symphony-review:blocking']);
+const BLOCKING_LABELS = new Set(['blocked', 'needs-info', 'interactive', 'symphony-failed', 'symphony-review:blocking']);
 const PASSING_CHECK_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 
 function globToRegExp(glob: string): RegExp {

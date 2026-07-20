@@ -193,6 +193,7 @@ const LABEL_READY = 'ready-for-agent';
 const LABEL_RUNNING = 'agent-running';
 const LABEL_INTERACTIVE = 'interactive';
 const LABEL_NEEDS_INFO = 'needs-info';
+const LABEL_FAILED = 'symphony-failed';
 const LABEL_READY_FOR_HUMAN = 'ready-for-human';
 const LABEL_PLANNING = 'planning';
 const LABEL_TASK_SPEC = 'task:spec';
@@ -315,6 +316,13 @@ function nextReviewLens(config: WorkflowConfig, pr: PullRequestRef, state: PullR
 function hookOutputFromError(err: unknown): string {
   if (err instanceof HookScriptError) return err.output;
   return '';
+}
+
+function dispatchErrorDetails(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!(err instanceof HookScriptError)) return message;
+  const output = (err.stderr.trim() || err.stdout.trim()).slice(-2_000);
+  return [message, output].filter(Boolean).join(': ');
 }
 
 function parsePullRequestReviewStateComment(body: string): PullRequestReviewState | null {
@@ -1147,7 +1155,7 @@ export class Orchestrator {
         : await workspaceManager.ensureWorkspace(issue, { strategy: 'durable_issue_workspace' });
       const workspacePath = fallbackWorkspacePath;
       const state = existingState ?? (await readRunState(workspacePath));
-      const agentWasRunning = state?.status === 'running' || state?.status === 'agent-running';
+      const agentWasRunning = state?.status === 'agent-running';
       const liveOrphan = agentWasRunning && isProcessAlive(state.worker_pid);
       if (agentWasRunning && isProcessAlive(state.worker_pid)) {
         terminateOrphanedWorker(state.worker_pid);
@@ -1304,8 +1312,9 @@ export class Orchestrator {
         await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
         this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, session_id: state.session_id, recovered: true });
       } catch (err) {
-        await this.scheduleRetry(config, issue, state.attempt, 'finalization_recovery_failed', state.workspace_path);
-        log('error', 'finalization_recovery_failed', { ...getIssueLogFields(config, issue, this.repoId), error: err instanceof Error ? err.message : String(err) });
+        const error = dispatchErrorDetails(err);
+        await this.scheduleRetry(config, issue, state.attempt, `finalization_recovery_failed: ${error}`, state.workspace_path);
+        log('error', 'finalization_recovery_failed', { ...getIssueLogFields(config, issue, this.repoId), error });
       } finally {
         this.recoveringFinalizations.delete(state.issue_id);
       }
@@ -1337,7 +1346,7 @@ export class Orchestrator {
     for (const state of states) {
       if (this.running.has(state.issue_id)) continue;
       if (this.recoveringFinalizations.has(state.issue_id)) continue;
-      if ((state.status === 'running' || state.status === 'agent-running') && isProcessAlive(state.worker_pid)) continue;
+      if (state.status === 'agent-running' && isProcessAlive(state.worker_pid)) continue;
       if (state.status === 'finalizing' || state.status === 'retry-wait') continue;
       if (!state.issue_number) continue;
 
@@ -1655,19 +1664,26 @@ export class Orchestrator {
         } finally {
           failedStore.close();
         }
+        const error = dispatchErrorDetails(err);
         log('error', 'pr_review_dispatch_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
           event: 'pr_review_dispatch_failed',
           pr_number: issue.number,
-          error: err instanceof Error ? err.message : String(err),
+          error,
         });
-        await this.scheduleRetry(config, issue, 1, 'dispatch_error');
+        await this.scheduleRetry(
+          config,
+          issue,
+          1,
+          `dispatch_error: ${error}`,
+          workspaceManager.lastWorkspaceForIssue(issue.id) ?? undefined,
+        );
       }
     }
   }
 
   private shouldSkipConflictResolution(issue: Issue): boolean {
-    return issue.labels.includes(LABEL_NEEDS_INFO) || issue.labels.includes('blocked') || issue.labels.includes('wontfix') || issue.labels.includes(LABEL_INTERACTIVE);
+    return issue.labels.includes(LABEL_NEEDS_INFO) || issue.labels.includes(LABEL_FAILED) || issue.labels.includes('blocked') || issue.labels.includes('wontfix') || issue.labels.includes(LABEL_INTERACTIVE);
   }
 
   private async processEpicCandidates(
@@ -1991,12 +2007,19 @@ export class Orchestrator {
             reviewStore.close();
           }
         }
+        const error = dispatchErrorDetails(err);
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, candidate, this.repoId),
           event: 'issue_dispatch_failed',
-          error: err instanceof Error ? err.message : String(err),
+          error,
         });
-        await this.scheduleRetry(config, candidate, entry.attempt, 'dispatch_error', entry.workspace_path ?? undefined);
+        await this.scheduleRetry(
+          config,
+          candidate,
+          entry.attempt,
+          `dispatch_error: ${error}`,
+          entry.workspace_path ?? workspaceManager.lastWorkspaceForIssue(candidate.id) ?? undefined,
+        );
       }
     }
   }
@@ -2021,12 +2044,19 @@ export class Orchestrator {
         if (capacity.remaining !== null) capacity.remaining -= 1;
         if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
+        const error = dispatchErrorDetails(err);
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
           event: 'issue_dispatch_failed',
-          error: err instanceof Error ? err.message : String(err),
+          error,
         });
-        await this.scheduleRetry(config, issue, 1, 'dispatch_error');
+        await this.scheduleRetry(
+          config,
+          issue,
+          1,
+          `dispatch_error: ${error}`,
+          workspaceManager.lastWorkspaceForIssue(issue.id) ?? undefined,
+        );
       }
     }
   }
@@ -2497,7 +2527,7 @@ export class Orchestrator {
       sessionId,
       stdoutPath: agentLogPath,
       stderrPath: path.join(sessionArtifactDir, 'agent.stderr.log'),
-      logFields: { ...workspaceFields, event: 'worker_started', status: 'running', attempt: opts.attempt, agent_provider: provider.id },
+      logFields: { ...workspaceFields, event: 'worker_started', status: 'agent-running', attempt: opts.attempt, agent_provider: provider.id },
       onStdoutLine: (line) => {
         if (!provider.extract_codex_thread_id) return;
         const threadId = extractCodexThreadId(line);
@@ -2769,14 +2799,14 @@ export class Orchestrator {
                     reviewPr,
                     workspacePath,
                     'unavailable',
-                    'Review hook completed without a REVIEW_VERDICT line',
+                    'Review hook completed without a valid SYMPHONY_REVIEW_RESULT payload',
                   );
                 }
               }
               log('info', 'workspace_after_run_hook_completed', { ...endFields, event: 'workspace_after_run_hook_completed', hook_log_path: afterRunLogPath });
               await updateRunState(workspacePath, (cur) => cur ? { ...cur, finalization_step: 'hook-completed', updated_at: new Date().toISOString() } : null);
             } catch (err) {
-              const error = err instanceof Error ? err.message : String(err);
+              const error = dispatchErrorDetails(err);
               const reviewResult = reviewPr ? parseStructuredReviewResult(hookOutputFromError(err)) : null;
               if (opts.prReview?.review_key) {
                 const reviewStore = new EpisodeStore(this.storePath(config));
@@ -2821,7 +2851,7 @@ export class Orchestrator {
               await this.applyLabels(config, issue.number!, { add: [LABEL_READY], remove: [LABEL_RUNNING] });
               await this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY });
               await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Post-run validation failed: ${error}. Symphony will retry.`);
-              await this.scheduleRetry(config, issue, opts.attempt, 'after_run_failed', workspacePath);
+              await this.scheduleRetry(config, issue, opts.attempt, `after_run_failed: ${error}`, workspacePath);
               return;
             }
           }
@@ -2933,7 +2963,7 @@ export class Orchestrator {
         } else {
           await this.upsertStatus(config, issue, await this.mustReadRunState(workspacePath), `Autonomous run failed with exit code ${code}. Symphony will retry.`);
         }
-        await this.scheduleRetry(config, issue, opts.attempt, 'nonzero_exit', workspacePath);
+        await this.scheduleRetry(config, issue, opts.attempt, `nonzero_exit: ${code}`, workspacePath);
       })
       .catch(async (err) => {
         const endFields = { ...workspaceFields, session_id: agent.session_id };
@@ -2972,7 +3002,7 @@ export class Orchestrator {
             .then(() => this.updateLifecycleState(workspacePath, { add: [LABEL_READY], remove: [LABEL_RUNNING], workflowState: LABEL_READY }))
             .catch(() => {});
         }
-        await this.scheduleRetry(config, issue, opts.attempt, 'runner_error', workspacePath);
+        await this.scheduleRetry(config, issue, opts.attempt, `runner_error: ${dispatchErrorDetails(err)}`, workspacePath);
       })
       .finally(() => {
         this.running.delete(issue.id);
@@ -4088,9 +4118,9 @@ Final response requirements:
   \`SYMPHONY_REVIEW_RESULT: {"verdict":"pass|block|retry","summary":"...","findings":[{"disposition":"actionable|nit|ambiguous","severity":"critical|high|medium|low|nit","summary":"...","file":"path or null","line":123}]}.\`
 - Use disposition \`actionable\` when an agent can make a clear bounded fix, \`nit\` for non-blocking polish, and \`ambiguous\` only when a real product, architecture, security, data-loss, cost, or irreversible decision is required.
 - Use verdict \`retry\` only when review could not complete because of a transient tool, provider, or environment failure.
-- End with exactly one verdict line: \`REVIEW_VERDICT: PASS\`, \`REVIEW_VERDICT: BLOCK\`, or \`REVIEW_VERDICT: RETRY\`.
-- Use \`REVIEW_VERDICT: BLOCK\` only when there are actionable blockers Symphony should send back to an agent or human before merge.
-- Use \`REVIEW_VERDICT: PASS\` when there are no blocking findings. Non-blocking notes are fine, but keep them clearly labeled.
+- Emit exactly one \`SYMPHONY_REVIEW_RESULT\` payload.
+- Use verdict \`block\` only when there are actionable blockers Symphony should send back to an agent or human before merge.
+- Use verdict \`pass\` when there are no blocking findings. Non-blocking notes are fine, but keep them clearly labeled.
 `;
     await fs.writeFile(reviewPromptPath, prompt, 'utf8');
     if (runState?.session_artifact_dir) {
@@ -4457,28 +4487,36 @@ ${runContext}`;
         reason,
       });
       if (issue.number) {
-        await this.applyLabels(config, issue.number, { add: [LABEL_NEEDS_INFO], remove: [LABEL_READY, LABEL_RUNNING] });
+        await this.applyLabels(config, issue.number, {
+          add: [LABEL_FAILED],
+          remove: [LABEL_READY, LABEL_RUNNING, LABEL_NEEDS_INFO],
+        });
         if (workspacePath) {
           await updateRunState(workspacePath, (cur) => cur ? {
             ...cur,
             status: 'failed',
             workflow_outcome: 'failed',
             retry_reason: reason,
+            labels: [...new Set([...(cur.labels ?? []).filter((label) => ![LABEL_READY, LABEL_RUNNING, LABEL_NEEDS_INFO].includes(label)), LABEL_FAILED])],
+            workflow_state: LABEL_FAILED,
             finished_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           } : null);
-          await this.updateLifecycleState(workspacePath, {
-            add: [LABEL_NEEDS_INFO],
-            remove: [LABEL_READY, LABEL_RUNNING],
-            workflowState: LABEL_NEEDS_INFO,
-          });
-          await this.upsertStatus(
-            config,
-            issue,
-            await this.mustReadRunState(workspacePath),
-            `Autonomous run failed after ${config.agent.max_attempts} attempt(s). Review the workspace and latest error before re-queueing.`,
-          );
         }
+        const marker = `<!-- symphony-failure:${issue.identifier} -->`;
+        const attempts = config.agent.max_attempts;
+        const body = [
+          marker,
+          '### Symphony Failure',
+          '',
+          `Autonomous dispatch failed after ${attempts} attempt${attempts === 1 ? '' : 's'}.`,
+          '',
+          `Reason: ${reason}`,
+          workspacePath ? `Workspace: \`${workspacePath}\`` : null,
+          '',
+          'Fix the operational failure, remove `symphony-failed`, and add `ready-for-agent` to retry.',
+        ].filter((line): line is string => line !== null).join('\n');
+        await new GithubIssueTrackerClient(config.tracker).upsertStatusComment(issue.number, marker, body);
       }
       return;
     }

@@ -121,12 +121,6 @@ function makeWorkflowConfig(workspaceRoot: string, repo = 'mdedit'): WorkflowCon
     },
     merge: { enabled: false, dry_run: false, method: 'squash', default_risk: 'standard', rules: [] },
     loops: [],
-    codex: {
-      command: 'true',
-      resume_command: 'true',
-      handoff_command: 'true',
-      turn_timeout_ms: 3600000,
-    },
     agents: {
       default: 'codex',
       providers: {
@@ -188,8 +182,11 @@ tracker:
   ignored_labels: [blocked, ready-for-human, wontfix]
 workspace:
   root: ${workspaceRoot}
-codex:
-  command: 'true'
+agents:
+  default: codex
+  providers:
+    codex:
+      command: 'true'
 ---
 Prompt
 `,
@@ -201,7 +198,7 @@ Prompt
 test('classifies local run states into dashboard columns by priority', () => {
   const terminalStates = ['closed'];
   const cases: Array<[string, RunState, string]> = [
-    ['active', makeRunState({ status: 'running', labels: ['blocked'] }), 'active'],
+    ['active', makeRunState({ status: 'agent-running', labels: ['blocked'] }), 'active'],
     ['needs info', makeRunState({ pause_reason: 'needs-info', labels: ['blocked'] }), 'needs-info'],
     ['blocked', makeRunState({ labels: ['blocked', 'symphony-review:blocking'] }), 'blocked'],
     ['review blocked', makeRunState({ labels: ['symphony-review:blocking', 'symphony-review:auto-fix-2'] }), 'review-blocked'],
@@ -211,6 +208,7 @@ test('classifies local run states into dashboard columns by priority', () => {
     ['waiting human', makeRunState({ labels: ['ready-for-human'] }), 'waiting-human'],
     ['queued', makeRunState({ labels: ['ready-for-agent'] }), 'queued'],
     ['closed', makeRunState({ issue_state: 'closed', labels: ['symphony-review:passed', 'ready-for-human'], status: 'cancelled' }), 'closed'],
+    ['operational failure', makeRunState({ labels: ['symphony-failed'] }), 'failed-cancelled'],
     ['failed', makeRunState({ status: 'failed' }), 'failed-cancelled'],
     ['cancelled', makeRunState({ status: 'cancelled' }), 'failed-cancelled'],
   ];

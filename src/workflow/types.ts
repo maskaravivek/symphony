@@ -108,13 +108,6 @@ export interface ScheduledLoopConfig {
   provider: string | null;
 }
 
-export interface CodexConfig {
-  command: string;
-  resume_command: string;
-  handoff_command: string;
-  turn_timeout_ms: number;
-}
-
 export interface AgentProviderConfig {
   id: string;
   provider_group: string;
@@ -155,7 +148,6 @@ export interface WorkflowConfig {
   review: ReviewConfig;
   merge: MergeConfig;
   loops: ScheduledLoopConfig[];
-  codex: CodexConfig;
   agents: AgentsConfig;
 }
 

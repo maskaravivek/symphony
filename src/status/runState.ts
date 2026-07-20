@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export type RunStatus = 'agent-running' | 'finalizing' | 'retry-wait' | 'completed' | 'failed' | 'cancelled' | 'paused' | 'running';
+export type RunStatus = 'agent-running' | 'finalizing' | 'retry-wait' | 'completed' | 'failed' | 'cancelled' | 'paused';
 
 export type AgentOutcome = 'completed' | 'failed' | 'cancelled' | null;
 export type WorkflowOutcome = 'completed' | 'failed' | 'cancelled' | 'paused' | 'retry-scheduled' | null;

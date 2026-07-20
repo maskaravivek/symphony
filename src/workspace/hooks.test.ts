@@ -14,7 +14,7 @@ test('captures a bounded hook output tail while writing full diagnostics to a lo
 
   try {
     const result = await runHookScript(
-      "node -e \"process.stdout.write('x'.repeat(512)); console.log('REVIEW_VERDICT: PASS')\"",
+      "node -e \"process.stdout.write('x'.repeat(512)); console.log('HOOK_COMPLETE')\"",
       cwd,
       5_000,
       { logPath },
@@ -23,9 +23,9 @@ test('captures a bounded hook output tail while writing full diagnostics to a lo
     assert.equal(result.log_path, logPath);
     assert.equal(result.stdout_truncated, true);
     assert.ok(result.stdout.length <= 128);
-    assert.match(result.output, /REVIEW_VERDICT: PASS/);
+    assert.match(result.output, /HOOK_COMPLETE/);
     const fullLog = await fs.readFile(logPath, 'utf8');
-    assert.match(fullLog, /^x{512}REVIEW_VERDICT: PASS\n$/);
+    assert.match(fullLog, /^x{512}HOOK_COMPLETE\n$/);
   } finally {
     if (previousLimit === undefined) {
       delete process.env.SYMPHONY_HOOK_CAPTURE_LIMIT_BYTES;

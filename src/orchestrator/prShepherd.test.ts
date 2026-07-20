@@ -29,8 +29,11 @@ workspace:
 review:
   enabled: false
   shepherd_pull_requests: true
-codex:
-  command: echo unused
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
 ---
 Prompt.
 `, 'utf8');
@@ -107,8 +110,11 @@ review:
   enabled: false
   shepherd_pull_requests: true
   max_feedback_rounds: 1
-codex:
-  command: echo unused
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
 ---
 Prompt.
 `, 'utf8');
@@ -198,8 +204,11 @@ workspace:
 review:
   enabled: false
   shepherd_pull_requests: true
-codex:
-  command: echo unused
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
 ---
 Prompt.
 `, 'utf8');
@@ -286,8 +295,11 @@ workspace:
 review:
   enabled: false
   shepherd_pull_requests: true
-codex:
-  command: echo unused
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
 ---
 Prompt.
 `, 'utf8');

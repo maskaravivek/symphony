@@ -79,10 +79,13 @@ hooks:
   after_create: |
     git clone ${originRepo} .
 ${opts.afterRun ? `  after_run: |\n${opts.afterRun.split('\n').map((line) => `    ${line}`).join('\n')}\n` : ''}
-codex:
-  command: ${opts.command ?? "bash -lc 'echo addressed > .symphony/last_message.md'"}
-  resume_command: bash -lc 'echo addressed > .symphony/last_message.md'
-  handoff_command: bash -lc 'echo handoff > .symphony/last_message.md'
+agents:
+  default: codex
+  providers:
+    codex:
+      command: ${opts.command ?? "bash -lc 'echo addressed > .symphony/last_message.md'"}
+      resume_command: bash -lc 'echo addressed > .symphony/last_message.md'
+      handoff_command: bash -lc 'echo handoff > .symphony/last_message.md'
 ---
 
 Prompt body
@@ -341,7 +344,7 @@ test('labels PR passed when post-run review passes', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-pass-workspace-'));
   const originRepo = await createOriginRepo();
   const workflowPath = await writeWorkflow(workspaceRoot, originRepo, {
-    afterRun: 'printf "looks good\\nREVIEW_VERDICT: PASS\\n"',
+    afterRun: `printf '%s\\n' 'SYMPHONY_REVIEW_RESULT: {"verdict":"pass","summary":"looks good","findings":[]}'`,
   });
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;
@@ -442,7 +445,8 @@ test('labels PR passed when post-run review passes', async () => {
   assert.match(reviewPrompt, /\/code-review/);
   assert.match(reviewPrompt, /staff engineer/);
   assert.match(reviewPrompt, /Review lens: `staff-engineer`/);
-  assert.match(reviewPrompt, /REVIEW_VERDICT: PASS/);
+  assert.match(reviewPrompt, /SYMPHONY_REVIEW_RESULT/);
+  assert.doesNotMatch(reviewPrompt, /REVIEW_VERDICT/);
   assert.ok(
     calls.some(
       (call) =>
@@ -576,7 +580,7 @@ test('queues one PR auto-fix iteration when post-run review blocks', async () =>
     reviewConfig: `review:
   auto_fix_review_comments: true
   number_of_auto_fix_iterations: 1`,
-    afterRun: 'printf "needs work\\nREVIEW_VERDICT: BLOCK\\n"; exit 1',
+    afterRun: `printf '%s\\n' 'SYMPHONY_REVIEW_RESULT: {"verdict":"block","summary":"needs work","findings":[{"disposition":"actionable","severity":"high","summary":"needs work","file":null,"line":null}]}' ; exit 1`,
   });
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;
@@ -711,7 +715,7 @@ test('waits for human when a blocking review repeats on the same PR head SHA', a
     reviewConfig: `review:
   auto_fix_review_comments: true
   number_of_auto_fix_iterations: 3`,
-    afterRun: 'printf "still the same problem\\nREVIEW_VERDICT: BLOCK\\n"; exit 1',
+    afterRun: `printf '%s\\n' 'SYMPHONY_REVIEW_RESULT: {"verdict":"block","summary":"still the same problem","findings":[{"disposition":"actionable","severity":"high","summary":"still the same problem","file":null,"line":null}]}' ; exit 1`,
   });
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;
@@ -810,7 +814,7 @@ test('marks PR ready for human when blocking review exhausts auto-fix iterations
     reviewConfig: `review:
   auto_fix_review_comments: true
   number_of_auto_fix_iterations: 1`,
-    afterRun: 'printf "still blocked\\nREVIEW_VERDICT: BLOCK\\n"; exit 1',
+    afterRun: `printf '%s\\n' 'SYMPHONY_REVIEW_RESULT: {"verdict":"block","summary":"still blocked","findings":[{"disposition":"actionable","severity":"high","summary":"still blocked","file":null,"line":null}]}' ; exit 1`,
   });
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;

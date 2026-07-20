@@ -87,23 +87,7 @@ export function parseStructuredReviewResult(output: string): StructuredReviewRes
   const payload = parseMarkerObject(output, RESULT_MARKER);
   const evidencePayload = parseMarkerObject(output, EVIDENCE_MARKER);
   const reviewerPayload = parseMarkerObject(output, REVIEWER_MARKER);
-  const legacyMatches = [...output.matchAll(/REVIEW_VERDICT:\s*(PASS|BLOCK|RETRY)\b/gi)];
-  const legacyVerdict = legacyMatches.at(-1)?.[1]?.toLowerCase() as ReviewVerdict | undefined;
-
-  if (!payload) {
-    if (!legacyVerdict) return null;
-    return {
-      verdict: legacyVerdict,
-      summary: `Review hook returned REVIEW_VERDICT: ${legacyVerdict.toUpperCase()}`,
-      findings: [],
-      evidence: [
-        { kind: 'review', summary: 'Independent code review completed', command: null, artifact: null },
-        ...normalizeEvidence(evidencePayload?.evidence),
-      ],
-      reviewer: normalizeReviewer(reviewerPayload),
-      structured: false,
-    };
-  }
+  if (!payload) return null;
 
   const verdict = payload.verdict;
   if (verdict !== 'pass' && verdict !== 'block' && verdict !== 'retry') return null;

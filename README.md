@@ -149,7 +149,7 @@ In `ready_for_agent_labeled_at` mode, Symphony ignores priority labels for candi
 
 ## Agent routing
 
-Symphony can route issues to different CLI agents by GitHub labels. `agents.default` handles ordinary work, while ordered `agents.routes` can send scarce or specialized work to another provider:
+Symphony can route issues to different CLI agents by GitHub labels. `agents.providers` is required; the removed top-level `codex` configuration is not accepted. `agents.default` handles ordinary work, while ordered `agents.routes` can send scarce or specialized work to another provider:
 
 ```yaml
 agents:
@@ -208,7 +208,7 @@ Issues labeled `task:spec` or `planning` run in planning-only mode regardless of
 
 When `review.enabled` is true and an autonomous run produces a PR, Symphony writes a staff-engineer review prompt to `.symphony/review_prompt.md` and exposes it to `hooks.after_run` as `SYMPHONY_REVIEW_PROMPT_PATH` plus PR metadata such as `SYMPHONY_REVIEW_PR_NUMBER`, `SYMPHONY_REVIEW_PR_HEAD_REF`, and `SYMPHONY_REVIEW_PR_HEAD_SHA`. `SYMPHONY_REVIEW_ENABLED` is always set to `1` or `0`, so repository hooks can retain their review implementation while skipping it when disabled. The prompt asks the review agent to prefer `/code-review` when the target repo has that skill installed, and to fall back to a manual review otherwise.
 
-Review hooks should emit a one-line `SYMPHONY_REVIEW_RESULT` JSON object and end with `REVIEW_VERDICT: PASS`, `BLOCK`, or `RETRY`. Findings are classified as `actionable`, `nit`, or `ambiguous`: actionable blockers can enter the bounded auto-fix loop, nits do not block, and ambiguous decisions go directly to human review. `RETRY` represents a transient reviewer or environment failure rather than a code defect.
+Review hooks must emit exactly one one-line `SYMPHONY_REVIEW_RESULT` JSON object. Findings are classified as `actionable`, `nit`, or `ambiguous`: actionable blockers can enter the bounded auto-fix loop, nits do not block, and ambiguous decisions go directly to human review. The `retry` verdict represents a transient reviewer or environment failure rather than a code defect.
 
 Hooks can also emit `SYMPHONY_REVIEWER` and `SYMPHONY_VERIFICATION_EVIDENCE` one-line JSON objects. Receipts record reviewer execution/provider/model/lens, policy version, and typed evidence such as `test`, `integration`, `browser-observation`, or `migration-dry-run`. Every receipt is bound to both the PR head SHA and base SHA.
 
@@ -285,13 +285,13 @@ One due trigger starts one agent run in a durable `_loops/<id>` workspace. The t
 - `symphony doctor` checks tools referenced inside shell-wrapped providers and hooks (including `codex`, `claude`, `codexbar`, `jq`, and package managers), verifies at least 5 GiB is free under each workspace root, confirms lifecycle labels, and exits non-zero when a required dependency is missing.
 - `workspace.strategy` is optional and defaults to today's durable per-issue workspace behavior. Supported strategies are `durable_issue_workspace`, `pooled_isolated`, `none_or_readonly`, and `durable_epic_workspace`; hooks and agent commands receive the selected value as `symphony.workspace_strategy` / `SYMPHONY_WORKSPACE_STRATEGY`. Planning agents that must inspect repository files should use `durable_issue_workspace` together with a read-only `handoff_command`; `none_or_readonly` intentionally creates no checkout and is only suitable for source-independent prompts.
 - Each workflow workspace root has a single-runner lock at `.symphony/orchestrator.lock`; a second Symphony process for the same repo skips dispatch while the live owner is running. After a restart, Symphony recovers orphaned `agent-running` claims from older runs by cancelling the stale worker PID when possible, clearing `agent-running`, and re-queueing the issue unless it now has an ignored label.
-- `needs-info`, `interactive`, `ready-for-human`, and `blocked` are always non-queueable, including for epic auto-labeling and durable retries.
+- `needs-info`, `interactive`, `ready-for-human`, `symphony-failed`, and `blocked` are always non-queueable, including for epic auto-labeling and durable retries.
 - `run` writes daily structured logs beside its controlling config under `.symphony/logs/`, with owner-only permissions, sensitive-field redaction, and 30-day retention.
 - If a workspace exists but is missing `.git`, Symphony will clear the workspace contents and re-run `hooks.after_create` (to recover from interrupted runs).
 - Hook scripts (`hooks.after_create`, `hooks.before_run`, `hooks.after_run`) are rendered as Liquid templates with `issue.*` available.
 - Agent commands are rendered as Liquid templates with `issue.*` and `symphony.prompt_path` / `symphony.workspace_path` / `symphony.agent_provider` / `symphony.agent_thread_id` available.
 - Agent commands also receive `symphony.session_id` plus `SYMPHONY_SESSION_ID`, `SYMPHONY_RUN_ARTIFACT_DIR`, `SYMPHONY_AGENT_LOG_PATH`, and `SYMPHONY_LAST_MESSAGE_PATH`. Review hooks should treat `SYMPHONY_REVIEW_PR_*` as authoritative in PR-review mode.
-- Legacy `codex.command` workflows still work; Symphony converts them into a default `codex` provider internally.
+- Workflows configure agent commands through `agents.providers`; removed top-level provider options are rejected instead of translated.
 - Issue and PR creation remain agent/toolchain responsibilities (`gh`, MCP, etc.); Symphony itself owns lifecycle comments/labels and policy-gated merges.
 
 ## Unattended macOS operation

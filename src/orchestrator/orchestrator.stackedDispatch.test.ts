@@ -57,10 +57,13 @@ hooks:
   before_run: |
     mkdir -p .symphony
     printf "%s" "$SYMPHONY_STACK_BASE_BRANCH" > .symphony/stack-base-branch.txt
-codex:
-  command: bash -lc 'printf "fresh:%s:%s" "$SYMPHONY_STACK_BASE_BRANCH" "$SYMPHONY_AGENT_THREAD_ID" > .symphony/last_message.md'
-  resume_command: bash -lc 'printf "resume:%s:%s" "$SYMPHONY_STACK_BASE_BRANCH" "$SYMPHONY_AGENT_THREAD_ID" > .symphony/last_message.md'
-  handoff_command: bash -lc 'printf "handoff" > .symphony/last_message.md'
+agents:
+  default: codex
+  providers:
+    codex:
+      command: bash -lc 'printf "fresh:%s:%s" "$SYMPHONY_STACK_BASE_BRANCH" "$SYMPHONY_AGENT_THREAD_ID" > .symphony/last_message.md'
+      resume_command: bash -lc 'printf "resume:%s:%s" "$SYMPHONY_STACK_BASE_BRANCH" "$SYMPHONY_AGENT_THREAD_ID" > .symphony/last_message.md'
+      handoff_command: bash -lc 'printf "handoff" > .symphony/last_message.md'
 ---
 
 Issue {{ issue.identifier }}

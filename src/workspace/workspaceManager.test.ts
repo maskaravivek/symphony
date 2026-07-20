@@ -7,7 +7,7 @@ import test from 'node:test';
 import { promisify } from 'node:util';
 
 import type { Issue } from '../domain/issue.js';
-import { writeRunState, type RunState } from '../status/runState.js';
+import { writeRunState, type RunState, type RunStatus } from '../status/runState.js';
 import type { WorkspaceConfig } from '../workflow/types.js';
 import { WorkspaceManager } from './workspaceManager.js';
 
@@ -48,15 +48,15 @@ function workspaceConfig(root: string): WorkspaceConfig {
   };
 }
 
-function runningState(workspacePath: string): RunState {
+function runningState(workspacePath: string, status: RunStatus = 'agent-running', issueNumber = 1): RunState {
   return {
     repo_id: null,
     owner: 'mangoappstudio',
     repo: 'mdedit',
-    issue_id: '1',
-    issue_number: 1,
-    issue_identifier: 'mangoappstudio/mdedit#1',
-    issue_url: 'https://github.test/mangoappstudio/mdedit/issues/1',
+    issue_id: String(issueNumber),
+    issue_number: issueNumber,
+    issue_identifier: `mangoappstudio/mdedit#${issueNumber}`,
+    issue_url: `https://github.test/mangoappstudio/mdedit/issues/${issueNumber}`,
     workspace_path: workspacePath,
     workspace_strategy: 'pooled_isolated',
     attempt: 1,
@@ -71,7 +71,7 @@ function runningState(workspacePath: string): RunState {
     codex_mode: 'autonomous',
     pause_reason: null,
     worker_pid: null,
-    status: 'running',
+    status,
     started_at: '2026-07-01T00:00:00.000Z',
     finished_at: null,
     last_exit_code: null,
@@ -104,7 +104,7 @@ test('allocates strategy-specific workspace paths', async () => {
   assert.equal(epic.workspace_path, path.join(root, 'epic_mangoappstudio_mdedit_99'));
 });
 
-test('pooled workspaces skip running slots', async () => {
+test('pooled workspaces never reuse an agent-running slot', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-workspace-pool-'));
   const manager = new WorkspaceManager(workspaceConfig(root), 2);
   const firstSlot = path.join(root, '_pool_1');
@@ -115,6 +115,21 @@ test('pooled workspaces skip running slots', async () => {
   assert.equal(allocated.workspace_path, path.join(root, '_pool_2'));
   assert.equal(allocated.strategy, 'pooled_isolated');
   assert.equal(allocated.is_new, true);
+});
+
+test('pooled workspaces preserve paused issues without exhausting dispatch capacity', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-workspace-pool-paused-'));
+  const manager = new WorkspaceManager(workspaceConfig(root), 2);
+  const firstSlot = path.join(root, '_pool_1');
+  const secondSlot = path.join(root, '_pool_2');
+  await writeRunState(firstSlot, runningState(firstSlot, 'paused', 1));
+  await writeRunState(secondSlot, runningState(secondSlot, 'paused', 2));
+
+  const fresh = await manager.ensureWorkspace(issue(3), { strategy: 'pooled_isolated' });
+  const resumed = await manager.ensureWorkspace(issue(1), { strategy: 'pooled_isolated' });
+
+  assert.equal(fresh.workspace_path, path.join(root, '_pool_3'));
+  assert.equal(resumed.workspace_path, firstSlot);
 });
 
 test('hasGitRepo rejects leftover .git directories that are not worktrees', async () => {

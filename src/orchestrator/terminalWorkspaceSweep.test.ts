@@ -47,10 +47,13 @@ tracker:
 workspace:
   root: ${workspaceRoot}
   clean_on_terminal: true
-codex:
-  command: echo should-not-run
-  resume_command: echo should-not-run
-  handoff_command: echo should-not-run
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo should-not-run
+      resume_command: echo should-not-run
+      handoff_command: echo should-not-run
 ---
 
 Prompt body
@@ -166,7 +169,7 @@ test('keeps live running workspaces during terminal sweeps', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-live-sweep-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot);
   const workspacePath = await writeWorkspace(workspaceRoot, 'mangoappstudio_mdedit_42', {
-    status: 'running',
+    status: 'agent-running',
     finished_at: null,
     last_exit_code: null,
     worker_pid: process.pid,
@@ -190,7 +193,7 @@ test('orphan reconciliation recovers live pooled workspaces', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pooled-orphan-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot);
   const workspacePath = await writeWorkspace(workspaceRoot, '_pool_1', {
-    status: 'running',
+    status: 'agent-running',
     labels: ['agent-running'],
     workflow_state: 'agent-running',
     finished_at: null,
@@ -244,7 +247,7 @@ test('live orphaned workers are recovered before dispatch capacity is checked', 
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-orphan-capacity-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot);
   await writeWorkspace(workspaceRoot, 'mangoappstudio_mdedit_42', {
-    status: 'running',
+    status: 'agent-running',
     labels: ['agent-running'],
     workflow_state: 'agent-running',
     finished_at: null,

@@ -110,7 +110,7 @@ test('blocks prohibited, draft, conflicted, pending-check, paused, and unlinked 
       head_sha: 'head-1',
       base_sha: 'base-1',
       linked_issue_number: null,
-      labels: ['needs-info'],
+      labels: ['needs-info', 'symphony-failed'],
     },
     checks: [{ name: 'test', status: 'in_progress', conclusion: null }],
     receipts: [receipt('review-1')],
@@ -121,6 +121,7 @@ test('blocks prohibited, draft, conflicted, pending-check, paused, and unlinked 
   assert.ok(decision.reasons.includes('pull request is not mergeable: dirty'));
   assert.ok(decision.reasons.includes('no linked issue'));
   assert.ok(decision.reasons.includes('blocking workflow label: needs-info'));
+  assert.ok(decision.reasons.includes('blocking workflow label: symphony-failed'));
   assert.ok(decision.reasons.includes('check is not successful: test (in_progress)'));
 });
 

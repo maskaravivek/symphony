@@ -31,8 +31,11 @@ workspace:
 merge:
   enabled: true
   method: squash
-codex:
-  command: echo unused
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
 ---
 
 Issue prompt.
@@ -128,8 +131,11 @@ workspace:
   root: ${path.join(root, 'workspaces')}
 merge:
   enabled: true
-codex:
-  command: echo unused
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
 ---
 Prompt.
 `, 'utf8');

@@ -191,6 +191,7 @@ function derivePriority(labels: string[], priorityLabels: Record<string, number>
 }
 
 function deriveWorkflowState(labels: string[]): string | null {
+  if (labels.includes('symphony-failed')) return 'symphony-failed';
   if (labels.includes('blocked')) return 'blocked';
   if (labels.includes('ready-for-human')) return 'ready-for-human';
   if (labels.includes('needs-info')) return 'needs-info';
@@ -313,6 +314,7 @@ function labelDescription(name: string): string {
   if (name === 'agent-running') return 'Symphony has claimed this issue or PR and an agent is running.';
   if (name === 'ready-for-human') return 'Symphony is done; this issue or PR is waiting for a human.';
   if (name === 'needs-info') return 'Symphony paused because it needs input.';
+  if (name === 'symphony-failed') return 'Symphony exhausted automated retries because of an operational failure.';
   if (name.startsWith('symphony-review:')) return 'Managed by Symphony PR review workflow.';
   return 'Managed by Symphony.';
 }
@@ -322,6 +324,7 @@ function labelColor(name: string): string {
   if (name === 'agent-running') return '1d76db';
   if (name === 'ready-for-human') return 'fbca04';
   if (name === 'needs-info') return 'd93f0b';
+  if (name === 'symphony-failed') return 'b60205';
   if (name.startsWith('symphony-review:')) return '5319e7';
   return 'ededed';
 }

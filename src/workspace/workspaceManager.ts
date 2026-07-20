@@ -5,7 +5,6 @@ import { promisify } from 'node:util';
 
 import type { Issue } from '../domain/issue.js';
 import { readRunState } from '../status/runState.js';
-import { SymphonyConfigError } from '../utils/errors.js';
 import type { WorkspaceConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { assertPathWithinRoot } from '../utils/fs.js';
 
@@ -59,6 +58,7 @@ export function workspacePathForPoolSlot(workspaceRoot: string, slot: number): s
 export class WorkspaceManager {
   private config: WorkspaceConfig;
   private poolSize: number;
+  private allocations = new Map<string, string>();
 
   constructor(config: WorkspaceConfig, poolSize = 1) {
     this.config = config;
@@ -72,7 +72,7 @@ export class WorkspaceManager {
     const strategy = options.strategy ?? 'durable_issue_workspace';
     const workspacePath =
       strategy === 'pooled_isolated'
-        ? await this.acquirePoolWorkspace()
+        ? await this.acquirePoolWorkspace(issue)
         : strategy === 'none_or_readonly'
           ? workspacePathForReadonlyIssue(this.config.root, issue)
           : strategy === 'durable_epic_workspace'
@@ -86,16 +86,42 @@ export class WorkspaceManager {
       isNew = true;
       await fs.mkdir(workspacePath, { recursive: true });
     }
+    this.allocations.set(issue.id, workspacePath);
     return { workspace_path: workspacePath, is_new: isNew, strategy };
   }
 
-  private async acquirePoolWorkspace(): Promise<string> {
-    for (let slot = 1; slot <= this.poolSize; slot += 1) {
+  lastWorkspaceForIssue(issueId: string): string | null {
+    return this.allocations.get(issueId) ?? null;
+  }
+
+  private async acquirePoolWorkspace(issue: Issue): Promise<string> {
+    const entries = await fs.readdir(this.config.root, { withFileTypes: true }).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return [];
+      throw err;
+    });
+    const existingSlots = entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => /^_pool_(\d+)$/.exec(entry.name))
+      .filter((match): match is RegExpExecArray => Boolean(match))
+      .map((match) => Number(match[1]))
+      .filter((slot) => Number.isInteger(slot) && slot > 0);
+    const highestExistingSlot = existingSlots.length > 0 ? Math.max(...existingSlots) : 0;
+    const highestReusableSlot = Math.max(this.poolSize, highestExistingSlot);
+    const reservedStatuses = new Set(['agent-running', 'finalizing', 'retry-wait', 'paused']);
+
+    for (let slot = 1; slot <= highestExistingSlot; slot += 1) {
       const workspacePath = workspacePathForPoolSlot(this.config.root, slot);
       const state = await readRunState(workspacePath);
-      if (!state || (state.status !== 'running' && state.status !== 'paused')) return workspacePath;
+      if (state?.issue_id === issue.id && (state.status === 'paused' || state.status === 'retry-wait')) return workspacePath;
     }
-    throw new SymphonyConfigError(`No pooled workspace slots are available under ${this.config.root}`);
+
+    for (let slot = 1; slot <= highestReusableSlot; slot += 1) {
+      const workspacePath = workspacePathForPoolSlot(this.config.root, slot);
+      const state = await readRunState(workspacePath);
+      if (!state || !reservedStatuses.has(state.status)) return workspacePath;
+    }
+
+    return workspacePathForPoolSlot(this.config.root, highestReusableSlot + 1);
   }
 
   async hasGitRepo(workspacePath: string): Promise<boolean> {

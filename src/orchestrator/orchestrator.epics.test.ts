@@ -64,10 +64,13 @@ tracker:
     max_depth: 8
 workspace:
   root: ${workspaceRoot}
-${afterCreate}codex:
-  command: ${command}
-  resume_command: ${resumeCommand}
-  handoff_command: ${command}
+${afterCreate}agents:
+  default: codex
+  providers:
+    codex:
+      command: ${command}
+      resume_command: ${resumeCommand}
+      handoff_command: ${command}
 ---
 
 Prompt body

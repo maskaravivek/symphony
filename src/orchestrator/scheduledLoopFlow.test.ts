@@ -38,8 +38,11 @@ loops:
   - id: quality
     interval_ms: 86400000
     prompt: Run one quality pass.
-codex:
-  command: bash -lc 'printf "%s" "$SYMPHONY_LAST_MESSAGE_PATH" > loop-last-message-path.txt; echo run >> loop-runs.txt; echo done > "$SYMPHONY_LAST_MESSAGE_PATH"'
+agents:
+  default: codex
+  providers:
+    codex:
+      command: bash -lc 'printf "%s" "$SYMPHONY_LAST_MESSAGE_PATH" > loop-last-message-path.txt; echo run >> loop-runs.txt; echo done > "$SYMPHONY_LAST_MESSAGE_PATH"'
 ---
 
 Issue prompt.

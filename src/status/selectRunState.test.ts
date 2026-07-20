@@ -22,7 +22,7 @@ function makeState(repoId: string, issueNumber: number): RunState {
     codex_mode: 'autonomous',
     pause_reason: null,
     worker_pid: null,
-    status: 'running',
+    status: 'agent-running',
     started_at: null,
     finished_at: null,
     last_exit_code: null,

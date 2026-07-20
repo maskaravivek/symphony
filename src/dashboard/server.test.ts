@@ -34,7 +34,7 @@ function makeRunState(workspacePath: string): RunState {
     codex_mode: 'autonomous',
     pause_reason: null,
     worker_pid: null,
-    status: 'running',
+    status: 'agent-running',
     started_at: '2026-07-08T11:00:00.000Z',
     finished_at: null,
     last_exit_code: null,
@@ -65,8 +65,11 @@ tracker:
   ignored_labels: [blocked, ready-for-human, wontfix]
 workspace:
   root: ${workspaceRoot}
-codex:
-  command: 'true'
+agents:
+  default: codex
+  providers:
+    codex:
+      command: 'true'
 ---
 Prompt
 `,

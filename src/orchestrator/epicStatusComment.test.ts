@@ -73,7 +73,6 @@ function config(): WorkflowConfig {
     review: { enabled: true, auto_fix_review_comments: false, number_of_auto_fix_iterations: 1, shepherd_pull_requests: false, max_feedback_rounds: 5, non_blocking_feedback_priorities: ['p2', 'p3'], lenses: ['staff-engineer'] },
     merge: { enabled: false, dry_run: false, method: 'squash', default_risk: 'standard', rules: [] },
     loops: [],
-    codex: { command: 'codex exec -', resume_command: 'codex exec resume thread -', handoff_command: 'codex exec -', turn_timeout_ms: 3600000 },
     agents: {
       default: 'codex',
       providers: {
