@@ -15,7 +15,13 @@ function jsonResponse(value: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-function issuePayload(number: number, title: string, state: string, labels: string[] = []) {
+function issuePayload(
+  number: number,
+  title: string,
+  state: string,
+  labels: string[] = [],
+  options: { openDependencies?: number } = {},
+) {
   return {
     id: number,
     node_id: `I_${number}`,
@@ -24,6 +30,11 @@ function issuePayload(number: number, title: string, state: string, labels: stri
     state,
     labels: labels.map((name) => ({ name })),
     html_url: `https://github.test/mangoappstudio/mdedit/issues/${number}`,
+    repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
+    issue_dependencies_summary: {
+      blocked_by: options.openDependencies ?? 0,
+      total_blocked_by: options.openDependencies ?? 0,
+    },
   };
 }
 
@@ -136,6 +147,60 @@ test('coordinates native sub-issue parent without dispatching parent workspace',
   assert.equal(epics[0]?.status, 'coordinating');
   assert.equal(epics[0]?.children[0]?.queued, true);
   assert.equal(epics[0]?.status_comment_id, 500);
+});
+
+test('auto-labels dependency-blocked epic children without marking them queued', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-epic-dependency-workspace-'));
+  const workflowPath = await writeWorkflow(workspaceRoot);
+  const calls: { url: string; method: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? 'GET';
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({ url, method, body });
+
+    if (url.startsWith('https://api.github.test/repos/mangoappstudio/mdedit/issues?')) {
+      return jsonResponse([issuePayload(42, 'Epic parent', 'open', ['ready-for-agent'])]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/pulls?state=open&per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/sub_issues?per_page=50') {
+      return jsonResponse([issuePayload(43, 'Dependent leaf', 'open', [], { openDependencies: 1 })]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/dependencies/blocked_by?per_page=50') {
+      return jsonResponse([issuePayload(99, 'Blocking issue', 'open')]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/sub_issues?per_page=50') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/43/labels' && method === 'POST') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/comments?per_page=50' && method === 'GET') {
+      return jsonResponse([]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/comments' && method === 'POST') {
+      return jsonResponse({ id: 502, body: String(body), html_url: 'https://github.test/comment/502' });
+    }
+    throw new Error(`Unexpected fetch ${method} ${url}`);
+  };
+
+  try {
+    const orchestrator = new Orchestrator({ workflowPath });
+    await orchestrator.tickOnce();
+    await orchestrator.shutdown('test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.deepEqual(calls.find((call) => call.url.endsWith('/issues/43/labels'))?.body, {
+    labels: ['ready-for-agent'],
+  });
+  const epics = await readEpicStates(workspaceRoot);
+  assert.equal(epics[0]?.children[0]?.queued, false);
+  assert.equal(epics[0]?.children[0]?.skipped_reason, 'native_dependency');
 });
 
 test('reconciles a persisted coordinating epic when its parent is closed between polls', async () => {

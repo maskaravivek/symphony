@@ -147,6 +147,12 @@ tracker:
 
 In `ready_for_agent_labeled_at` mode, Symphony ignores priority labels for candidate ordering and picks the oldest active `ready-for-agent` label first. If `ready-for-agent` is removed and later re-added, the re-add time becomes the new queue position.
 
+## Native GitHub dependencies
+
+Use GitHub's native `blocked by` relationships for dependency ordering. A `ready-for-agent` issue with any open native dependency remains out of the dispatch queue and becomes eligible automatically after every blocking issue closes. Symphony reads only GitHub's native dependency graph; dependency-like prose such as `Depends on: #123` is not interpreted.
+
+The `blocked` label is separate and always requires human removal. Reserve it for manual, product, or external blockers that cannot be represented by a GitHub issue dependency.
+
 ## Agent routing
 
 Symphony can route issues to different CLI agents by GitHub labels. `agents.providers` is required; the removed top-level `codex` configuration is not accepted. `agents.default` handles ordinary work, while ordered `agents.routes` can send scarce or specialized work to another provider:

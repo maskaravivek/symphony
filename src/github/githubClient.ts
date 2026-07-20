@@ -47,6 +47,10 @@ type GithubIssuePayload = {
   created_at?: string;
   updated_at?: string;
   pull_request?: unknown;
+  issue_dependencies_summary?: {
+    blocked_by?: number;
+    total_blocked_by?: number;
+  } | null;
 };
 
 type GithubIssueEventPayload = {
@@ -223,32 +227,6 @@ function ownerRepoFromRepositoryUrl(repositoryUrl: string | undefined): { owner:
   return { owner: decodeURIComponent(match[1]), repo: decodeURIComponent(match[2]) };
 }
 
-function parseBlockers(body: string | null): { owner: string | null; repo: string | null; number: number }[] {
-  if (!body) return [];
-  const results: { owner: string | null; repo: string | null; number: number }[] = [];
-  const lines = body.split('\n');
-  for (const line of lines) {
-    const match = /^\s*(blocked by|depends on)\s*:\s*(.+?)\s*$/i.exec(line);
-    if (!match) continue;
-    const refs = match[2]
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-    for (const ref of refs) {
-      const sameRepo = /^#(\d+)$/.exec(ref);
-      if (sameRepo) {
-        results.push({ owner: null, repo: null, number: Number(sameRepo[1]) });
-        continue;
-      }
-      const crossRepo = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)$/.exec(ref);
-      if (crossRepo) {
-        results.push({ owner: crossRepo[1], repo: crossRepo[2], number: Number(crossRepo[3]) });
-      }
-    }
-  }
-  return results;
-}
-
 function normalizeGithubIssuePayload(owner: string, repo: string, tracker: GithubTrackerConfig, payload: GithubIssuePayload): Issue {
   const payloadRepo = ownerRepoFromRepositoryUrl(payload.repository_url);
   const issueOwner = payloadRepo?.owner ?? owner;
@@ -262,12 +240,6 @@ function normalizeGithubIssuePayload(owner: string, repo: string, tracker: Githu
   if (!issueId) throw new SymphonyRuntimeError('GitHub issue payload missing id');
   if (!number) throw new SymphonyRuntimeError(`GitHub issue payload missing number for id ${issueId}`);
   if (!title) throw new SymphonyRuntimeError(`GitHub issue payload missing title for ${issueOwner}/${issueRepo}#${number}`);
-
-  const blockers = parseBlockers(payload.body ?? null).map((b) => ({
-    id: null,
-    identifier: b.owner && b.repo ? `${b.owner}/${b.repo}#${b.number}` : `${issueOwner}/${issueRepo}#${b.number}`,
-    state: null,
-  }));
 
   return {
     id: issueId,
@@ -283,7 +255,7 @@ function normalizeGithubIssuePayload(owner: string, repo: string, tracker: Githu
     labels,
     assignees: (payload.assignees ?? []).map((a) => a.login).filter((v): v is string => typeof v === 'string'),
     milestone: payload.milestone?.title ?? null,
-    blocked_by: blockers,
+    blocked_by: [],
     pull_requests: [],
     created_at: payload.created_at ?? null,
     updated_at: payload.updated_at ?? null,
@@ -368,9 +340,11 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     url.searchParams.set('per_page', String(this.tracker.page_size));
 
     const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
-    const issues = raw
-      .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
-      .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
+    const issues = await Promise.all(
+      raw
+        .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
+        .map((p) => this.normalizeIssueWithNativeDependencies(p)),
+    );
 
     const eligible = await this.filterEligibleIssues(issues);
     await this.enrichReadyForAgentLabeledAt(eligible);
@@ -386,9 +360,11 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     url.searchParams.set('per_page', String(this.tracker.page_size));
 
     const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
-    const issues = raw
-      .filter((p) => p.pull_request !== undefined)
-      .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
+    const issues = await Promise.all(
+      raw
+        .filter((p) => p.pull_request !== undefined)
+        .map((p) => this.normalizeIssueWithNativeDependencies(p)),
+    );
 
     const eligible = await this.filterEligibleIssues(issues);
     await this.enrichReadyForAgentLabeledAt(eligible);
@@ -404,7 +380,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
       const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
       for (const p of raw) {
         if (!this.tracker.include_pull_requests && p.pull_request !== undefined) continue;
-        issues.push(normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
+        issues.push(await this.normalizeIssueWithNativeDependencies(p));
       }
     }
     return issues;
@@ -428,22 +404,24 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     const payload = await this.fetchIssueByNumberInRepo(this.tracker.owner, this.tracker.repo, number);
     if (!payload) return null;
     if (!this.tracker.include_pull_requests && payload.pull_request !== undefined) return null;
-    return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+    return this.normalizeIssueWithNativeDependencies(payload);
   }
 
   async fetchIssueOrPullRequestByNumber(number: number): Promise<Issue | null> {
     const payload = await this.fetchIssueByNumberInRepo(this.tracker.owner, this.tracker.repo, number);
     if (!payload) return null;
-    return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+    return this.normalizeIssueWithNativeDependencies(payload);
   }
 
   async listSubIssues(number: number): Promise<Issue[]> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues/${number}/sub_issues`, this.tracker.api_base_url);
     url.searchParams.set('per_page', String(this.tracker.page_size));
     const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
-    return raw
-      .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
-      .map((p) => normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, p));
+    return Promise.all(
+      raw
+        .filter((p) => (this.tracker.include_pull_requests ? true : p.pull_request === undefined))
+        .map((p) => this.normalizeIssueWithNativeDependencies(p)),
+    );
   }
 
   async getParentIssue(number: number): Promise<Issue | null> {
@@ -453,7 +431,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     if (!data || typeof data !== 'object') throw new SymphonyRuntimeError('Expected GitHub parent issue response to be an object');
     const payload = data as GithubIssuePayload;
     if (!this.tracker.include_pull_requests && payload.pull_request !== undefined) return null;
-    return normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+    return this.normalizeIssueWithNativeDependencies(payload);
   }
 
   async buildEpicTree(issue: Issue, maxDepth: number): Promise<EpicTreeNode> {
@@ -745,12 +723,6 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     }
   }
 
-  async isIssueClosed(owner: string, repo: string, number: number): Promise<boolean | null> {
-    const payload = await this.fetchIssueByNumberInRepo(owner, repo, number);
-    if (!payload) return null;
-    return payload.state === 'closed';
-  }
-
   private async filterEligibleIssues(issues: Issue[]): Promise<Issue[]> {
     const required = new Set(this.tracker.required_labels);
     const ignored = new Set(this.tracker.ignored_labels);
@@ -792,7 +764,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
       if (!this.tracker.active_states.includes(issue.state)) continue;
       if (this.tracker.terminal_states.includes(issue.state)) continue;
 
-      const blockersOk = await this.areBlockersResolved(issue);
+      const blockersOk = this.areBlockersResolved(issue);
       if (!blockersOk) continue;
 
       filtered.push(issue);
@@ -800,24 +772,49 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     return filtered;
   }
 
-  private async areBlockersResolved(issue: Issue): Promise<boolean> {
-    if (issue.blocked_by.length === 0) return true;
+  private areBlockersResolved(issue: Issue): boolean {
+    return issue.blocked_by.every((blocker) => {
+      if (!blocker.identifier || !blocker.state) return false;
+      return this.tracker.terminal_states.includes(blocker.state.trim().toLowerCase());
+    });
+  }
 
-    for (const blocker of issue.blocked_by) {
-      const ref = blocker.identifier;
-      if (!ref) return false;
-      const matchSameRepo = /^[^/]+\/[^/]+#(\d+)$/.exec(ref);
-      if (!matchSameRepo) return false;
+  private async normalizeIssueWithNativeDependencies(payload: GithubIssuePayload): Promise<Issue> {
+    const issue = normalizeGithubIssuePayload(this.tracker.owner, this.tracker.repo, this.tracker, payload);
+    const openDependencyCount = payload.issue_dependencies_summary?.blocked_by;
+    if (typeof openDependencyCount !== 'number' || openDependencyCount <= 0) return issue;
+    if (!issue.number) throw new SymphonyRuntimeError(`GitHub issue ${issue.identifier} is missing its issue number`);
+    const issueRepo = ownerRepoFromRepositoryUrl(payload.repository_url) ?? {
+      owner: this.tracker.owner,
+      repo: this.tracker.repo,
+    };
 
-      const num = Number(matchSameRepo[1]);
-      const ownerRepo = ref.split('#')[0];
-      const [owner, repo] = ownerRepo.split('/');
-      const closed = await this.isIssueClosed(owner, repo, num);
-      blocker.state = closed === null ? null : closed ? 'closed' : 'open';
-      if (closed !== true) return false;
+    const url = new URL(
+      `/repos/${issueRepo.owner}/${issueRepo.repo}/issues/${issue.number}/dependencies/blocked_by`,
+      this.tracker.api_base_url,
+    );
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const rawBlockers = await this.fetchAllPages<GithubIssuePayload>(url.toString());
+    issue.blocked_by = rawBlockers.map((blocker) => {
+      const blockerRepo = ownerRepoFromRepositoryUrl(blocker.repository_url);
+      const blockerId = blocker.node_id ?? (blocker.id !== undefined ? String(blocker.id) : null);
+      const blockerNumber = typeof blocker.number === 'number' ? blocker.number : null;
+      const blockerState = typeof blocker.state === 'string' ? blocker.state.trim().toLowerCase() : null;
+      if (!blockerRepo || !blockerId || !blockerNumber || !blockerState) {
+        throw new SymphonyRuntimeError(`GitHub returned an invalid native dependency for ${issue.identifier}`);
+      }
+      return {
+        id: blockerId,
+        identifier: `${blockerRepo.owner}/${blockerRepo.repo}#${blockerNumber}`,
+        state: blockerState,
+      };
+    });
+    if (issue.blocked_by.length === 0) {
+      throw new SymphonyRuntimeError(
+        `GitHub reported ${openDependencyCount} open native dependencies for ${issue.identifier}, but returned none`,
+      );
     }
-
-    return true;
+    return issue;
   }
 
   private async enrichReadyForAgentLabeledAt(issues: Issue[]): Promise<void> {
@@ -968,6 +965,7 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     try {
       const headers: Record<string, string> = {
         Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2026-03-10',
         'User-Agent': 'symphony-mvp',
       };
       let body: string | undefined;

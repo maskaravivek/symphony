@@ -46,22 +46,103 @@ function issuePayload(
   number: number,
   createdAt: string,
   labels: string[] = ['ready-for-agent'],
-  extra: Partial<{ updated_at: string; pull_request: unknown; title: string }> = {},
+  extra: Partial<{
+    updated_at: string;
+    pull_request: unknown;
+    title: string;
+    body: string;
+    state: string;
+    issue_dependencies_summary: { blocked_by: number; total_blocked_by: number };
+  }> = {},
 ) {
   return {
     id: number,
     node_id: `I_${number}`,
     number,
     title: extra.title ?? `Issue ${number}`,
-    state: 'open',
+    state: extra.state ?? 'open',
+    body: extra.body ?? null,
     labels: labels.map((name) => ({ name })),
     html_url: `https://github.test/mangoappstudio/mdedit/issues/${number}`,
     repository_url: 'https://api.github.test/repos/mangoappstudio/mdedit',
     created_at: createdAt,
     updated_at: extra.updated_at ?? createdAt,
+    ...(extra.issue_dependencies_summary !== undefined
+      ? { issue_dependencies_summary: extra.issue_dependencies_summary }
+      : {}),
     ...(extra.pull_request !== undefined ? { pull_request: extra.pull_request } : {}),
   };
 }
+
+test('uses native GitHub dependencies and ignores legacy body dependency prose', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([
+        issuePayload(42, '2026-07-05T12:00:00Z', ['ready-for-agent'], {
+          body: 'Depends on: #99',
+          issue_dependencies_summary: { blocked_by: 1, total_blocked_by: 1 },
+        }),
+        issuePayload(43, '2026-07-05T12:01:00Z', ['ready-for-agent'], {
+          body: 'Blocked by: #100',
+          issue_dependencies_summary: { blocked_by: 0, total_blocked_by: 0 },
+        }),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/dependencies/blocked_by?per_page=50') {
+      return jsonResponse([
+        issuePayload(99, '2026-07-04T12:00:00Z', [], { state: 'open' }),
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    const issues = await client.fetchCandidateIssues();
+    assert.deepEqual(issues.map((issue) => issue.number), [43]);
+    assert.deepEqual(calls, [
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50',
+      'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/dependencies/blocked_by?per_page=50',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('hydrates native blockedBy references and allows candidates after dependencies close', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues?state=open&labels=ready-for-agent&per_page=50') {
+      return jsonResponse([
+        issuePayload(42, '2026-07-05T12:00:00Z', ['ready-for-agent'], {
+          issue_dependencies_summary: { blocked_by: 1, total_blocked_by: 1 },
+        }),
+      ]);
+    }
+    if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42/dependencies/blocked_by?per_page=50') {
+      return jsonResponse([
+        issuePayload(99, '2026-07-04T12:00:00Z', [], { state: 'closed' }),
+      ]);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  };
+
+  try {
+    const client = new GithubIssueTrackerClient(trackerConfig());
+    const [issue] = await client.fetchCandidateIssues();
+    assert.equal(issue?.number, 42);
+    assert.deepEqual(issue?.blocked_by, [
+      { id: 'I_99', identifier: 'mangoappstudio/mdedit#99', state: 'closed' },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('derives flat branch names from issues', async () => {
   const originalFetch = globalThis.fetch;

@@ -606,6 +606,12 @@ function isTerminalIssue(config: WorkflowConfig, issue: Issue): boolean {
   return config.tracker.terminal_states.includes(issue.state);
 }
 
+function hasOpenNativeDependency(config: WorkflowConfig, issue: Issue): boolean {
+  return issue.blocked_by.some(
+    (blocker) => !blocker.state || !config.tracker.terminal_states.includes(blocker.state.trim().toLowerCase()),
+  );
+}
+
 function labelsMatchRoute(labels: string[], route: WorkflowConfig['agents']['routes'][number]): boolean {
   const set = new Set(labels.map((label) => label.trim().toLowerCase()));
   if (route.none_labels.some((label) => set.has(label))) return false;
@@ -1856,14 +1862,22 @@ export class Orchestrator {
     } else if (stackPlan && !stackPlan.can_queue) {
       skippedReason = stackPlan.skipped_reason;
     } else if (labels.includes(LABEL_READY) || labels.includes(LABEL_RUNNING)) {
-      queued = true;
+      if (hasOpenNativeDependency(config, issue)) {
+        skippedReason = 'native_dependency';
+      } else {
+        queued = true;
+      }
     } else if (!config.tracker.epics.auto_label_children) {
       skippedReason = 'auto_label_disabled';
     } else {
       try {
         await this.applyLabels(config, issue.number, { add: [LABEL_READY] });
-        queued = true;
         labels.push(LABEL_READY);
+        if (hasOpenNativeDependency(config, issue)) {
+          skippedReason = 'native_dependency';
+        } else {
+          queued = true;
+        }
       } catch (err) {
         skippedReason = 'label_failed';
         log('error', 'epic_child_label_failed', {
