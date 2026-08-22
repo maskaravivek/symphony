@@ -2,6 +2,47 @@
 
 Symphony turns GitHub Issues into a queue for coding agents. It watches for eligible issues, creates an isolated workspace for each one, and runs the agent workflow defined by your repository.
 
+```mermaid
+flowchart TB
+    server["🎼 Symphony server"]
+    github[("GitHub Issues")]
+
+    server -->|"Poll"| github
+    github -.->|"ready-for-agent"| server
+
+    router{"Issue labels"}
+    server ==>|"Dispatch"| router
+
+    subgraph runs["Parallel sessions"]
+        direction LR
+        claude1["#101<br/>New Claude session"]
+        codex1["#102<br/>New Codex session"]
+        claude2["#103<br/>New Claude session"]
+    end
+
+    router -->|"ui · ux · design"| claude1
+    router -->|"default"| codex1
+    router -->|"user-experience"| claude2
+
+    claude1 --> delivery["✅ Pull requests"]
+    codex1 --> delivery
+    claude2 --> delivery
+    delivery -->|"Update"| github
+
+    classDef server fill:#6f42c1,color:#ffffff,stroke:#4c2889,stroke-width:3px
+    classDef tracker fill:#24292f,color:#ffffff,stroke:#57606a,stroke-width:2px
+    classDef route fill:#fff8c5,color:#1f2328,stroke:#9a6700,stroke-width:2px
+    classDef codex fill:#ddf4ff,color:#1f2328,stroke:#0969da,stroke-width:2px
+    classDef claude fill:#fff1e5,color:#1f2328,stroke:#bc4c00,stroke-width:2px
+    classDef result fill:#dafbe1,color:#1f2328,stroke:#1a7f37,stroke-width:2px
+    class server server
+    class github tracker
+    class router route
+    class codex1 codex
+    class claude1,claude2 claude
+    class delivery result
+```
+
 ## Background
 
 This project is based on OpenAI's [original Symphony specification](https://openai.com/index/open-source-codex-orchestration-symphony/), adapted to use GitHub Issues instead of Linear.
@@ -22,7 +63,7 @@ You need:
 Clone and install Symphony:
 
 ```bash
-git clone https://github.com/mangoappstudio/symphony.git
+git clone https://github.com/maskaravivek/symphony.git
 cd symphony
 yarn install --frozen-lockfile
 ```
