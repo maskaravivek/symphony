@@ -122,6 +122,10 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
   for (const entry of entries) {
     const config = entry.loaded.config;
     const prefix = `${entry.id} (${config.tracker.owner}/${config.tracker.repo})`;
+    if (!config.agents.providers[config.agents.default]?.handoff_command) {
+      failures++;
+      console.log('fail grooming requires a read-only handoff_command on the default provider');
+    }
     for (const problem of routingProblems(config.agents)) {
       failures++;
       console.log(`fail routing: ${problem}`);

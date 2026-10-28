@@ -1,3 +1,4 @@
+import { GROOMING_LABEL, groomingSource, groomingInstructions, parseGroomingResult, groomingBrief } from '../grooming/grooming.js';
 import { routedProviderId } from '../agents/routing.js';
 import { maintainStorage, storageAvailable } from '../storage/maintenance.js';
 import { DispatchDeferredError, storagePolicy } from '../storage/policy.js';
@@ -760,7 +761,7 @@ export class Orchestrator {
         });
         continue;
       }
-      if (issue && config.tracker.active_states.includes(issue.state) && !hasNonQueueableLifecycleLabel(issue.labels) && !hasAnyLabel(issue.labels, config.tracker.ignored_labels)) continue;
+      if (issue && config.tracker.active_states.includes(issue.state) && !hasNonQueueableLifecycleLabel(entry.mode === 'grooming' ? issue.labels.filter(l => l !== GROOMING_LABEL) : issue.labels) && !hasAnyLabel(issue.labels, config.tracker.ignored_labels)) continue;
       this.deleteDurableRetry(config, entry.issue_id);
       if (issue?.number) await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] }).catch(() => {});
       log('info', 'retry_cancelled', {
@@ -866,8 +867,14 @@ export class Orchestrator {
       await this.dispatchScheduledLoops(config, capacity);
 
       let candidates: Issue[];
+      let groomingCandidates: Issue[];
       try {
         candidates = await trackerClient.fetchCandidateIssues();
+        groomingCandidates = await trackerClient.fetchGroomingIssues().catch(error => {
+          if (isGithubRateLimitError(error)) throw error;
+          log('warn', 'grooming_poll_failed', { repo_id: this.repoId ?? undefined, event: 'grooming_poll_failed' });
+          return [];
+        });
       } catch (err) {
         if (this.handleGithubRateLimit(config, err, 'github_candidate_fetch_rate_limited')) return;
         log('error', 'github_candidate_fetch_failed', {
@@ -896,7 +903,8 @@ export class Orchestrator {
       const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
       const eligibleCandidates = candidates.filter((issue) => !this.running.has(issue.id) && !epicParentIds.has(issue.id));
 
-      await this.dispatchReadyRetries(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
+      await this.dispatchReadyRetries(config, trackerClient, [...eligibleCandidates, ...groomingCandidates], workspaceManager, capacity);
+      await this.dispatchGroomingIssues(config, groomingCandidates, workspaceManager, capacity);
       await this.dispatchNewIssues(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
     } catch (err) {
       if (this.handleGithubRateLimit(config, err, 'github_rate_limited')) return;
@@ -1256,6 +1264,10 @@ export class Orchestrator {
           continue;
         }
 
+        if (finalization?.mode === 'grooming') {
+          await this.finishGrooming(config, issue, state.workspace_path, state.last_message_path ?? '');
+          continue;
+        }
         if (finalization?.mode === 'planning') {
           await this.postPlanningResult(config, issue, state.workspace_path, state.last_message_path ?? '');
           await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
@@ -1951,17 +1963,18 @@ export class Orchestrator {
         continue;
       }
 
-      if (!config.tracker.active_states.includes(candidate.state) || hasNonQueueableLifecycleLabel(candidate.labels) || hasAnyLabel(candidate.labels, config.tracker.ignored_labels)) {
+      if (!config.tracker.active_states.includes(candidate.state) || hasNonQueueableLifecycleLabel(entry.mode === 'grooming' ? candidate.labels.filter(l => l !== GROOMING_LABEL) : candidate.labels) || hasAnyLabel(candidate.labels, config.tracker.ignored_labels)) {
         this.deleteDurableRetry(config, entry.issue_id);
         continue;
       }
 
-      if (!candidate.labels.includes(LABEL_READY)) {
+      if (entry.mode === 'grooming' && !candidate.labels.includes(GROOMING_LABEL)) { this.deleteDurableRetry(config, entry.issue_id); continue; }
+      if (entry.mode !== 'grooming' && !candidate.labels.includes(LABEL_READY)) {
         await this.applyLabels(config, candidate.number!, { add: [LABEL_READY] });
         candidate = { ...candidate, labels: [...candidate.labels, LABEL_READY] };
       }
 
-      const provider = selectAgentProvider(config, candidate);
+      const provider = entry.mode === 'grooming' ? config.agents.providers[config.agents.default]! : selectAgentProvider(config, candidate);
       const blocked = this.dispatchBlockReason(config, candidate, provider, capacity);
       if (blocked === 'global_capacity' || blocked === 'state_capacity') return;
       if (blocked === 'provider_capacity' || blocked === 'usage_limit') continue;
@@ -2051,6 +2064,63 @@ export class Orchestrator {
     }
   }
 
+  private async dispatchGroomingIssues(config: WorkflowConfig, issues: Issue[], manager: WorkspaceManager, capacity: DispatchCapacity): Promise<void> {
+    const provider = config.agents.providers[config.agents.default]!;
+    for (const issue of issues) {
+      if (this.running.has(issue.id) || this.retries.has(issue.id)) continue;
+      if (this.dispatchBlockReason(config, issue, provider, capacity)) return;
+      try {
+        await this.dispatchIssue(config, issue, manager, { attempt: 1, mode: 'grooming', provider });
+        if (capacity.remaining !== null) capacity.remaining--;
+      } catch (error) {
+        if (error instanceof DispatchDeferredError) return;
+        await this.scheduleRetry(config, issue, 1, 'grooming_dispatch_failed', manager.lastWorkspaceForIssue(issue.id) ?? undefined, 'grooming');
+      }
+    }
+  }
+
+  private async finishGrooming(config: WorkflowConfig, issue: Issue, workspace: string, lastMessage: string): Promise<void> {
+    const state = await this.mustReadRunState(workspace);
+    const client = new GithubIssueTrackerClient(config.tracker);
+    const current = await client.fetchIssueByNumber(issue.number!);
+    if (!current || current.state !== 'open') throw new Error('Grooming target is no longer open');
+    const marker = `<!-- symphony-grooming:${state.grooming_source_sha ?? state.session_id} -->`;
+    // After a crash, the durable finalizing state can safely replay this comment/label transition.
+    const replay = state.grooming_result;
+    if (!current.labels.includes(GROOMING_LABEL) && !replay) throw new Error('Grooming was withdrawn');
+    if (hasNonQueueableLifecycleLabel(current.labels.filter(l => l !== GROOMING_LABEL && !(replay?.outcome === 'human' && l === LABEL_READY_FOR_HUMAN)))) throw new Error('Grooming target needs manual attention');
+    if (!replay && groomingSource(current) !== state.grooming_source_sha) throw new Error('Issue changed during grooming; re-read its context');
+    if (replay) {
+      const original = state.grooming_input_labels ?? [];
+      if (groomingSource({ ...current, labels: original }) !== state.grooming_source_sha) throw new Error('Capture changed during grooming finalization');
+      const operational = new Set([GROOMING_LABEL, LABEL_READY, LABEL_RUNNING, LABEL_READY_FOR_HUMAN]);
+      if (current.labels.some(l => !operational.has(l) && !original.includes(l) && !replay.labels.includes(l)) || original.some(l => !operational.has(l) && !current.labels.includes(l))) throw new Error('Issue labels changed during grooming finalization');
+    }
+    const comments = await client.listIssueComments(issue.number!);
+    if (comments.some(comment => comment.id > (state.last_seen_comment_id ?? 0) && comment.id !== state.status_comment_id && !comment.body.startsWith(marker))) {
+      throw new Error('New issue conversation arrived during grooming');
+    }
+    const known = new Set((await client.listLabels()).map(label => label.name));
+    const result = parseGroomingResult(replay ? `SYMPHONY_GROOMING_RESULT\n${JSON.stringify(replay)}\nEND_SYMPHONY_GROOMING_RESULT` : await this.readLastMessage(lastMessage), config, known);
+    const overrides = current.labels.filter(l => l.startsWith('agent:'));
+    if (overrides.length && result.labels.some(l => l.startsWith('agent:') && !overrides.includes(l))) throw new Error('Grooming conflicts with the reporter agent override');
+    const selectedPriority = result.labels.find(l => Object.keys(config.tracker.priority_labels ?? {}).includes(l));
+    const existingPriority = current.labels.filter(l => Object.keys(config.tracker.priority_labels ?? {}).includes(l));
+    if (existingPriority.some(l => l !== selectedPriority)) throw new Error('Grooming must preserve an existing priority or request clarification');
+    await updateRunState(workspace, cur => cur ? { ...cur, grooming_result: result } : null);
+    await client.upsertStatusComment(issue.number!, marker, `${marker}\n${groomingBrief(result)}`);
+    // Clear the intake gate last: a partial write cannot dispatch implementation early.
+    const next = result.outcome === 'ready' ? [...config.tracker.required_labels, ...(config.tracker.any_required_labels?.slice(0, 1) ?? []), LABEL_READY] : [LABEL_READY_FOR_HUMAN];
+    await this.applyLabels(config, issue.number!, { add: [...result.labels, ...next], remove: [LABEL_RUNNING, ...(result.outcome === 'human' ? [LABEL_READY] : [])] });
+    await this.applyLabels(config, issue.number!, { remove: [GROOMING_LABEL] });
+    await this.updateLifecycleState(workspace, { add: [...result.labels, ...next], remove: [GROOMING_LABEL, LABEL_RUNNING], workflowState: result.outcome === 'ready' ? LABEL_READY : LABEL_READY_FOR_HUMAN });
+    const briefPath = path.join(state.session_artifact_dir ?? path.dirname(lastMessage), 'groomed-brief.md');
+    await fs.writeFile(briefPath, groomingBrief(result), 'utf8');
+    await updateRunState(workspace, cur => cur ? { ...cur, last_message_path: briefPath } : null);
+    await this.completeWorkflowState(workspace);
+    this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, outcome: `grooming-${result.outcome}` });
+  }
+
   private async dispatchNewIssues(
     config: WorkflowConfig,
     tracker: GithubIssueTrackerClient,
@@ -2096,7 +2166,7 @@ export class Orchestrator {
     config: WorkflowConfig,
     options: { mode: AgentMode; stackContext: StackContext | null },
   ): WorkspaceStrategy {
-    if (options.mode === 'planning') return config.workspace.strategy.planning;
+    if (options.mode === 'planning' || options.mode === 'grooming') return config.workspace.strategy.planning;
     if (options.mode === 'resolve-conflicts' || options.mode === 'pr-review' || options.mode === 'interactive-handoff') {
       return 'durable_issue_workspace';
     }
@@ -2118,6 +2188,7 @@ export class Orchestrator {
     },
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
+    if (issue.labels.includes(GROOMING_LABEL) && opts.mode !== 'grooming') throw new DispatchDeferredError('Issue requires grooming before implementation');
     if (!(await this.hasStorageCapacity(config))) throw new DispatchDeferredError('Insufficient free disk space');
     const provider = opts.provider ?? selectAgentProvider(config, issue);
     const stackContext = opts.stackContext ?? null;
@@ -2125,8 +2196,10 @@ export class Orchestrator {
     const isConflictResolution = opts.mode === 'resolve-conflicts';
     const isPullRequestReview = opts.mode === 'pr-review';
     const isInteractiveHandoff = !isConflictResolution && !isPullRequestReview && issue.labels.includes(LABEL_INTERACTIVE);
-    const isPlanningRun = !isConflictResolution && !isPullRequestReview && !isInteractiveHandoff && isPlanningIssue(issue.labels);
-    const agentMode: AgentMode = isConflictResolution
+    const isGroomingRun = opts.mode === 'grooming';
+    if (isGroomingRun && !provider.handoff_command) throw new SymphonyConfigError('Grooming requires a read-only handoff_command');
+    const isPlanningRun = !isGroomingRun && !isConflictResolution && !isPullRequestReview && !isInteractiveHandoff && isPlanningIssue(issue.labels);
+    const agentMode: AgentMode = isGroomingRun ? 'grooming' : isConflictResolution
       ? 'resolve-conflicts'
       : isPullRequestReview
         ? 'pr-review'
@@ -2180,6 +2253,7 @@ export class Orchestrator {
       last_message_path: lastMessagePath,
     };
     const hookEnv: Record<string, string> = {
+      SYMPHONY_AGENT_MODE: agentMode,
       SYMPHONY_REPO_ID: this.repoId ?? '',
       SYMPHONY_TRACKER_OWNER: config.tracker.owner,
       SYMPHONY_TRACKER_REPO: config.tracker.repo,
@@ -2343,6 +2417,7 @@ export class Orchestrator {
     const handoffInstructions = isInteractiveHandoff
       ? '\n\n---\n\n## Interactive Handoff Instructions\n\nCreate a concise orientation summary for the user to continue this issue interactively. Do not edit files, run write commands, commit, push, or open a PR in this handoff pass.\n'
       : '';
+    const intakeInstructions = isGroomingRun ? groomingInstructions((await new GithubIssueTrackerClient(config.tracker).listLabels()).map(l => l.name), config) : '';
     const planningInstructions = isPlanningRun
       ? '\n\n---\n\n## Planning / Technical Specification Instructions\n\nThis is a planning-only Symphony run. These instructions supersede any workflow instructions that ask you to edit files, commit, push, or open a pull request.\n\n- Inspect the repository and issue context enough to produce a concrete technical specification.\n- Do not edit files, run write commands, commit, push, create branches, or open a pull request.\n- Write the final answer as a detailed technical specification suitable for the issue thread.\n- Include: problem statement, relevant existing code/architecture, proposed implementation, files likely to change, API/data model implications, UX implications when relevant, test plan, risks, open questions, and suggested implementation tickets if the work should be split.\n- If implementation needs a product, architecture, security, data-loss, cost, or irreversible decision, use the SYMPHONY_PAUSE protocol instead of guessing.\n'
       : '';
@@ -2381,7 +2456,7 @@ export class Orchestrator {
           conflictBriefPath ?? path.join(workspacePath, '.symphony', 'merge-conflict.md'),
           runContext.text,
         )
-      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue, { symphony: symphonyContext })}${runContext.text}${stackInstructions}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}`;
+      : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue, { symphony: symphonyContext })}${runContext.text}${stackInstructions}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}${intakeInstructions}`;
     const generatedPromptPath = await workspaceManager.writePrompt(workspacePath, prompt);
     const promptPath = path.join(sessionArtifactDir, 'prompt.md');
     await fs.copyFile(generatedPromptPath, promptPath);
@@ -2396,10 +2471,11 @@ export class Orchestrator {
         : provider.id === 'codex'
           ? existingState?.codex_thread_id ?? null
           : null;
+    if (existingState?.agent_mode === 'grooming' && !isGroomingRun) agentThreadId = null;
     if (!agentThreadId && codexCompatible) agentThreadId = stackContext?.reusable_thread_id ?? null;
     let codexThreadId = codexCompatible ? agentThreadId : null;
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
-    const commandTemplate = isInteractiveHandoff || isPlanningRun
+    const commandTemplate = isInteractiveHandoff || isPlanningRun || isGroomingRun
       ? provider.handoff_command ?? provider.command
       : agentThreadId && provider.resume_command
         ? provider.resume_command
@@ -2450,6 +2526,8 @@ export class Orchestrator {
       agent_provider_group: provider.provider_group,
       agent_provider_kind: provider.provider_kind,
       agent_thread_id: agentThreadId,
+      grooming_source_sha: isGroomingRun ? groomingSource(issue) : undefined,
+      grooming_input_labels: isGroomingRun ? issue.labels : undefined,
       agent_mode: agentMode,
       agent_log_path: agentLogPath,
       codex_thread_id: codexThreadId,
@@ -2507,7 +2585,7 @@ export class Orchestrator {
         await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] });
         await this.updateLifecycleState(workspacePath, { remove: [LABEL_READY, LABEL_RUNNING], workflowState: 'interactive' });
         await this.upsertStatus(config, issue, initialState, `Interactive handoff requested. Preparing a ${provider.id} session and pausing autonomous work.`);
-      } else if (isPlanningRun) {
+      } else if (isPlanningRun || isGroomingRun) {
         await this.applyLabels(config, issue.number, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO] });
         await this.updateLifecycleState(workspacePath, { add: [LABEL_RUNNING], remove: [LABEL_READY, LABEL_NEEDS_INFO], workflowState: LABEL_RUNNING });
         await this.upsertStatus(config, issue, initialState, `Planning run requested. Symphony is starting ${provider.id} in spec-only mode and will post the plan to this issue.`);
@@ -2737,6 +2815,10 @@ export class Orchestrator {
             return;
           }
 
+          if (isGroomingRun) {
+            await this.finishGrooming(config, issue, workspacePath, lastMessagePath);
+            return;
+          }
           if (isPlanningRun) {
             await this.postPlanningResult(config, issue, workspacePath, lastMessagePath);
             await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
@@ -4521,7 +4603,7 @@ ${runContext}`;
     return state;
   }
 
-  private async scheduleRetry(config: WorkflowConfig, issue: Issue, attempt: number, reason: string, workspacePath?: string): Promise<void> {
+  private async scheduleRetry(config: WorkflowConfig, issue: Issue, attempt: number, reason: string, workspacePath?: string, modeOverride?: AgentMode): Promise<void> {
     const retryState = workspacePath ? await readRunState(workspacePath) : null;
     const retrySessionId = retryState?.session_id ?? null;
     if (retryState?.agent_mode === 'pr-review' && retryState.finalization_context?.review_pr?.review_key) {
@@ -4607,7 +4689,7 @@ ${runContext}`;
       issue_identifier: issue.identifier,
       reason,
       workspace_path: workspacePath ?? null,
-      mode: ((workspacePath ? await readRunState(workspacePath) : null)?.agent_mode ?? 'autonomous') as AgentMode,
+      mode: modeOverride ?? ((workspacePath ? await readRunState(workspacePath) : null)?.agent_mode ?? (issue.labels.includes(GROOMING_LABEL) ? 'grooming' : 'autonomous')) as AgentMode,
     });
     const retry = this.retries.get(issue.id)!;
     const store = new EpisodeStore(this.storePath(config));

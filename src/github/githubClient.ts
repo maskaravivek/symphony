@@ -282,6 +282,7 @@ function normalizePullRequestPayload(payload: GithubPullRequestPayload): PullReq
 }
 
 function labelDescription(name: string): string {
+  if (name === 'requires-grooming') return 'Captured work awaiting repository-aware grooming before implementation.';
   if (name === 'ready-for-agent') return 'Symphony may claim this issue or PR for autonomous work.';
   if (name === 'agent-running') return 'Symphony has claimed this issue or PR and an agent is running.';
   if (name === 'ready-for-human') return 'Symphony is done; this issue or PR is waiting for a human.';
@@ -292,6 +293,7 @@ function labelDescription(name: string): string {
 }
 
 function labelColor(name: string): string {
+  if (name === 'requires-grooming') return 'fbca04';
   if (name === 'ready-for-agent') return '0e8a16';
   if (name === 'agent-running') return '1d76db';
   if (name === 'ready-for-human') return 'fbca04';
@@ -329,6 +331,18 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
 
   constructor(tracker: GithubTrackerConfig) {
     this.tracker = tracker;
+  }
+
+  async fetchGroomingIssues(): Promise<Issue[]> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues`, this.tracker.api_base_url);
+    url.searchParams.set('state', 'open');
+    url.searchParams.set('labels', 'requires-grooming');
+    url.searchParams.set('per_page', String(this.tracker.page_size));
+    const raw = await this.fetchAllPages<GithubIssuePayload>(url.toString());
+    const issues = await Promise.all(raw.filter(p => !p.pull_request).map(p => this.normalizeIssueWithNativeDependencies(p)));
+    return this.sortIssues(issues.filter(issue => issue.labels.includes('requires-grooming') &&
+      !hasNonQueueableLifecycleLabel(issue.labels.filter(l => l !== 'requires-grooming')) &&
+      !issue.labels.includes('agent-running') && !issue.labels.some(l => this.tracker.ignored_labels.includes(l))));
   }
 
   async fetchCandidateIssues(): Promise<Issue[]> {

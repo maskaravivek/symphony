@@ -10,7 +10,7 @@ export function labelsForWorkflow(config: WorkflowConfig): string[] {
     ...Object.keys(config.tracker.priority_labels ?? {}),
     ...config.agents.routes.flatMap(route => [...route.any_labels, ...route.all_labels, ...route.none_labels]),
     'agent-running', 'blocked', 'ready-for-human', 'needs-info', 'interactive', 'symphony-failed',
-    'planning', 'task:spec',
+    'requires-grooming', 'planning', 'task:spec',
     ...(config.tracker.epics.enabled ? ['epic', 'epic:stacked', 'epic:independent'] : []),
   ].map(label => label.trim().toLowerCase()).filter(Boolean));
   return [...labels].sort();

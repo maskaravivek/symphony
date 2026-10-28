@@ -1,6 +1,6 @@
 # Telegram communication bridge
 
-TaskDrop continues to create GitHub issues. This optional bridge forwards Symphony questions and outcomes to a private Telegram chat. Replies become GitHub issue comments and eligible tasks are requeued. It runs alongside Symphony on the **same host**, using the same workflows and workspace roots; it does not start coding agents itself.
+TaskDrop creates GitHub captures with `requires-grooming`. Symphony grooms them before implementation. This optional bridge forwards Symphony questions and outcomes to a private Telegram chat. Replies become GitHub issue comments and eligible tasks are requeued. It runs alongside Symphony on the **same host**, using the same workflows and workspace roots; it does not start coding agents itself.
 
 ## Setup
 
@@ -41,6 +41,8 @@ For macOS background operation, adapt [`ops/com.mangoappstudio.symphony-telegram
 The repository ID and issue number are attached to every task message. Replies use persisted message IDs, so identical issue numbers in different repositories cannot be confused. Unknown replies and stale question replies are rejected. Plain unthreaded messages do not create issues.
 
 Instructions sent while an agent runs are saved immediately and queued after the active run finishes. They are **not live steering**. The bridge checks the agent's last-consumed GitHub comment ID before requesting another run. Closed, blocked, ignored, and interactive tasks are not automatically resumed. Existing workflow concurrency, dependencies, retry limits, and review policies still apply. A queued task may therefore wait or require manual attention.
+
+Questions raised during intake grooming use the same reply flow. The `requires-grooming` gate is retained while awaiting clarification; answering requeues grooming, and only successful grooming can queue implementation. A grooming completion notification contains the enriched brief and is distinct from implementation completion.
 
 ## Recovery and delivery
 

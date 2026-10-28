@@ -7,7 +7,7 @@ export type RunStatus = 'agent-running' | 'finalizing' | 'retry-wait' | 'complet
 export type AgentOutcome = 'completed' | 'failed' | 'cancelled' | null;
 export type WorkflowOutcome = 'completed' | 'failed' | 'cancelled' | 'paused' | 'retry-scheduled' | null;
 
-export type AgentMode = 'autonomous' | 'interactive-handoff' | 'planning' | 'resolve-conflicts' | 'pr-review';
+export type AgentMode = 'grooming' | 'autonomous' | 'interactive-handoff' | 'planning' | 'resolve-conflicts' | 'pr-review';
 export type CodexMode = AgentMode;
 
 export type PauseReason = 'interactive' | 'needs-info' | null;
@@ -48,6 +48,9 @@ export interface RunState {
   workspace_path: string;
   workspace_strategy?: string | null;
 
+  grooming_source_sha?: string;
+  grooming_input_labels?: string[];
+  grooming_result?: import('../grooming/grooming.js').GroomingResult;
   attempt: number;
   session_id: string | null;
   agent_provider?: string | null;

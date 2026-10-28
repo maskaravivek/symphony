@@ -22,7 +22,7 @@ Use a similar configured side project's workflow as a structural starting point,
 
 Ensure `WORKFLOW.md` covers:
 
-- Correct tracker repo, readiness/pause labels, priority vocabulary, native epic behavior and five-minute polling.
+- Correct tracker repo, readiness/pause labels (including `requires-grooming` for intake), priority vocabulary, native epic behavior and five-minute polling. TaskDrop GitHub captures enter grooming before implementation; the default provider needs a read-only handoff command.
 - A unique Symphony workspace root, cleanup enabled, appropriate pooled/durable strategies, daily maintenance, and a finite retry budget.
 - Clone/setup hooks confined to disposable task workspaces. Never run the workflow's destructive checkout hooks in the user's primary checkout while onboarding. Preserve `.symphony/`; preserve dependencies only when the install strategy validates their lockfile stamp.
 - Available provider executables, session-specific `$SYMPHONY_LAST_MESSAGE_PATH`, read-only planning/handoff commands, and sensible timeouts. Do not configure Codex Spark. Do not copy a model alias or quota-check tool without checking that the installation supports it.
