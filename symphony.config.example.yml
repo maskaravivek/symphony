@@ -1,6 +1,10 @@
 polling:
   interval_ms: 30000
 
+repository_sync:
+  enabled: true
+  interval_ms: 43200000 # 12 hours
+
 agent:
   max_concurrent_agents: 4
 

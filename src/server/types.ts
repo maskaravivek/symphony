@@ -15,6 +15,7 @@ export interface ServerRepoConfig {
 
 export interface ServerConfig {
   polling: ServerPollingConfig;
+  repository_sync: { enabled: boolean; interval_ms: number };
   agent: ServerAgentConfig;
   repos: ServerRepoConfig[];
 }

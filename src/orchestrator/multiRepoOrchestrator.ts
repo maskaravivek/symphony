@@ -3,6 +3,7 @@ import type { ServerConfig, ServerRepoConfig } from '../server/types.js';
 import { log } from '../utils/log.js';
 import { sleep } from '../utils/sleep.js';
 import { Orchestrator } from './orchestrator.js';
+import { RepositorySync } from '../server/repositorySync.js';
 
 interface RuntimeEntry {
   repo: ServerRepoConfig;
@@ -14,9 +15,11 @@ export class MultiRepoOrchestrator {
   private lastGoodConfig: ServerConfig | null = null;
   private runtimes = new Map<string, RuntimeEntry>();
   private stopped = false;
+  private repositorySync: RepositorySync;
 
   constructor(options: { configPath: string }) {
     this.configPath = options.configPath;
+    this.repositorySync = new RepositorySync(options.configPath);
   }
 
   stop(): void {
@@ -48,6 +51,9 @@ export class MultiRepoOrchestrator {
     if (!config) return;
 
     await this.reconcileRuntimes(config);
+    await this.repositorySync.run(config, new Set([...this.runtimes]
+      .filter(([, entry]) => entry.orchestrator.getRunningCount() > 0)
+      .map(([id]) => id)));
 
     for (const entry of this.runtimes.values()) {
       const globalSlots = this.getGlobalAvailableSlots(config);

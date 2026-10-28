@@ -43,6 +43,7 @@ export function normalizeServerConfig(raw: unknown, configPath: string): ServerC
 
   const pollingRaw = isRecord(raw.polling) ? raw.polling : {};
   const agentRaw = isRecord(raw.agent) ? raw.agent : {};
+  const syncRaw = isRecord(raw.repository_sync) ? raw.repository_sync : {};
 
   const reposRaw = raw.repos;
   if (!Array.isArray(reposRaw)) throw new SymphonyConfigError('repos must be an array');
@@ -72,6 +73,10 @@ export function normalizeServerConfig(raw: unknown, configPath: string): ServerC
   });
 
   return {
+    repository_sync: {
+      enabled: asBoolean(syncRaw.enabled, 'repository_sync.enabled') ?? false,
+      interval_ms: asPositiveNumber(syncRaw.interval_ms, 'repository_sync.interval_ms') ?? 43_200_000,
+    },
     polling: {
       interval_ms: asPositiveNumber(pollingRaw.interval_ms, 'polling.interval_ms') ?? 30000,
     },

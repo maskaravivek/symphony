@@ -114,6 +114,16 @@ yarn cli history 123 --workflow ../your-repo/WORKFLOW.md
 
 Replace `123` with a GitHub issue number. To run multiple repositories from one Symphony process, start with [`symphony.config.example.yml`](symphony.config.example.yml) and pass `--config` instead of `--workflow`.
 
+For those repositories, optional primary-checkout sync keeps local workflows and other files current with remote `main`:
+
+```yaml
+repository_sync:
+  enabled: true
+  interval_ms: 43200000 # 12 hours
+```
+
+When enabled, Symphony runs a sync pass before polling repository agents, initially at startup and then every 12 hours. The last attempt is saved in `.symphony/repository-sync.json` beside the central config, so restarts do not reset the interval. Each enabled workflow's containing Git checkout is deduplicated and fetched from `origin/main`, then updated only by a fast-forward. Dirty or divergent checkouts, other branches, Git operations in progress, linked task worktrees, and repositories with active agents are skipped until the next scheduled pass. Local and ignored files are preserved; sync never resets, cleans, stashes, or switches branches. Outcomes are logged, and a failed repository does not block the others or normal task polling. This does not update or restart Symphony itself. New task workspaces continue fetching their base branch before each run independently of this schedule. The feature is disabled by default.
+
 ## Features
 
 - **GitHub-native queue:** Selects work through issue labels, priorities, native dependencies, and native sub-issue epics.
