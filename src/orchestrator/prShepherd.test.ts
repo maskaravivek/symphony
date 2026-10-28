@@ -187,7 +187,7 @@ Prompt.
   assert.match(JSON.stringify(stateUpdate?.body), /pending.*false/);
 });
 
-test('treats a fresh Codex thumbs-up on the current head as passing external review', async () => {
+test('merges an elevated PR after one fresh Codex approval with Symphony review disabled', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-shepherd-codex-pass-'));
   const workspaceRoot = path.join(root, 'workspaces');
   const workflowPath = path.join(root, 'WORKFLOW.md');
@@ -201,6 +201,11 @@ tracker:
   branch_prefix: symphony
 workspace:
   root: ${workspaceRoot}
+merge:
+  enabled: true
+  default_risk: elevated
+  require_checks: false
+  require_independent_reviews: true
 review:
   enabled: false
   shepherd_pull_requests: true
@@ -220,8 +225,8 @@ Prompt.
     const method = init?.method ?? 'GET';
     const body = init?.body ? JSON.parse(String(init.body)) : null;
     calls.push({ url, method, body });
-    if (url.endsWith('/pulls?state=open&per_page=50')) {
-      return jsonResponse([{
+    if (url.endsWith('/pulls?state=open&per_page=50') || (url.endsWith('/pulls/42') && method === 'GET')) {
+      const pr = {
         number: 42,
         title: 'Fix',
         body: 'Fixes #17',
@@ -232,7 +237,8 @@ Prompt.
         head: { ref: 'symphony-17-fix', sha: 'head' },
         base: { ref: 'main', sha: 'base' },
         mergeable_state: 'clean',
-      }]);
+      };
+      return jsonResponse(url.endsWith('/pulls/42') ? pr : [pr]);
     }
     if (url.endsWith('/issues/42/comments?per_page=50')) return jsonResponse([]);
     if (url.endsWith('/pulls/42/comments?per_page=50')) return jsonResponse([]);
@@ -254,6 +260,10 @@ Prompt.
         repository_url: 'https://api.github.test/repos/example/app',
       });
     }
+    if (url.endsWith('/pulls/42/files?per_page=50')) return jsonResponse([{ filename: 'src/auth.ts' }]);
+    if (url.endsWith('/commits/head/check-runs?per_page=100')) return jsonResponse({ check_runs: [] });
+    if (url.endsWith('/commits/head/status')) return jsonResponse({ statuses: [] });
+    if (url.endsWith('/pulls/42/merge') && method === 'PUT') return jsonResponse({ merged: true, sha: 'merge-sha', message: 'merged' });
     if (url.endsWith('/issues/42/comments') && method === 'POST') return jsonResponse({ id: 92, body: String(body) });
     if (url.endsWith('/issues/42/labels') && method === 'POST') return jsonResponse([]);
     if (url.startsWith('https://api.github.test/repos/example/app/issues/42/labels/') && method === 'DELETE') return new Response(null, { status: 204 });
@@ -274,6 +284,7 @@ Prompt.
   const reviewState = calls.find(
     (call) => call.url.endsWith('/issues/42/comments') && call.method === 'POST' && /symphony-review-state:v1/.test(JSON.stringify(call.body)),
   );
+  assert.ok(calls.some((call) => call.url.endsWith('/pulls/42/merge') && call.method === 'PUT'));
   assert.match(JSON.stringify(reviewState?.body), /github-codex/);
   assert.match(JSON.stringify(reviewState?.body), /verdict[^]*pass/);
   assert.ok(!calls.some((call) => call.url.endsWith('/issues/42/labels') && /ready-for-agent/.test(JSON.stringify(call.body))));

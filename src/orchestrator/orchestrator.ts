@@ -9,7 +9,7 @@ import {
 } from '../github/githubClient.js';
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
-import { classifyMergeRisk, summarizeSubstantiveChanges, type VerificationReceipt } from '../merge/mergePolicy.js';
+import { REQUIRED_PASSING_REVIEWS, type VerificationReceipt } from '../merge/mergePolicy.js';
 import { resolvePromotedBase } from '../merge/stackPromotion.js';
 import { dueScheduledLoops } from '../loops/scheduledLoops.js';
 import { parseStructuredReviewResult, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
@@ -1588,35 +1588,14 @@ export class Orchestrator {
         return null;
       });
       if (!feedbackState?.pending && reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
-        if (config.merge.enabled) {
-          const changedFiles = await tracker.listPullRequestFileDetails(pr.number).catch(() => []);
-          const changedPaths = changedFiles.map((file) => file.path);
-          const risk = classifyMergeRisk(config.merge, {
-            labels: pr.labels,
-            changed_paths: changedPaths,
-            target_branch: pr.base_ref,
-            ...summarizeSubstantiveChanges(config.merge, changedFiles),
+        if (!config.merge.enabled || freshPassingReceiptCount(config, pr, reviewState) >= REQUIRED_PASSING_REVIEWS) {
+          log('info', 'pr_review_skipped_already_passed_for_head', {
+            ...getIssueLogFields(config, issue, this.repoId),
+            event: 'pr_review_skipped_already_passed_for_head',
+            pr_number: pr.number,
+            head_sha: pr.head_sha ?? '',
           });
-          const requiredReviews = risk === 'elevated' ? 2 : 1;
-          if (freshPassingReceiptCount(config, pr, reviewState) < requiredReviews) {
-            // Continue into another independent review run for elevated changes.
-          } else {
-            log('info', 'pr_review_skipped_already_passed_for_head', {
-              ...getIssueLogFields(config, issue, this.repoId),
-              event: 'pr_review_skipped_already_passed_for_head',
-              pr_number: pr.number,
-              head_sha: pr.head_sha ?? '',
-            });
-            continue;
-          }
-        } else {
-        log('info', 'pr_review_skipped_already_passed_for_head', {
-          ...getIssueLogFields(config, issue, this.repoId),
-          event: 'pr_review_skipped_already_passed_for_head',
-          pr_number: pr.number,
-          head_sha: pr.head_sha ?? '',
-        });
-        continue;
+          continue;
         }
       }
 
@@ -3794,21 +3773,8 @@ ${JSON.stringify(episodeSummary, null, 2)}
     await this.writePullRequestReviewState(config, nextState);
     this.completeReviewExecution(config, pr, receipt, 'pass');
 
-    let requiresAnotherReview = false;
-    let queuedForAnotherRun = false;
-    if (config.merge.enabled) {
-      const tracker = new GithubIssueTrackerClient(config.tracker);
-      const changedFiles = await tracker.listPullRequestFileDetails(pr.number).catch(() => []);
-      const changedPaths = changedFiles.map((file) => file.path);
-      const risk = classifyMergeRisk(config.merge, {
-        labels: pr.labels,
-        changed_paths: changedPaths,
-        target_branch: pr.base_ref,
-        ...summarizeSubstantiveChanges(config.merge, changedFiles),
-      });
-      requiresAnotherReview = risk === 'elevated' && freshPassingReceiptCount(config, pr, nextState) < 2;
-      queuedForAnotherRun = requiresAnotherReview;
-    }
+    const requiresAnotherReview = config.merge.enabled && freshPassingReceiptCount(config, pr, nextState) < REQUIRED_PASSING_REVIEWS;
+    let queuedForAnotherRun = requiresAnotherReview;
 
     await this.applyLabels(config, pr.number, {
       add: requiresAnotherReview ? [LABEL_REVIEW_PASSED, LABEL_READY] : [LABEL_REVIEW_PASSED, LABEL_READY_FOR_HUMAN],

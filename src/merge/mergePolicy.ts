@@ -70,6 +70,7 @@ export interface MergeChangedFile {
 }
 
 const RISK_RANK: Record<MergeRisk, number> = { standard: 0, elevated: 1, prohibited: 2 };
+export const REQUIRED_PASSING_REVIEWS = 1;
 const BLOCKING_LABELS = new Set(['blocked', 'needs-info', 'interactive', 'symphony-failed', 'symphony-review:blocking']);
 const PASSING_CHECK_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 
@@ -165,7 +166,7 @@ export function evaluateMergeEligibility(input: {
   required_evidence?: string[];
 }): MergeEligibilityDecision {
   const { config, risk, pull_request: pr, checks, receipts } = input;
-  const requiredReviews = risk === 'elevated' ? 2 : 1;
+  const requiredReviews = REQUIRED_PASSING_REVIEWS;
   const requiredEvidence = [...new Set((input.required_evidence ?? ['review']).map((kind) => kind.trim().toLowerCase()).filter(Boolean))].sort();
   const reasons: string[] = [];
 

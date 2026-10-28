@@ -111,7 +111,7 @@ test('blocks a known failing check even when checks are optional', () => {
   assert.ok(decision.reasons.includes('check is not successful: preview (completed/failure)'));
 });
 
-test('requires two fresh receipts for elevated risk and rejects stale receipts', () => {
+test('allows elevated risk with one fresh passing review and rejects stale reviews', () => {
   const base = {
     config,
     risk: 'elevated' as const,
@@ -127,18 +127,15 @@ test('requires two fresh receipts for elevated risk and rejects stale receipts',
     checks: [{ name: 'test', status: 'completed' as const, conclusion: 'success' as const }],
   };
   const one = evaluateMergeEligibility({ ...base, receipts: [receipt('review-1')] });
-  assert.equal(one.eligible, false);
-  assert.ok(one.reasons.includes('requires 2 fresh independent passing reviews; found 1'));
+  assert.equal(one.eligible, true);
+  assert.equal(one.required_reviews, 1);
 
   const stale = evaluateMergeEligibility({
     ...base,
-    receipts: [receipt('review-1'), receipt('review-2', { base_sha: 'old-base' })],
+    receipts: [receipt('review-1', { head_sha: 'old-head' }), receipt('review-2', { base_sha: 'old-base' })],
   });
   assert.equal(stale.eligible, false);
-  assert.ok(stale.reasons.includes('requires 2 fresh independent passing reviews; found 1'));
-
-  const two = evaluateMergeEligibility({ ...base, receipts: [receipt('review-1'), receipt('review-2')] });
-  assert.equal(two.eligible, true);
+  assert.ok(stale.reasons.includes('requires 1 fresh independent passing review; found 0'));
 });
 
 test('blocks prohibited, draft, conflicted, pending-check, paused, and unlinked PRs', () => {
@@ -218,7 +215,7 @@ test('uses substantive size thresholds and path-specific evidence requirements',
   );
 });
 
-test('requires independent reviewer executions when configured', () => {
+test('rejects self-review when an independent reviewer is required', () => {
   const independentConfig: MergeConfig = { ...config, require_independent_reviews: true };
   const decision = evaluateMergeEligibility({
     config: independentConfig,
@@ -228,12 +225,11 @@ test('requires independent reviewer executions when configured', () => {
     },
     checks: [{ name: 'test', status: 'completed', conclusion: 'success' }],
     receipts: [
-      receipt('one', { reviewer: { execution_id: 'review-a', provider: 'codex', model: null, lens: 'general' }, author_execution_id: 'author' }),
-      receipt('two', { reviewer: { execution_id: 'review-a', provider: 'codex', model: null, lens: 'security' }, author_execution_id: 'author' }),
+      receipt('one', { reviewer: { execution_id: 'author', provider: 'codex', model: null, lens: 'general' }, author_execution_id: 'author' }),
     ],
   });
   assert.equal(decision.eligible, false);
-  assert.ok(decision.reasons.includes('requires 2 fresh independent passing reviews; found 1'));
+  assert.ok(decision.reasons.includes('requires 1 fresh independent passing review; found 0'));
 });
 
 test('invalidates receipts when the workflow policy changes', () => {

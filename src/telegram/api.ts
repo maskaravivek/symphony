@@ -32,7 +32,7 @@ export class TelegramBotApi implements TelegramApi {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(35_000),
+        signal: AbortSignal.timeout(45_000),
       });
     } catch {
       throw new Error(`Telegram ${method} network request failed`);
@@ -44,7 +44,7 @@ export class TelegramBotApi implements TelegramApi {
   }
 
   async updates(offset: number): Promise<TelegramUpdate[]> {
-    return this.call('getUpdates', { offset, timeout: 10, allowed_updates: ['message'] });
+    return this.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message'] });
   }
 
   async send(text: string): Promise<number> {
