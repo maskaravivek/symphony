@@ -1,3 +1,6 @@
+import { routedProviderId } from '../agents/routing.js';
+import { maintainStorage, storageAvailable } from '../storage/maintenance.js';
+import { DispatchDeferredError, storagePolicy } from '../storage/policy.js';
 import type { Issue } from '../domain/issue.js';
 import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
 import {
@@ -613,18 +616,8 @@ function hasOpenNativeDependency(config: WorkflowConfig, issue: Issue): boolean 
   );
 }
 
-function labelsMatchRoute(labels: string[], route: WorkflowConfig['agents']['routes'][number]): boolean {
-  const set = new Set(labels.map((label) => label.trim().toLowerCase()));
-  if (route.none_labels.some((label) => set.has(label))) return false;
-  if (route.all_labels.some((label) => !set.has(label))) return false;
-  if (route.any_labels.length > 0 && !route.any_labels.some((label) => set.has(label))) return false;
-  return route.default || route.any_labels.length > 0 || route.all_labels.length > 0 || route.none_labels.length > 0;
-}
-
 function selectAgentProvider(config: WorkflowConfig, issue: Issue): AgentProviderConfig {
-  const labels = issue.labels.map((label) => label.trim().toLowerCase());
-  const route = config.agents.routes.find((candidate) => labelsMatchRoute(labels, candidate));
-  const providerId = route?.provider ?? config.agents.default;
+  const providerId = routedProviderId(config.agents, issue.labels);
   const provider = config.agents.providers[providerId];
   if (!provider) throw new SymphonyConfigError(`agent provider not found: ${providerId}`);
   return provider;
@@ -690,6 +683,7 @@ export class Orchestrator {
   private maxConcurrentAgentsOverride: number | null;
   private lastGoodWorkflow: LoadedWorkflow | null = null;
 
+  private storageBlocked = false;
   private running = new Map<string, RunningSession>();
   private runningLoops = new Map<string, RunningLoop>();
   private retries = new Map<string, RetryEntry>();
@@ -846,6 +840,9 @@ export class Orchestrator {
 
     if (!(await this.ensureWorkflowLock(config))) return;
 
+    // Maintenance is independent of GitHub availability and holds the workflow lock.
+    await maintainStorage(config.workspace, this.getRunningCount() > 0);
+    const hasStorage = await this.hasStorageCapacity(config);
     if (this.isGithubRateLimitBackoffActive(config)) return;
 
     const trackerClient = new GithubIssueTrackerClient(config.tracker);
@@ -859,7 +856,7 @@ export class Orchestrator {
       await this.reconcileDurableRetries(config, trackerClient);
       await this.sweepTerminalWorkspaces(config, trackerClient, workspaceManager);
       await this.refreshProviderUsageLimitChecks(config);
-      const capacity: DispatchCapacity = { remaining: options.maxNewDispatches ?? null };
+      const capacity: DispatchCapacity = { remaining: hasStorage ? options.maxNewDispatches ?? null : 0 };
       await this.promoteStackedPullRequests(config, trackerClient);
       await this.scanOpenPullRequestsForConflicts(config, trackerClient);
       await this.reconcilePullRequestFeedback(config, trackerClient);
@@ -905,6 +902,26 @@ export class Orchestrator {
       if (this.handleGithubRateLimit(config, err, 'github_rate_limited')) return;
       throw err;
     }
+  }
+
+  private async hasStorageCapacity(config: WorkflowConfig): Promise<boolean> {
+    const minimum = storagePolicy(config.workspace.storage_maintenance).min_free_gib;
+    const available = await storageAvailable(config.workspace.root, minimum);
+    const statusPath = path.join(config.workspace.root, '.symphony', 'storage-status.json');
+    const previous = await fs.readFile(statusPath, 'utf8').then(raw => JSON.parse(raw) as { blocked: boolean; minimum_free_gib: number }).catch(() => null);
+    if (previous?.blocked !== !available || previous?.minimum_free_gib !== minimum) {
+      const temporary = `${statusPath}.${randomUUID()}.tmp`;
+      await fs.writeFile(temporary, JSON.stringify({ blocked: !available, minimum_free_gib: minimum }), { mode: 0o600 });
+      await fs.rename(temporary, statusPath);
+    }
+    if (available === this.storageBlocked) {
+      log(available ? 'info' : 'warn', available ? 'storage_dispatch_resumed' : 'storage_dispatch_paused', {
+        event: available ? 'storage_dispatch_resumed' : 'storage_dispatch_paused', repo_id: this.repoId ?? undefined,
+        workspace_root: config.workspace.root, minimum_free_gib: minimum,
+      });
+    }
+    this.storageBlocked = !available;
+    return available;
   }
 
   private async ensureWorkflowLock(config: WorkflowConfig): Promise<boolean> {
@@ -1534,6 +1551,7 @@ export class Orchestrator {
       this.conflictQueue.delete(entry.pr_number);
       if (capacity.remaining !== null) capacity.remaining -= 1;
     } catch (err) {
+      if (err instanceof DispatchDeferredError) return;
       entry.next_run_at_ms = nowMs() + 5 * 60 * 1000;
       log('error', 'conflict_resolution_dispatch_failed', {
         ...getIssueLogFields(config, issue, this.repoId),
@@ -1656,6 +1674,10 @@ export class Orchestrator {
           failedStore.completeReviewClaim(this.durableRepoId(config), reviewKey, 'error');
         } finally {
           failedStore.close();
+        }
+        if (err instanceof DispatchDeferredError) {
+          log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: err.message });
+          continue;
         }
         const error = dispatchErrorDetails(err);
         log('error', 'pr_review_dispatch_failed', {
@@ -2008,6 +2030,10 @@ export class Orchestrator {
             reviewStore.close();
           }
         }
+        if (err instanceof DispatchDeferredError) {
+          log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: err.message });
+          continue;
+        }
         const error = dispatchErrorDetails(err);
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, candidate, this.repoId),
@@ -2045,6 +2071,10 @@ export class Orchestrator {
         if (capacity.remaining !== null) capacity.remaining -= 1;
         if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
+        if (err instanceof DispatchDeferredError) {
+          log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: err.message });
+          continue;
+        }
         const error = dispatchErrorDetails(err);
         log('error', 'issue_dispatch_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
@@ -2088,6 +2118,7 @@ export class Orchestrator {
     },
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
+    if (!(await this.hasStorageCapacity(config))) throw new DispatchDeferredError('Insufficient free disk space');
     const provider = opts.provider ?? selectAgentProvider(config, issue);
     const stackContext = opts.stackContext ?? null;
     const issueFields = getIssueLogFields(config, issue, this.repoId);
@@ -2296,7 +2327,7 @@ export class Orchestrator {
       pullRequestReviewComments = await new GithubIssueTrackerClient(config.tracker).listPullRequestReviewComments(opts.prReview.pr_number);
     }
     await fs.mkdir(sessionArtifactDir, { recursive: true });
-    await pruneSessionArtifacts(path.join(workspacePath, '.symphony', 'runs'), { activeDir: sessionArtifactDir, issueIdentifier: issue.identifier });
+    await pruneSessionArtifacts(path.join(workspacePath, '.symphony', 'runs'), { activeDir: sessionArtifactDir, maxBytes: storagePolicy(config.workspace.storage_maintenance).max_artifact_gib * 1024 ** 3 });
     for (const hookLog of preAgentHookLogs) {
       await fs.copyFile(hookLog.source, path.join(sessionArtifactDir, hookLog.name)).catch(() => {});
     }
@@ -3471,6 +3502,7 @@ export class Orchestrator {
   ): Promise<void> {
     const provider = config.agents.providers[loop.provider ?? config.agents.default];
     if (!provider) throw new SymphonyConfigError(`scheduled loop ${loop.id} references an unknown provider`);
+    if (!(await this.hasStorageCapacity(config))) return;
     const workspacePath = path.join(config.workspace.root, '_loops', loop.id);
     const lastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
     const workspaceManager = new WorkspaceManager(config.workspace, 1);

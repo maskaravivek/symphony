@@ -397,7 +397,7 @@ workspace:
 agent:
   max_concurrent_agents: 2
 agents:
-  default: codex-spark
+  default: codex-secondary
   providers:
     codex:
       provider_group: codex
@@ -405,11 +405,11 @@ agents:
       command: sleep 3600
       output_log: .symphony/codex.jsonl
       usage_limit_check_command: ${checkCommand}
-    codex-spark:
+    codex-secondary:
       provider_group: codex
       provider_kind: codex
       command: sleep 3600
-      output_log: .symphony/codex-spark.jsonl
+      output_log: .symphony/codex-secondary.jsonl
       extract_codex_thread_id: true
 ---
 
@@ -606,7 +606,7 @@ test('blocks sibling providers in the same provider_group when usage_limit_check
 
   try {
     await orchestrator.tickOnce();
-    assert.equal(wasDispatched(calls, 32), false, 'codex-spark should not dispatch while the codex provider group is blocked');
+    assert.equal(wasDispatched(calls, 32), false, 'codex-secondary should not dispatch while the codex provider group is blocked');
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;

@@ -19,6 +19,7 @@ import type { LoadedWorkflow } from './workflow/types.js';
 import { startDashboardServer } from './dashboard/server.js';
 import { SymphonyConfigError } from './utils/errors.js';
 import { requiredToolsForWorkflow } from './doctor/requiredTools.js';
+import { labelsForWorkflow, routingProblems } from './doctor/labels.js';
 import { runTelegramBridge, type TelegramBridgeOptions } from './telegram/runBridge.js';
 import { pairTelegram } from './telegram/pair.js';
 
@@ -92,19 +93,6 @@ async function commandExists(command: string): Promise<boolean> {
   }
 }
 
-function lifecycleLabelsForWorkflow(loaded: LoadedWorkflow): string[] {
-  const labels = new Set([
-    ...loaded.config.tracker.required_labels,
-    ...(loaded.config.tracker.any_required_labels ?? []),
-    ...loaded.config.tracker.ignored_labels,
-    'agent-running',
-    'ready-for-human',
-    'needs-info',
-    'interactive',
-  ]);
-  return [...labels].map((label) => label.trim().toLowerCase()).filter(Boolean).sort();
-}
-
 async function loadDoctorWorkflows(options: { config?: string; workflow?: string }): Promise<Array<{ id: string; workflowPath: string; loaded: LoadedWorkflow }>> {
   if (options.config) {
     const serverConfig = await loadServerConfigFromFile(resolveConfigPath(options.config));
@@ -134,6 +122,10 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
   for (const entry of entries) {
     const config = entry.loaded.config;
     const prefix = `${entry.id} (${config.tracker.owner}/${config.tracker.repo})`;
+    for (const problem of routingProblems(config.agents)) {
+      failures++;
+      console.log(`fail routing: ${problem}`);
+    }
     for (const tool of requiredToolsForWorkflow(config).filter((candidate) => !tools.includes(candidate))) {
       const ok = await commandExists(tool);
       // eslint-disable-next-line no-console
@@ -177,14 +169,14 @@ async function runDoctor(options: { config?: string; workflow?: string }): Promi
 
     try {
       const labels = new Set((await new GithubIssueTrackerClient(config.tracker).listLabels()).map((label) => label.name));
-      const missingLabels = lifecycleLabelsForWorkflow(entry.loaded).filter((label) => !labels.has(label));
+      const missingLabels = labelsForWorkflow(config).filter((label) => !labels.has(label));
       if (missingLabels.length > 0) {
         failures += 1;
         // eslint-disable-next-line no-console
         console.log(`fail missing labels: ${missingLabels.join(', ')}`);
       } else {
         // eslint-disable-next-line no-console
-        console.log('ok lifecycle labels');
+        console.log('ok lifecycle, routing, priority, planning and epic labels');
       }
     } catch (err) {
       failures += 1;

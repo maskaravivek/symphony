@@ -34,6 +34,8 @@ const COLOR: Record<LogLevel | 'muted' | 'field', string> = {
 
 const RESET = '\u001b[0m';
 let persistentLogDirectory: string | null = null;
+let persistentRetentionDays = 30;
+let lastPrunedLogDay: string | null = null;
 let persistentWriteQueue: Promise<void> = Promise.resolve();
 const initializedLogFiles = new Set<string>();
 
@@ -52,23 +54,45 @@ function redactFields(fields: LogFields): LogFields {
 
 export async function configurePersistentLogging(directory: string, retentionDays = 30): Promise<void> {
   persistentLogDirectory = path.resolve(directory);
+  persistentRetentionDays = retentionDays;
+  lastPrunedLogDay = null;
   await fsp.mkdir(persistentLogDirectory, { recursive: true, mode: 0o700 });
   await fsp.chmod(persistentLogDirectory, 0o700);
-  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  for (const name of await fsp.readdir(persistentLogDirectory)) {
-    if (!/^symphony-\d{4}-\d{2}-\d{2}\.jsonl$/.test(name)) continue;
-    const file = path.join(persistentLogDirectory, name);
-    const stat = await fsp.stat(file).catch(() => null);
-    if (stat && stat.mtimeMs < cutoff) await fsp.rm(file, { force: true });
+  await prunePersistentLogs(persistentLogDirectory);
+}
+
+async function prunePersistentLogs(directory: string): Promise<void> {
+  const cutoff = Date.now() - persistentRetentionDays * 24 * 60 * 60 * 1000;
+  for (const name of await fsp.readdir(directory)) {
+    if (!/^symphony-\d{4}-\d{2}-\d{2}\.jsonl(?:\.[1-3])?$/.test(name)) continue;
+    const file = path.join(directory, name);
+    const stat = await fsp.lstat(file).catch(() => null);
+    if (stat?.isFile() && stat.mtimeMs < cutoff) await fsp.rm(file, { force: true });
   }
 }
 
 function persistLog(level: LogLevel, message: string, fields: LogFields): void {
   if (!persistentLogDirectory) return;
+  const directory = persistentLogDirectory;
   const now = new Date();
-  const file = path.join(persistentLogDirectory, `symphony-${now.toISOString().slice(0, 10)}.jsonl`);
+  const file = path.join(directory, `symphony-${now.toISOString().slice(0, 10)}.jsonl`);
   const payload = JSON.stringify({ ts: now.toISOString(), level, message, ...redactFields(fields) });
   persistentWriteQueue = persistentWriteQueue.then(async () => {
+    const day = now.toISOString().slice(0, 10);
+    if (lastPrunedLogDay !== day) {
+      await prunePersistentLogs(directory);
+      lastPrunedLogDay = day;
+    }
+    const stat = await fsp.lstat(file).catch(() => null);
+    if (stat?.isSymbolicLink()) return;
+    if (stat && stat.size + Buffer.byteLength(payload) + 1 > 25 * 1024 ** 2) {
+      await fsp.rm(`${file}.3`, { force: true });
+      for (let index = 2; index >= 0; index--) {
+        const source = index === 0 ? file : `${file}.${index}`;
+        try { await fsp.rename(source, `${file}.${index + 1}`); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      }
+    }
     await fsp.appendFile(file, `${payload}\n`, { encoding: 'utf8', mode: 0o600 });
     if (!initializedLogFiles.has(file)) {
       await fsp.chmod(file, 0o600);

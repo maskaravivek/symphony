@@ -94,7 +94,7 @@ gh auth status
 yarn cli doctor --workflow ../your-repo/WORKFLOW.md
 ```
 
-`doctor` checks the workflow, required tools, GitHub labels, workspace storage, and agent configuration.
+`doctor` checks the workflow, required tools, GitHub lifecycle/routing/priority/planning/epic labels, workspace storage, and agent configuration. It also reports impossible or shadowed routes, misplaced default routes, and concrete cases where an explicit `agent:*` label selects another provider group.
 
 ### 4. Run Symphony
 
@@ -123,6 +123,44 @@ repository_sync:
 ```
 
 When enabled, Symphony runs a sync pass before polling repository agents, initially at startup and then every 12 hours. The last attempt is saved in `.symphony/repository-sync.json` beside the central config, so restarts do not reset the interval. Each enabled workflow's containing Git checkout is deduplicated and fetched from `origin/main`, then updated only by a fast-forward. Dirty or divergent checkouts, other branches, Git operations in progress, linked task worktrees, and repositories with active agents are skipped until the next scheduled pass. Local and ignored files are preserved; sync never resets, cleans, stashes, or switches branches. Outcomes are logged, and a failed repository does not block the others or normal task polling. This does not update or restart Symphony itself. New task workspaces continue fetching their base branch before each run independently of this schedule. The feature is disabled by default.
+
+## Label routing
+
+Routes use the first matching rule. In the example workflow, explicit `agent:codex` comes first (and wins if both overrides are present). `agent:claude` selects Claude, or `claude-fable` for high/critical complexity, before any task-based rule. High/critical UX work selects `claude-fable`; tiny/docs/chore tasks use regular Codex; other UX work, including low/medium complexity, uses Claude. Everything else uses Codex. No Spark provider is configured.
+
+All execution modes still require `ready-for-agent` and respect blocking/human-attention labels. `planning` or `task:spec` requests a planning-only run. Epic coordination uses native GitHub sub-issues; provider/complexity labels do not inherit from the parent. With `auto_label_children: false`, label each child `ready-for-agent` explicitly. Legacy aliases such as `agent-ready` do not queue work. The seven configured side projects intentionally use a single default Codex route.
+
+## Daily storage maintenance
+
+Symphony runs storage maintenance on the first eligible tick and every 24 hours afterward, in both single- and multi-repository mode. Each workspace root saves its completed pass in `.symphony/storage-maintenance.json`, so restarting does not reset the schedule. Maintenance holds the workflow lock and defers while the repository has active workers. It does not need GitHub to be available. No separate scheduled job is needed; Symphony must be running.
+
+Defaults can be overridden in each repository's `WORKFLOW.md`:
+
+```yaml
+workspace:
+  storage_maintenance:
+    enabled: true
+    interval_ms: 86400000
+    min_free_gib: 20
+    idle_days: 7
+    retention_days: 30
+    max_artifact_gib: 2
+    max_pool_slots: 8
+    # Optional, exclusively owned Symphony cache; never point at a primary checkout.
+    cache_root: ~/.symphony/cache/my-repo
+    max_cache_gib: 10
+```
+
+- Archives expire after 30 days and have a 2 GiB budget per repository. Archiving moves artifacts within the same filesystem instead of temporarily duplicating them.
+- Session evidence is limited to 50 sessions and 2 GiB per workspace, across issues sharing a pool. The current/latest session is protected even if it exceeds the budget. Daily pruning covers completed, failed and cancelled runs; dispatch also prunes before starting another session. Active, paused, retrying and finalizing evidence is preserved.
+- After seven idle days, completed, failed and cancelled workspaces may be reclaimed even if their issue is still open, when `clean_on_terminal` is enabled. Maintenance requires a clean checkout, no stashes or Git operation in progress, and all local branch/tag/HEAD commits reachable from remote-tracking refs. Unknown ignored files prevent removal; only `.symphony`, root dependency folders and known root build outputs are disposable. Run evidence is archived first. Linked worktrees, symlinks, invalid/missing run state and recoverable local work are preserved.
+- Pool growth is capped at eight slots or configured agent concurrency, whichever is larger. Existing reserved slots above the cap can still resume. Exhaustion leaves tasks queued without spending retry attempts.
+- Hook logs expire after 30 days, with 100 MiB per workspace's hook-log directory. Persistent application logs are pruned during runtime writes as dates change and rotate at 25 MiB, retaining three rotated files per day.
+- An explicitly configured cache keeps at most three dependency snapshots, up to 10 GiB total, expiring after 14 days without use. Yarn v6 package entries have a separate 10 GiB / 30-day limit. Cache locks prevent cache pruning. Git mirrors are preserved because clones can reference their objects through alternates. Hooks that reuse dependency snapshots should touch their snapshot directory to record use; mdedit does this.
+
+Before new issue/review/conflict/loop work, Symphony checks for at least 20 GiB free. Low space or an unavailable filesystem pauses dispatch while reconciliation and active jobs continue. Dispatch resumes automatically when space returns. The Telegram bridge reports pause and recovery transitions once; it reads `.symphony/storage-status.json` without changing task lifecycle labels. This guard remains enabled when periodic maintenance is disabled.
+
+Maintenance intentionally leaves removed repositories, unknown directories, episode history, Git mirrors, shared system caches, and launchd stdout/stderr logs untouched. It does not promise a hard total disk cap: protected work and an active build can exceed retention budgets or consume the free-space reserve. Outcomes and failures are logged; the completion record includes removed workspace counts and artifact/cache bytes, excluding bytes removed with a checkout.
 
 ## Features
 

@@ -57,7 +57,6 @@ export class MultiRepoOrchestrator {
 
     for (const entry of this.runtimes.values()) {
       const globalSlots = this.getGlobalAvailableSlots(config);
-      if (globalSlots !== null && globalSlots <= 0) return;
       await entry.orchestrator.tickOnce({ maxNewDispatches: globalSlots }).catch((err) => {
         log('error', 'repo_tick_failed', {
           event: 'repo_tick_failed',

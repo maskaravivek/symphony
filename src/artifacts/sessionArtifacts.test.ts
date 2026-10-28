@@ -20,3 +20,13 @@ test('retains the active session and at most fifty recent session directories', 
   assert.equal(remaining.length, 50);
   assert.equal(remaining.includes(path.basename(active)), true);
 });
+
+test('byte budget keeps active evidence and prunes other issues in a shared pool', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-artifact-budget-'));
+  for (const name of ['active', 'other']) {
+    await fs.mkdir(path.join(root, name));
+    await fs.writeFile(path.join(root, name, 'output'), 'large evidence');
+  }
+  await pruneSessionArtifacts(root, { activeDir: path.join(root, 'active'), maxBytes: 1 });
+  assert.deepEqual(await fs.readdir(root), ['active']);
+});

@@ -145,3 +145,27 @@ test('hasGitRepo rejects leftover .git directories that are not worktrees', asyn
   assert.equal(await manager.hasGitRepo(brokenWorkspace), false);
   assert.equal(await manager.hasGitRepo(validWorkspace), true);
 });
+
+test('pool limits defer new work but allow resuming paused jobs beyond the new limit', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pool-limit-'));
+  const config = workspaceConfig(root);
+  config.storage_maintenance = { max_pool_slots: 2 };
+  const manager = new WorkspaceManager(config, 1);
+  for (const slot of [1, 2, 3]) {
+    const workspace = path.join(root, `_pool_${slot}`);
+    await writeRunState(workspace, runningState(workspace, 'paused', slot));
+  }
+  await assert.rejects(manager.ensureWorkspace(issue(4), { strategy: 'pooled_isolated' }), /pool limit/);
+  assert.equal((await manager.ensureWorkspace(issue(3), { strategy: 'pooled_isolated' })).workspace_path, path.join(root, '_pool_3'));
+  await assert.rejects(fs.access(path.join(root, '_pool_4')));
+});
+
+test('pool reuse preserves unknown files instead of letting checkout hooks erase them', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pool-local-work-'));
+  await fs.mkdir(path.join(root, '_pool_1'));
+  await fs.writeFile(path.join(root, '_pool_1', 'unfinished.txt'), 'local work');
+  const manager = new WorkspaceManager(workspaceConfig(root));
+  const allocated = await manager.ensureWorkspace(issue(2), { strategy: 'pooled_isolated' });
+  assert.equal(allocated.workspace_path, path.join(root, '_pool_2'));
+  assert.equal(await fs.readFile(path.join(root, '_pool_1', 'unfinished.txt'), 'utf8'), 'local work');
+});

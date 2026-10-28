@@ -668,17 +668,17 @@ tracker:
   repo: mdedit
   token: token
 agents:
-  default: codex-spark
+  default: codex-secondary
   providers:
-    codex-spark:
+    codex-secondary:
       provider_group: codex
       provider_kind: codex
-      command: codex exec --model gpt-5.3-codex-spark -
-      output_log: .symphony/codex-spark.jsonl
+      command: codex exec -
+      output_log: .symphony/codex-secondary.jsonl
 `);
 
   const loaded = await loadWorkflowFromFile(workflowPath);
-  assert.equal(loaded.config.agents.providers['codex-spark'].extract_codex_thread_id, true);
+  assert.equal(loaded.config.agents.providers['codex-secondary'].extract_codex_thread_id, true);
 });
 
 test('loads usage_limit_exit_codes and usage_limit_backoff_ms for a provider', async () => {
@@ -793,4 +793,19 @@ agents:
 `);
 
   await assert.rejects(() => loadWorkflowFromFile(workflowPath), /tracker.epics.relationship_source must be native_subissues/);
+});
+
+test('storage maintenance defaults to daily and rejects unsafe retention values', async () => {
+  const base = `tracker:\n  owner: test\n  repo: app\n  token: token\nagents:\n  providers:\n    codex:\n      command: codex exec -\n`;
+  const defaults = await loadWorkflowFromFile(await writeWorkflow(base));
+  assert.equal(defaults.config.workspace.storage_maintenance?.interval_ms, 86400000);
+  assert.equal(defaults.config.workspace.storage_maintenance?.min_free_gib, 20);
+  for (const invalid of ['retention_days: -1', 'max_pool_slots: 1.5', 'max_artifact_gib: .inf', 'enabled: definitely']) {
+    await assert.rejects(loadWorkflowFromFile(await writeWorkflow(`${base}workspace:\n  storage_maintenance:\n    ${invalid}\n`)), /workspace.storage_maintenance/);
+  }
+});
+
+test('rejects a malformed route list instead of silently falling back to the default agent', async () => {
+  const workflow = await writeWorkflow(`tracker:\n  owner: test\n  repo: app\n  token: test\nagents:\n  providers:\n    codex:\n      command: codex exec -\n  routes:\n    provider: codex\n`);
+  await assert.rejects(loadWorkflowFromFile(workflow), /agents.routes must be an array/);
 });

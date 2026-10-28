@@ -13,6 +13,7 @@ export interface BridgeTask {
 
 export interface BridgeBackend {
   tasks(): Promise<BridgeTask[]>;
+  storageAlerts?(): Promise<Array<{ key: string; blocked: boolean; minimum_free_gib: number }>>;
   // Must be idempotent by marker. Never pass arbitrary Telegram text to a shell.
   comment(task: BridgeTask, marker: string, text: string): Promise<number>;
   // Recheck GitHub state and labels before changing lifecycle labels.
@@ -70,6 +71,18 @@ export class TelegramBridge {
   }
 
   async notify(): Promise<void> {
+    for (const alert of await this.backend.storageAlerts?.() ?? []) {
+      const key = `$storage:${alert.key}`;
+      const fingerprint = `${alert.blocked}:${alert.minimum_free_gib}`;
+      if (this.state.seen[key] === fingerprint) continue;
+      if (alert.blocked || this.state.seen[key]?.startsWith('true:')) {
+        await this.api.send(`${alert.key}: ${alert.blocked
+          ? `New Symphony work is paused: free disk space is below ${alert.minimum_free_gib} GiB or the workspace filesystem is unavailable. Active jobs continue. Free space to resume automatically.`
+          : 'Disk space has recovered. Symphony can dispatch new work again.'}`);
+      }
+      this.state.seen[key] = fingerprint;
+      await this.persist();
+    }
     for (const task of await this.backend.tasks()) {
       const fingerprint = `${task.state.session_id}:${task.state.attempt}:${task.state.status}:${task.state.finished_at}`;
       const previous = this.state.seen[task.key];

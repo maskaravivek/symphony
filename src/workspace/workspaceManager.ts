@@ -1,3 +1,6 @@
+import { disposableCheckout } from '../storage/checkoutSafety.js';
+import { safeStoragePath } from '../storage/paths.js';
+import { DispatchDeferredError, storagePolicy } from '../storage/policy.js';
 import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -69,6 +72,8 @@ export class WorkspaceManager {
     issue: Issue,
     options: { strategy?: WorkspaceStrategy; epicRootIssueIdentifier?: string | null } = {},
   ): Promise<WorkspaceInfo> {
+    await fs.mkdir(this.config.root, { recursive: true });
+    if (!(await safeStoragePath(this.config.root))) throw new DispatchDeferredError('Workspace root is redirected through a symlink');
     const strategy = options.strategy ?? 'durable_issue_workspace';
     const workspacePath =
       strategy === 'pooled_isolated'
@@ -82,7 +87,9 @@ export class WorkspaceManager {
     let isNew = false;
     try {
       await fs.access(workspacePath);
-    } catch {
+      if (!(await safeStoragePath(workspacePath))) throw new DispatchDeferredError('Workspace path is redirected through a symlink');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       isNew = true;
       await fs.mkdir(workspacePath, { recursive: true });
     }
@@ -115,12 +122,20 @@ export class WorkspaceManager {
       if (state?.issue_id === issue.id && (state.status === 'paused' || state.status === 'retry-wait')) return workspacePath;
     }
 
-    for (let slot = 1; slot <= highestReusableSlot; slot += 1) {
+    const limit = Math.max(this.poolSize, storagePolicy(this.config.storage_maintenance).max_pool_slots);
+    for (let slot = 1; slot <= Math.min(highestReusableSlot, limit); slot += 1) {
       const workspacePath = workspacePathForPoolSlot(this.config.root, slot);
       const state = await readRunState(workspacePath);
-      if (!state || !reservedStatuses.has(state.status)) return workspacePath;
+      if (state && reservedStatuses.has(state.status)) continue;
+      const entries = await fs.readdir(workspacePath).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return [];
+        throw error;
+      });
+      // Reusing a slot runs destructive checkout hooks: apply the same local-work protections as deletion.
+      if (entries.length === 0 || (state && await disposableCheckout(workspacePath))) return workspacePath;
     }
 
+    if (highestReusableSlot >= limit) throw new DispatchDeferredError(`Workspace pool limit (${limit}) reached; resume or finish reserved jobs before dispatching more work`);
     return workspacePathForPoolSlot(this.config.root, highestReusableSlot + 1);
   }
 
@@ -169,16 +184,27 @@ export class WorkspaceManager {
   async cleanWorkspace(workspacePath: string): Promise<void> {
     if (!this.config.clean_on_terminal) return;
     assertPathWithinRoot(this.config.root, workspacePath);
-    await this.archiveSymphonyArtifacts(workspacePath);
-    await fs.rm(workspacePath, { recursive: true, force: true });
+    if (!(await safeStoragePath(workspacePath))) throw new Error('Unsafe workspace cleanup path');
+    const archive = await this.archiveSymphonyArtifacts(workspacePath);
+    try {
+      await fs.rm(workspacePath, { recursive: true, force: true });
+    } catch (error) {
+      if (archive) {
+        await fs.mkdir(workspacePath, { recursive: true });
+        await fs.rename(archive, path.join(workspacePath, '.symphony'));
+      }
+      throw error;
+    }
   }
 
-  private async archiveSymphonyArtifacts(workspacePath: string): Promise<void> {
+  private async archiveSymphonyArtifacts(workspacePath: string): Promise<string | null> {
     const artifactsPath = path.join(workspacePath, '.symphony');
     try {
-      await fs.access(artifactsPath);
-    } catch {
-      return;
+      const stat = await fs.lstat(artifactsPath);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Invalid workspace artifact directory');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
     }
 
     const workspaceName = path.basename(workspacePath);
@@ -186,6 +212,10 @@ export class WorkspaceManager {
     const archivePath = path.join(this.config.root, '_archives', `${workspaceName}-${safeTimestamp}`);
     assertPathWithinRoot(this.config.root, archivePath);
     await fs.mkdir(path.dirname(archivePath), { recursive: true });
-    await fs.cp(artifactsPath, archivePath, { recursive: true, force: true });
+    if (!(await safeStoragePath(path.dirname(archivePath)))) throw new Error('Unsafe workspace archive path');
+    await fs.rename(artifactsPath, archivePath);
+    const now = new Date();
+    await fs.utimes(archivePath, now, now);
+    return archivePath;
   }
 }

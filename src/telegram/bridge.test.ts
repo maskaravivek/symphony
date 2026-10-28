@@ -4,8 +4,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { RunState } from '../status/runState.js';
-import { TelegramBridge, loadBridgeState, saveBridgeState, type BridgeTask, type BridgeState } from './bridge.js';
-import type { TelegramUpdate } from './api.js';
+import { TelegramBridge, loadBridgeState, saveBridgeState, type BridgeTask, type BridgeState, type BridgeBackend } from './bridge.js';
+import type { TelegramUpdate, TelegramApi } from './api.js';
 
 function task(key = 'repo#12'): BridgeTask {
   return { key, state: {
@@ -136,4 +136,24 @@ test('failed side effects leave the update cursor unacknowledged for retry', asy
   }, state, { chatId: 123, userId: 456 }, async () => {});
   await assert.rejects(bridge.receive(fixture().reply(9)), /GitHub unavailable/);
   assert.equal(state.offset, 0);
+});
+
+test('storage alerts notify on low space and recovery without repeating unchanged state', async () => {
+  const sent: string[] = [];
+  let blocked = true;
+  const state: BridgeState = { offset: 0, seen: {}, messages: {}, pending: {} };
+  const backend: BridgeBackend = {
+    tasks: async () => [],
+    storageAlerts: async () => [{ key: 'app', blocked, minimum_free_gib: 20 }],
+    comment: async () => 1, resume: async () => false,
+  };
+  const bridge = new TelegramBridge({ send: async text => { sent.push(text); return sent.length; } } as TelegramApi,
+    backend, state, { chatId: 123, userId: 456 }, async () => {});
+  await bridge.notify(); await bridge.notify();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!, /paused/);
+  blocked = false;
+  await bridge.notify(); await bridge.notify();
+  assert.equal(sent.length, 2);
+  assert.match(sent[1]!, /recovered/);
 });

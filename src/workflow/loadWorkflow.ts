@@ -5,6 +5,7 @@ import { parse as parseYaml } from 'yaml';
 import { getGhAuthToken } from '../github/ghAuth.js';
 import { SymphonyConfigError } from '../utils/errors.js';
 import { expandHomeDir } from '../utils/fs.js';
+import { DEFAULT_STORAGE_POLICY } from '../storage/policy.js';
 import type {
   AgentProviderConfig,
   AgentRouteConfig,
@@ -301,6 +302,7 @@ function normalizeAgentsConfig(raw: AnyRecord): AgentsConfig {
   if (!providers[defaultProvider]) throw new SymphonyConfigError(`agents.default references unknown provider: ${defaultProvider}`);
 
   const routesRaw = agentsRaw.routes;
+  if (routesRaw !== undefined && !Array.isArray(routesRaw)) throw new SymphonyConfigError('agents.routes must be an array');
   const routes = Array.isArray(routesRaw) ? routesRaw.map((route, idx) => normalizeRoute(route, idx)) : [];
   for (const route of routes) {
     route.provider = route.provider.trim().toLowerCase();
@@ -470,6 +472,22 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   const workspaceRoot = expandHomeDir(asString(workspaceRaw.root, 'workspace.root') ?? defaultWorkspaceRoot);
   const cleanOnTerminal = asBoolean(workspaceRaw.clean_on_terminal, 'workspace.clean_on_terminal') ?? false;
   const workspaceStrategy = normalizeWorkspaceStrategy(workspaceRaw.strategy);
+  if (workspaceRaw.storage_maintenance !== undefined && !isRecord(workspaceRaw.storage_maintenance)) {
+    throw new SymphonyConfigError('workspace.storage_maintenance must be an object');
+  }
+  const storageRaw = isRecord(workspaceRaw.storage_maintenance) ? workspaceRaw.storage_maintenance : {};
+  const storage = { ...DEFAULT_STORAGE_POLICY };
+  storage.enabled = asBoolean(storageRaw.enabled, 'workspace.storage_maintenance.enabled') ?? storage.enabled;
+  storage.cache_root = asString(storageRaw.cache_root, 'workspace.storage_maintenance.cache_root');
+  if (storage.cache_root) storage.cache_root = expandHomeDir(storage.cache_root);
+  for (const key of ['interval_ms', 'min_free_gib', 'idle_days', 'retention_days', 'max_artifact_gib', 'max_pool_slots', 'max_cache_gib'] as const) {
+    const value = asNumber(storageRaw[key], `workspace.storage_maintenance.${key}`) ?? storage[key];
+    if (!Number.isFinite(value) || value <= 0 || (key === 'max_pool_slots' && !Number.isInteger(value))) {
+      throw new SymphonyConfigError(`workspace.storage_maintenance.${key} must be a positive ${key === 'max_pool_slots' ? 'integer' : 'number'}`);
+    }
+    storage[key] = value;
+  }
+
 
   const hooksRaw = isRecord(raw.hooks) ? raw.hooks : {};
   const hooksTimeout = asNumber(hooksRaw.timeout_ms, 'hooks.timeout_ms') ?? 120000;
@@ -560,7 +578,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       request_timeout_ms: requestTimeoutMs,
     },
     polling: { interval_ms: pollingInterval },
-    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy },
+    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy, storage_maintenance: storage },
     hooks: {
       after_create: afterCreate ?? null,
       before_run: beforeRun ?? null,

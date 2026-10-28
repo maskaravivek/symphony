@@ -36,6 +36,19 @@ export interface WorkspaceConfig {
   root: string;
   clean_on_terminal: boolean;
   strategy: WorkspaceStrategyConfig;
+  storage_maintenance?: Partial<StorageMaintenanceConfig>;
+}
+
+export interface StorageMaintenanceConfig {
+  enabled: boolean;
+  interval_ms: number;
+  min_free_gib: number;
+  idle_days: number;
+  retention_days: number;
+  max_artifact_gib: number;
+  max_pool_slots: number;
+  cache_root: string | null;
+  max_cache_gib: number;
 }
 
 export type WorkspaceStrategy = 'durable_issue_workspace' | 'pooled_isolated' | 'none_or_readonly' | 'durable_epic_workspace';

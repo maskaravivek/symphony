@@ -159,3 +159,19 @@ test('shows path-heavy fields when full pretty detail is requested', () => {
     }
   }
 });
+
+test('rotates large daily logs and prunes expired logs during runtime writes', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-log-rotation-'));
+  await configurePersistentLogging(root);
+  const old = path.join(root, 'symphony-2020-01-01.jsonl.1');
+  await fs.writeFile(old, 'old');
+  await fs.utimes(old, new Date(0), new Date(0));
+  const file = path.join(root, `symphony-${new Date().toISOString().slice(0, 10)}.jsonl`);
+  await fs.writeFile(file, '');
+  await fs.truncate(file, 25 * 1024 ** 2);
+  log('info', 'rotation_test');
+  await flushPersistentLogs();
+  await assert.rejects(fs.access(old));
+  assert.equal((await fs.stat(`${file}.1`)).size, 25 * 1024 ** 2);
+  assert.match(await fs.readFile(file, 'utf8'), /rotation_test/);
+});

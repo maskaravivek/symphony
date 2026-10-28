@@ -39,6 +39,15 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
     return entry;
   }
   return {
+    async storageAlerts() {
+      const alerts = await Promise.all(entries.map(async entry => {
+        const status = await fs.readFile(path.join(entry.config.workspace.root, '.symphony', 'storage-status.json'), 'utf8')
+          .then(raw => JSON.parse(raw) as { blocked: boolean; minimum_free_gib: number }).catch(() => null);
+        return status && typeof status.blocked === 'boolean' && Number.isFinite(status.minimum_free_gib)
+          ? { key: entry.id, ...status } : null;
+      }));
+      return alerts.filter((alert): alert is NonNullable<typeof alert> => alert !== null);
+    },
     async tasks() {
       const all = await Promise.all(entries.map(async (entry) => {
         const states = await scanRunStates(entry.config.workspace.root);

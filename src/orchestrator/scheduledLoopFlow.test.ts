@@ -73,3 +73,49 @@ Issue prompt.
   assert.equal(await fs.readFile(observedLastMessagePath, 'utf8'), expectedLastMessagePath);
   assert.equal((await fs.readFile(expectedLastMessagePath, 'utf8')).trim(), 'done');
 });
+
+test('disk pressure blocks dispatch, still runs maintenance, and resumes after recovery', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-storage-flow-'));
+  const workflowPath = path.join(root, 'WORKFLOW.md');
+  const workspaceRoot = path.join(root, 'workspaces');
+  const workflow = (minimum: number) => `---
+tracker:
+  owner: example
+  repo: app
+  token: token
+  api_base_url: https://api.github.test
+workspace:
+  root: ${workspaceRoot}
+  storage_maintenance:
+    min_free_gib: ${minimum}
+loops:
+  - id: quality
+    interval_ms: 86400000
+    prompt: One quality pass.
+agents:
+  providers:
+    codex:
+      command: bash -lc 'echo run > marker'
+---
+Prompt.
+`;
+  await fs.writeFile(workflowPath, workflow(Number.MAX_SAFE_INTEGER));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response('[]', { headers: { 'content-type': 'application/json' } });
+  const orchestrator = new Orchestrator({ workflowPath });
+  t.after(async () => {
+    globalThis.fetch = original;
+    await orchestrator.shutdown('test');
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await orchestrator.tickOnce();
+  await fs.access(path.join(workspaceRoot, '.symphony', 'storage-maintenance.json'));
+  const status = () => fs.readFile(path.join(workspaceRoot, '.symphony', 'storage-status.json'), 'utf8').then(JSON.parse);
+  assert.equal((await status()).blocked, true);
+  const marker = path.join(workspaceRoot, '_loops', 'quality', 'marker');
+  await assert.rejects(fs.access(marker));
+  await fs.writeFile(workflowPath, workflow(0.001));
+  await orchestrator.tickOnce();
+  await waitForFile(marker);
+  assert.equal((await status()).blocked, false);
+});
