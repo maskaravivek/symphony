@@ -125,6 +125,8 @@ Replace `123` with a GitHub issue number. To run multiple repositories from one 
 - **Local visibility:** Provides a read-only dashboard, CLI status tools, logs, run artifacts, and a SQLite event ledger.
 - **Multi-repository operation:** Runs one workflow or coordinates several repositories from a central config.
 
+For private Telegram questions, replies, and outcome notifications alongside your existing orchestrator, see the optional [Telegram bridge setup](docs/telegram.md).
+
 ## Limitations
 
 - Symphony is an early-stage, self-hosted tool. It is not a managed service or multi-tenant control plane, and its configuration may change.

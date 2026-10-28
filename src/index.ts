@@ -19,6 +19,8 @@ import type { LoadedWorkflow } from './workflow/types.js';
 import { startDashboardServer } from './dashboard/server.js';
 import { SymphonyConfigError } from './utils/errors.js';
 import { requiredToolsForWorkflow } from './doctor/requiredTools.js';
+import { runTelegramBridge, type TelegramBridgeOptions } from './telegram/runBridge.js';
+import { pairTelegram } from './telegram/pair.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -501,6 +503,24 @@ async function main(): Promise<void> {
       const failures = await runDoctor({ config: options.config, workflow: options.workflow });
       if (failures > 0) process.exitCode = 1;
     });
+
+  program
+    .command('telegram')
+    .description('Bridge Symphony questions, replies, and outcomes to an authorized private Telegram chat')
+    .option('-c, --config <path>', 'Path to symphony.config.yml')
+    .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
+    .option('--token-file <path>', 'Local file containing the bot token (or use SYMPHONY_TELEGRAM_BOT_TOKEN)')
+    .option('--chat-id <id>', 'Authorized private Telegram chat ID (otherwise use saved pairing)')
+    .option('--user-id <id>', 'Authorized Telegram user ID (otherwise use saved pairing)')
+    .requiredOption('--state-dir <path>', 'Private durable state directory, unique to this bot and configuration')
+    .action(async (options: TelegramBridgeOptions) => { await runTelegramBridge(options); });
+
+  program
+    .command('telegram-pair')
+    .description('Authorize your private Telegram account using a one-time pairing code')
+    .option('--token-file <path>', 'Local bot token file (or use SYMPHONY_TELEGRAM_BOT_TOKEN)')
+    .requiredOption('--state-dir <path>', 'New private durable state directory')
+    .action(pairTelegram);
 
   await program.parseAsync(process.argv);
 }
