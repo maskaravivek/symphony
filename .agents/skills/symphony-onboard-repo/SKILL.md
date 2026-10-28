@@ -31,6 +31,10 @@ Ensure `WORKFLOW.md` covers:
 
 Register the repo once in the runtime config and tracked counterpart. Preserve global concurrency and unrelated entries; side-project concurrency is normally one. Preserve the existing twelve-hour primary-repository sync setting.
 
+## Install issue-planning guidance
+
+For a repo without a specialized issue planner, copy the current sibling `symphony-plan-issues` skill from Symphony's `.agents/skills/` into the target repo's `.agents/skills/symphony-plan-issues/`, including its UI metadata and references. Commit portable files, not a symlink to a sibling checkout. If the destination already exists, compare it with the canonical copy and reconcile deliberate local customizations instead of overwriting them blindly. Keep one canonical shared definition in Symphony and propagate shared updates consistently. Preserve mdedit's specialized `mdedit-issue-planner` rather than adding a competing planner there. Verify the copied skill reads the target repo's workflow and does not embed another repo's owner, review gate, or routing assumptions.
+
 ## Provision labels from the actual workflow
 
 Use Symphony's normalized config and doctor helpers rather than maintaining a hand-written label list. The bundled helper previews missing labels by default:

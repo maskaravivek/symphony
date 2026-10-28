@@ -126,6 +126,10 @@ repository_sync:
 
 When enabled, Symphony runs a sync pass before polling repository agents, initially at startup and then every 12 hours. The last attempt is saved in `.symphony/repository-sync.json` beside the central config, so restarts do not reset the interval. Each enabled workflow's containing Git checkout is deduplicated and fetched from `origin/main`, then updated only by a fast-forward. Dirty or divergent checkouts, other branches, Git operations in progress, linked task worktrees, and repositories with active agents are skipped until the next scheduled pass. Local and ignored files are preserved; sync never resets, cleans, stashes, or switches branches. Outcomes are logged, and a failed repository does not block the others or normal task polling. This does not update or restart Symphony itself. New task workspaces continue fetching their base branch before each run independently of this schedule. The feature is disabled by default.
 
+## Issue planning
+
+Use [`$symphony-plan-issues`](.agents/skills/symphony-plan-issues/SKILL.md) to turn plans and findings into repo-aware GitHub issues or native epics. The shared skill reads the target workflow for priorities, agent routing, validation and readiness. Portable copies are installed in the seven smaller repositories; mdedit retains its specialized issue planner. The canonical shared definition lives here, and onboarding installs it for new repos without a specialized planner. Creating issues does not queue them unless execution is authorized.
+
 ## Label routing
 
 Routes use the first matching rule. In the example workflow, explicit `agent:codex` comes first (and wins if both overrides are present). `agent:claude` selects Claude, or `claude-fable` for high/critical complexity, before any task-based rule. High/critical UX work selects `claude-fable`; tiny/docs/chore tasks use regular Codex; other UX work, including low/medium complexity, uses Claude. Everything else uses Codex. No Spark provider is configured.
