@@ -85,6 +85,8 @@ Edit the new `WORKFLOW.md` in your target repository. At minimum, update:
 
 The example is a full starting point, not a drop-in configuration. Remove optional providers, quota checks, review rules, and merge behavior that you do not need. Commit `WORKFLOW.md` to the target repository so its agent policy is reviewed and versioned with the code.
 
+For repeatable onboarding, use the repository's [symphony-onboard-repo skill](.agents/skills/symphony-onboard-repo/SKILL.md). It covers workflow authoring, central registration, merge/routing/storage policy, idempotent GitHub label provisioning, doctor checks, and the existing Telegram bridge. Invoke it with `$symphony-onboard-repo` and the target repo path; it does not start agents or queue issues as an onboarding side effect.
+
 ### 3. Validate the setup
 
 Create the lifecycle labels referenced by your workflow, authenticate GitHub, and run the built-in checks:

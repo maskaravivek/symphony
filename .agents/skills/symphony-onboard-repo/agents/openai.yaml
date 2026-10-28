@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Repo Onboarding"
+  short_description: "Configure and verify a repository for Symphony"
+  default_prompt: "Use $symphony-onboard-repo to onboard this repository into Symphony with the appropriate workflow, labels, validation, and storage policy."
