@@ -127,7 +127,22 @@ Replace `123` with a GitHub issue number. To run multiple repositories from one 
 
 For private Telegram questions, replies, and outcome notifications alongside your existing orchestrator, see the optional [Telegram bridge setup](docs/telegram.md).
 
-Autonomous merging requires one fresh passing review for both standard and elevated changes. With PR shepherding enabled, a fresh Codex review bot approval can supply that review even when Symphony's own post-run review is disabled. Elevated changes still require any additional verification evidence configured in the workflow. Blocking findings, human pauses, prohibited changes, and unsuccessful checks continue to prevent automatic merging.
+By default, autonomous merging requires one fresh passing review for both standard and elevated changes. With PR shepherding enabled, a fresh Codex review bot approval can supply that review even when Symphony's own post-run review is disabled. Elevated changes still require any additional verification evidence configured in the workflow. Blocking findings, human pauses, prohibited changes, and unsuccessful checks continue to prevent automatic merging.
+
+For projects that ship without code review, set `review.enabled: false`, `review.shepherd_pull_requests: false`, and configure local validation:
+
+```yaml
+merge:
+  enabled: true
+  required_reviews: 0
+  require_checks: false
+  validation_command: |
+    yarn install --frozen-lockfile
+    yarn test
+    yarn build
+```
+
+Use the project's actual check commands. Symphony runs them after successful PR finalization, requires a clean workspace with matching local and remote head/base commits, and records validation evidence without inventing a review approval. A failed or interrupted rerun invalidates the previous success. Eligible PRs merge on a subsequent polling cycle; pending or failing GitHub checks still block merging even when checks are optional. Paused, blocked, closed, and actively running linked issues are excluded. Recovery revalidates interrupted runs. An agent's successful exit alone is insufficient, and repositories using the default review policy are unaffected.
 
 ## Limitations
 

@@ -33,6 +33,30 @@ agents:
   assert.equal(loaded.config.agent.max_attempts, 3);
 });
 
+test('review-free merging requires an explicit local validation command', async () => {
+  const frontMatter = `
+tracker:
+  kind: github
+  owner: example
+  repo: app
+  token: token
+merge:
+  enabled: true
+  required_reviews: 0
+agents:
+  default: codex
+  providers:
+    codex:
+      command: echo unused
+`;
+  await assert.rejects(loadWorkflowFromFile(await writeWorkflow(frontMatter)), /validation_command is required/);
+  const path = await writeWorkflow(frontMatter.replace('  required_reviews: 0', '  required_reviews: 0\n  validation_command: yarn test'));
+  const loaded = await loadWorkflowFromFile(path);
+  assert.equal(loaded.config.merge.required_reviews, 0);
+  assert.deepEqual(loaded.config.merge.required_evidence, { standard: ['validation'], elevated: ['validation'] });
+  await assert.rejects(loadWorkflowFromFile(await writeWorkflow(frontMatter.replace('required_reviews: 0', 'required_reviews: -1'))), /must be 0 or 1/);
+});
+
 test('loads review auto-fix config', async () => {
   const workflowPath = await writeWorkflow(`
 tracker:
@@ -115,6 +139,8 @@ agents:
     enabled: false,
     dry_run: false,
     require_checks: true,
+    required_reviews: 1,
+    validation_command: null,
     method: 'squash',
     default_risk: 'standard',
     policy_version: 'v1',
@@ -175,6 +201,8 @@ agents:
     enabled: true,
     dry_run: true,
     require_checks: false,
+    required_reviews: 1,
+    validation_command: null,
     method: 'rebase',
     default_risk: 'standard',
     policy_version: 'mdedit-2026-07',

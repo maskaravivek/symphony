@@ -9,7 +9,8 @@ import {
 } from '../github/githubClient.js';
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
-import { REQUIRED_PASSING_REVIEWS, type VerificationReceipt } from '../merge/mergePolicy.js';
+import { requiredPassingReviews, type VerificationReceipt } from '../merge/mergePolicy.js';
+import { validateLocalPullRequest } from '../merge/localValidation.js';
 import { resolvePromotedBase } from '../merge/stackPromotion.js';
 import { dueScheduledLoops } from '../loops/scheduledLoops.js';
 import { parseStructuredReviewResult, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
@@ -1285,6 +1286,7 @@ export class Orchestrator {
           try {
             const result = await runHookScript(rendered, state.workspace_path, config.hooks.timeout_ms, {
               env: {
+              SYMPHONY_REVIEW_ENABLED: config.review.enabled ? '1' : '0',
               SYMPHONY_REVIEW_PROMPT_PATH: reviewPrompt?.path ?? '',
               SYMPHONY_REVIEW_PR_NUMBER: String(reviewPr?.number ?? ''),
               SYMPHONY_REVIEW_PR_URL: reviewPr?.url ?? '',
@@ -1310,11 +1312,16 @@ export class Orchestrator {
           reviewResult = reviewPr ? parseStructuredReviewResult(recoveredHookOutput) : null;
           await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, finalization_step: 'hook-completed', updated_at: new Date().toISOString() } : null);
         }
-        if (reviewPr && reviewResult?.verdict === 'block') await this.handleBlockingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
-        if (reviewPr && reviewResult?.verdict === 'pass') await this.handlePassingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
-        if (reviewPr && (!reviewResult || reviewResult.verdict === 'retry')) throw new Error('Recovered finalization did not produce a terminal review verdict');
+        if (reviewPr && config.review.enabled) {
+          if (reviewResult?.verdict === 'block') await this.handleBlockingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
+          if (reviewResult?.verdict === 'pass') await this.handlePassingPullRequestReview(config, issue, reviewPr, state.workspace_path, reviewResult);
+          if (!reviewResult || reviewResult.verdict === 'retry') throw new Error('Recovered finalization did not produce a terminal review verdict');
+        }
+        if (reviewPr && config.merge.enabled && requiredPassingReviews(config.merge) === 0) {
+          await this.recordLocalValidation(config, issue, reviewPr, state.workspace_path);
+        }
 
-        if (!reviewPr) await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+        if (!reviewPr || !config.review.enabled) await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
         await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
         this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, session_id: state.session_id, recovered: true });
       } catch (err) {
@@ -1543,6 +1550,7 @@ export class Orchestrator {
     workspaceManager: WorkspaceManager,
     capacity: DispatchCapacity,
   ): Promise<void> {
+    if (requiredPassingReviews(config.merge) === 0 && !config.review.enabled && !config.review.shepherd_pull_requests) return;
     if (capacity.remaining !== null && capacity.remaining <= 0) return;
 
     let candidates: Issue[];
@@ -1588,7 +1596,7 @@ export class Orchestrator {
         return null;
       });
       if (!feedbackState?.pending && reviewState?.verdict === 'pass' && pullRequestHeadMatchesState(pr, reviewState)) {
-        if (!config.merge.enabled || freshPassingReceiptCount(config, pr, reviewState) >= REQUIRED_PASSING_REVIEWS) {
+        if (!config.merge.enabled || freshPassingReceiptCount(config, pr, reviewState) >= requiredPassingReviews(config.merge)) {
           log('info', 'pr_review_skipped_already_passed_for_head', {
             ...getIssueLogFields(config, issue, this.repoId),
             event: 'pr_review_skipped_already_passed_for_head',
@@ -2849,6 +2857,10 @@ export class Orchestrator {
             }
           }
 
+          if (reviewPr && config.merge.enabled && requiredPassingReviews(config.merge) === 0) {
+            await this.recordLocalValidation(config, issue, reviewPr, workspacePath);
+          }
+
           if (!isConflictResolution && !isPullRequestReview && !continuationQueued) {
             const dirtyPr = await this.findDirtyPullRequestForIssue(config, issue);
             if (dirtyPr) {
@@ -2922,7 +2934,9 @@ export class Orchestrator {
             config,
             issue,
             await this.mustReadRunState(workspacePath),
-            isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
+            config.merge.enabled && requiredPassingReviews(config.merge) === 0
+              ? 'Autonomous run completed. Local validation passed; PR is queued for automatic merging.'
+              : isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
           );
           await updateRunState(workspacePath, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
           this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id });
@@ -3048,6 +3062,12 @@ export class Orchestrator {
         return null;
       });
       if (!detailed) continue;
+      if (requiredPassingReviews(config.merge) === 0) {
+        const issueNumber = issueNumberFromPullRequestBody(detailed.body);
+        const issue = issueNumber ? await new GithubIssueTrackerClient(config.tracker).fetchIssueByNumber(issueNumber) : null;
+        if (!issue || !config.tracker.active_states.includes(issue.state) || hasOpenNativeDependency(config, issue) ||
+            issue.labels.some((label) => ['blocked', 'interactive', 'needs-info', 'symphony-failed', 'wontfix', LABEL_RUNNING].includes(label))) continue;
+      }
       let feedbackState: PullRequestFeedbackState | null;
       try {
         feedbackState = await this.readPullRequestFeedbackState(config, detailed.number);
@@ -3713,6 +3733,43 @@ ${JSON.stringify(episodeSummary, null, 2)}
     }
   }
 
+  private async recordLocalValidation(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, workspacePath: string): Promise<void> {
+    const command = config.merge.validation_command;
+    if (!command) throw new Error('Review-free automatic merging requires a local validation command');
+    const previous = await this.readPullRequestReviewState(config, pr.number);
+    const state: PullRequestReviewState = {
+      version: 1, pr_number: pr.number,
+      issue_number: issueNumberFromPullRequestBody(pr.body) ?? issue.number ?? null,
+      head_ref: pr.head_ref, head_sha: pr.head_sha, base_ref: pr.base_ref, base_sha: pr.base_sha,
+      verdict: 'unavailable', reason: 'Local validation is running.', reviewed_at: new Date().toISOString(),
+      auto_fix_iterations: previous?.auto_fix_iterations ?? 0, receipts: previous?.receipts ?? [],
+      last_review_comment_id: previous?.last_review_comment_id ?? null,
+    };
+    // Invalidate an older success before a rerun; failure or interruption must not leave it mergeable.
+    await this.writePullRequestReviewState(config, state);
+    const run = await readRunState(workspacePath);
+    const logPath = path.join(run?.session_artifact_dir ?? path.join(workspacePath, '.symphony'), 'local-validation.log');
+    const evidence = await validateLocalPullRequest({
+      workspacePath, pullRequest: pr, command, timeoutMs: config.hooks.timeout_ms,
+      logPath, signal: this.shutdownController.signal,
+    });
+    const receipt: VerificationReceipt = {
+      receipt_id: randomUUID(), verifier: 'local-validation', verdict: 'pass',
+      head_sha: pr.head_sha!, base_sha: pr.base_sha!, evidence: [evidence],
+      verified_at: new Date().toISOString(), policy_version: config.merge.policy_version ?? 'v1',
+      workflow_sha: config.workflow_sha, reviewer: null,
+      author_execution_id: run?.agent_thread_id ?? run?.session_id ?? null,
+    };
+    state.verdict = 'pass';
+    state.reason = evidence.summary;
+    state.reviewed_at = receipt.verified_at;
+    state.receipts = upsertVerificationReceipt(state.receipts, receipt);
+    await this.writePullRequestReviewState(config, state);
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
+      pr_number: pr.number, issue_number: state.issue_number, receipt,
+    });
+  }
+
   private async createVerificationReceipt(
     config: WorkflowConfig,
     pr: PullRequestRef,
@@ -3773,7 +3830,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
     await this.writePullRequestReviewState(config, nextState);
     this.completeReviewExecution(config, pr, receipt, 'pass');
 
-    const requiresAnotherReview = config.merge.enabled && freshPassingReceiptCount(config, pr, nextState) < REQUIRED_PASSING_REVIEWS;
+    const requiresAnotherReview = config.merge.enabled && freshPassingReceiptCount(config, pr, nextState) < requiredPassingReviews(config.merge);
     let queuedForAnotherRun = requiresAnotherReview;
 
     await this.applyLabels(config, pr.number, {

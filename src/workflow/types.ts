@@ -91,6 +91,8 @@ export interface MergeConfig {
   enabled: boolean;
   dry_run: boolean;
   require_checks?: boolean;
+  required_reviews?: number;
+  validation_command?: string | null;
   method: MergeMethod;
   default_risk: MergeRisk;
   policy_version?: string;

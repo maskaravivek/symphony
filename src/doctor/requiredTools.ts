@@ -40,6 +40,7 @@ export function requiredToolsForWorkflow(config: WorkflowConfig): string[] {
     config.hooks.after_create,
     config.hooks.before_run,
     config.hooks.after_run,
+    config.merge?.validation_command,
     ...Object.values(config.agents.providers).flatMap((provider) => [
       provider.command,
       provider.resume_command,

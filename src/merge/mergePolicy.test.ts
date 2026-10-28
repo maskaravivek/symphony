@@ -246,3 +246,26 @@ test('invalidates receipts when the workflow policy changes', () => {
   assert.equal(decision.eligible, false);
   assert.ok(decision.reasons.includes('requires 1 fresh independent passing review; found 0'));
 });
+
+test('review-free merges require local validation and still block failed checks and human pauses', () => {
+  const base = {
+    config: { ...config, required_reviews: 0, validation_command: 'yarn test', require_checks: false },
+    risk: 'elevated' as const,
+    pull_request: {
+      state: 'open', is_draft: false, merge_state_status: 'clean', head_sha: 'head-1', base_sha: 'base-1', linked_issue_number: 42, labels: [] as string[],
+    },
+    checks: [],
+    receipts: [receipt('validation', { reviewer: null, evidence: [{ kind: 'validation', summary: 'tests passed', command: 'yarn test', artifact: null }] })],
+  };
+  const passed = evaluateMergeEligibility(base);
+  assert.equal(passed.eligible, true);
+  assert.equal(passed.required_reviews, 0);
+  assert.deepEqual(passed.observed_evidence, ['validation']);
+  assert.equal(evaluateMergeEligibility({ ...base, receipts: [] }).eligible, false);
+  assert.equal(evaluateMergeEligibility({ ...base, receipts: [receipt('review-only')] }).eligible, false);
+  assert.equal(evaluateMergeEligibility({ ...base, receipts: [receipt('stale', { ...base.receipts[0], head_sha: 'old-head' })] }).eligible, false);
+  assert.equal(evaluateMergeEligibility({ ...base, required_evidence: [], receipts: [] }).eligible, false);
+  assert.equal(evaluateMergeEligibility({ ...base, checks: [{ name: 'build', status: 'completed', conclusion: 'failure' }] }).eligible, false);
+  assert.equal(evaluateMergeEligibility({ ...base, pull_request: { ...base.pull_request, labels: ['needs-info'] } }).eligible, false);
+  assert.equal(evaluateMergeEligibility({ ...base, risk: 'prohibited' }).eligible, false);
+});

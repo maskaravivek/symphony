@@ -362,19 +362,29 @@ function normalizeMergeConfig(value: unknown): WorkflowConfig['merge'] {
   if (raw.rules !== undefined && !Array.isArray(raw.rules)) {
     throw new SymphonyConfigError('merge.rules must be an array');
   }
+  const requiredReviews = asNumber(raw.required_reviews, 'merge.required_reviews') ?? 1;
+  if (requiredReviews !== 0 && requiredReviews !== 1) {
+    throw new SymphonyConfigError('merge.required_reviews must be 0 or 1');
+  }
+  const validationCommand = asTrimmedStringOrNull(raw.validation_command, 'merge.validation_command');
+  if (requiredReviews === 0 && !validationCommand) {
+    throw new SymphonyConfigError('merge.validation_command is required when merge.required_reviews is 0');
+  }
   return {
     enabled: asBoolean(raw.enabled, 'merge.enabled') ?? false,
     dry_run: asBoolean(raw.dry_run, 'merge.dry_run') ?? false,
     require_checks: asBoolean(raw.require_checks, 'merge.require_checks') ?? true,
+    required_reviews: requiredReviews,
+    validation_command: validationCommand,
     method: method as MergeMethod,
     default_risk: normalizeMergeRisk(raw.default_risk, 'merge.default_risk', 'standard'),
     policy_version: asTrimmedStringOrNull(raw.policy_version, 'merge.policy_version') ?? 'v1',
     require_independent_reviews: asBoolean(raw.require_independent_reviews, 'merge.require_independent_reviews') ?? false,
     required_evidence: {
-      standard: (asStringArray(isRecord(raw.required_evidence) ? raw.required_evidence.standard : undefined, 'merge.required_evidence.standard') ?? ['review'])
+      standard: (asStringArray(isRecord(raw.required_evidence) ? raw.required_evidence.standard : undefined, 'merge.required_evidence.standard') ?? [requiredReviews === 0 ? 'validation' : 'review'])
         .map((kind) => normalizeIdentifier(kind))
         .filter(Boolean),
-      elevated: (asStringArray(isRecord(raw.required_evidence) ? raw.required_evidence.elevated : undefined, 'merge.required_evidence.elevated') ?? ['review'])
+      elevated: (asStringArray(isRecord(raw.required_evidence) ? raw.required_evidence.elevated : undefined, 'merge.required_evidence.elevated') ?? [requiredReviews === 0 ? 'validation' : 'review'])
         .map((kind) => normalizeIdentifier(kind))
         .filter(Boolean),
     },

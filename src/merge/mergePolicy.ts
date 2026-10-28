@@ -70,7 +70,9 @@ export interface MergeChangedFile {
 }
 
 const RISK_RANK: Record<MergeRisk, number> = { standard: 0, elevated: 1, prohibited: 2 };
-export const REQUIRED_PASSING_REVIEWS = 1;
+export function requiredPassingReviews(config: MergeConfig): number {
+  return config.required_reviews ?? 1;
+}
 const BLOCKING_LABELS = new Set(['blocked', 'needs-info', 'interactive', 'symphony-failed', 'symphony-review:blocking']);
 const PASSING_CHECK_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 
@@ -142,7 +144,8 @@ export function classifyMergeRisk(
 
 export function requiredMergeEvidence(config: MergeConfig, risk: MergeRisk, input: MergeRiskInput): string[] {
   if (risk === 'prohibited') return [];
-  const required = new Set((config.required_evidence?.[risk] ?? ['review']).map((kind) => kind.trim().toLowerCase()).filter(Boolean));
+  const required = new Set((config.required_evidence?.[risk] ?? [requiredPassingReviews(config) === 0 ? 'validation' : 'review']).map((kind) => kind.trim().toLowerCase()).filter(Boolean));
+  if (requiredPassingReviews(config) === 0) required.add('validation');
   for (const rule of config.rules) {
     if (!ruleMatches(rule, input)) continue;
     for (const kind of rule.required_evidence ?? []) {
@@ -166,8 +169,11 @@ export function evaluateMergeEligibility(input: {
   required_evidence?: string[];
 }): MergeEligibilityDecision {
   const { config, risk, pull_request: pr, checks, receipts } = input;
-  const requiredReviews = REQUIRED_PASSING_REVIEWS;
-  const requiredEvidence = [...new Set((input.required_evidence ?? ['review']).map((kind) => kind.trim().toLowerCase()).filter(Boolean))].sort();
+  const requiredReviews = requiredPassingReviews(config);
+  const requiredEvidence = [...new Set([
+    ...(input.required_evidence ?? [requiredReviews === 0 ? 'validation' : 'review']),
+    ...(requiredReviews === 0 ? ['validation'] : []),
+  ].map((kind) => kind.trim().toLowerCase()).filter(Boolean))].sort();
   const reasons: string[] = [];
 
   if (!config.enabled) reasons.push('autonomous merge is disabled');
