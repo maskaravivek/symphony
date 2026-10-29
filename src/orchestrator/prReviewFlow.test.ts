@@ -7,6 +7,11 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { Orchestrator } from './orchestrator.js';
+import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
+import { ensureLinkedWorktree } from '../workspace/linkedWorktrees.js';
+import type { Issue } from '../domain/issue.js';
+import type { WorkflowConfig } from '../workflow/types.js';
+import { readRunState, updateRunState, type RunState } from '../status/runState.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -51,6 +56,7 @@ async function writeWorkflow(
   workspaceRoot: string,
   originRepo: string,
   opts: {
+    native?: boolean;
     afterRun?: string;
     reviewConfig?: string;
     command?: string;
@@ -74,10 +80,11 @@ tracker:
   branch_prefix: codex
 workspace:
   root: ${workspaceRoot}
-${opts.reviewConfig ?? ''}
+${opts.native ? `  checkout:\n    kind: linked_worktree\n    source: ${originRepo}\n    base_branch: main\n  strategy:\n    implementation: pooled_isolated\n` : ''}${opts.reviewConfig ?? ''}
 hooks:
   after_create: |
-    git clone ${originRepo} .
+    ${opts.native ? 'exit 17' : `git clone ${originRepo} .`}
+${opts.native ? '  before_run: exit 18' : ''}
 ${opts.afterRun ? `  after_run: |\n${opts.afterRun.split('\n').map((line) => `    ${line}`).join('\n')}\n` : ''}
 agents:
   default: codex
@@ -133,18 +140,43 @@ ${JSON.stringify(
 `;
 }
 
-test('dispatches ready-for-agent pull requests with review comments and returns them to human review', async () => {
+for (const {native, blocking} of [{native:false, blocking:false}, {native:true, blocking:false}, {native:true, blocking:true}]) test(`dispatches ${blocking ? 'blocking' : 'non-blocking'} PR feedback using ${native ? 'the original warm linked worktree' : 'legacy hooks'}`, async t => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-workspace-'));
   const originRepo = await createOriginRepo();
+  t.after(() => fs.rm(workspaceRoot, {recursive:true, force:true}));
+  t.after(() => fs.rm(originRepo, {recursive:true, force:true}));
+  if (native) {
+    await fs.writeFile(path.join(originRepo, '.gitignore'), 'node_modules/\n.symphony/\n');
+    await execFileAsync('git', ['add', '.gitignore'], {cwd:originRepo});
+    await execFileAsync('git', ['commit', '-m', 'Ignore runtime files'], {cwd:originRepo});
+    await execFileAsync('git', ['checkout', 'codex-77-review-follow-up'], {cwd:originRepo});
+    await execFileAsync('git', ['merge', 'main'], {cwd:originRepo});
+    await execFileAsync('git', ['checkout', 'main'], {cwd:originRepo});
+    await execFileAsync('git', ['remote', 'add', 'origin', originRepo], {cwd:originRepo});
+  }
+  const headSha = native ? (await execFileAsync('git', ['rev-parse', 'codex-77-review-follow-up'], {cwd:originRepo})).stdout.trim() : 'reviewed-head';
   const workflowPath = await writeWorkflow(workspaceRoot, originRepo, {
+    native,
     reviewConfig: `review:
   enabled: false`,
-    afterRun: `test "$SYMPHONY_REVIEW_ENABLED" = "0"
+    afterRun: native ? (blocking ? 'echo validated > .symphony/validated' : 'exit 19') : `test "$SYMPHONY_REVIEW_ENABLED" = "0"
 test -z "$SYMPHONY_REVIEW_PROMPT_PATH"`,
   });
+  if (native) {
+    const {config} = await loadWorkflowFromFile(workflowPath);
+    const slot = path.join(workspaceRoot, '_pool_2');
+    await ensureLinkedWorktree(config.workspace, slot);
+    await execFileAsync('git', ['fetch', 'origin'], {cwd:slot});
+    await execFileAsync('git', ['checkout', 'codex-77-review-follow-up'], {cwd:slot});
+    await fs.mkdir(path.join(slot, 'node_modules'));
+    await fs.writeFile(path.join(slot, 'node_modules', 'warm'), 'installed');
+  }
+  const baseSha = (await execFileAsync('git', ['rev-parse', 'main'], {cwd:originRepo})).stdout.trim();
+  let reportedHeadSha = headSha;
+  let orchestrator: Orchestrator | undefined;
   const calls: { url: string; method: string; body: unknown }[] = [];
   const originalFetch = globalThis.fetch;
-  const feedbackStateComment = `<!-- symphony-pr-feedback-state:v1 -->
+  let feedbackStateComment = `<!-- symphony-pr-feedback-state:v1 -->
 \`\`\`json
 ${JSON.stringify({
   version: 1,
@@ -153,9 +185,9 @@ ${JSON.stringify({
   last_review_comment_id: 901,
   pending: true,
   feedback_round: 1,
-  observed_head_sha: 'reviewed-head',
-  priorities: ['p2'],
-  has_blocking_feedback: false,
+  observed_head_sha: headSha,
+  priorities: [blocking ? 'p1' : 'p2'],
+  has_blocking_feedback: blocking,
   exhausted: false,
   updated_at: '2026-07-10T00:00:00.000Z',
 })}
@@ -187,14 +219,14 @@ ${JSON.stringify({
         state: 'open',
         draft: false,
         html_url: 'https://github.test/mangoappstudio/mdedit/pull/77',
-        head: { ref: 'codex-77-review-follow-up', sha: 'reviewed-head' },
-        base: { ref: 'main' },
+        head: { ref: 'codex-77-review-follow-up', sha: reportedHeadSha },
+        base: { ref: 'main', sha: baseSha },
         mergeable_state: 'clean',
       });
     }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/comments?per_page=50') {
       return jsonResponse([
-        { id: 900, body: reviewStateComment({ prNumber: 77, issueNumber: 42, headSha: 'reviewed-head', verdict: 'pass', autoFixIterations: 0 }) },
+        { id: 900, body: reviewStateComment({ prNumber: 77, issueNumber: 42, headSha, verdict: 'pass', autoFixIterations: 0 }) },
         { id: 902, body: feedbackStateComment },
       ]);
     }
@@ -223,6 +255,7 @@ ${JSON.stringify({
       return jsonResponse({ id: 501, body: String(body), html_url: 'https://github.test/comment/501' });
     }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/902' && method === 'PATCH') {
+      feedbackStateComment = body.body;
       return jsonResponse({ id: 902, body: String(body), html_url: 'https://github.test/comment/902' });
     }
     if (url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/900' && method === 'PATCH') {
@@ -233,7 +266,8 @@ ${JSON.stringify({
   };
 
   try {
-    const orchestrator = new Orchestrator({ workflowPath });
+    orchestrator = new Orchestrator({ workflowPath });
+    t.after(() => orchestrator!.shutdown('test'));
     await orchestrator.tickOnce();
     await waitFor(() =>
       calls.some(
@@ -245,14 +279,50 @@ ${JSON.stringify({
     );
     await orchestrator.shutdown('test');
   } finally {
-    globalThis.fetch = originalFetch;
+    if (!native) globalThis.fetch = originalFetch;
+    else t.after(() => {globalThis.fetch = originalFetch;});
   }
 
-  const prompt = await fs.readFile(path.join(workspaceRoot, 'mangoappstudio_mdedit_77', '.symphony', 'prompt.md'), 'utf8');
+  const selected = path.join(workspaceRoot, native ? '_pool_2' : 'mangoappstudio_mdedit_77');
+  if (native) {
+    assert.equal(await fs.readFile(path.join(selected, 'node_modules', 'warm'), 'utf8'), 'installed');
+    assert.equal((await readRunState(selected))?.status, 'completed');
+    assert.equal((await execFileAsync('git', ['rev-parse', 'HEAD'], {cwd:selected})).stdout.trim(), headSha);
+    const state = await readRunState(selected);
+    assert.equal(await fs.readFile(state!.last_message_path!, 'utf8'), blocking ? 'addressed\n' : 'handoff\n');
+    if (blocking) {
+      assert.equal(await fs.readFile(path.join(selected, '.symphony', 'validated'), 'utf8'), 'validated\n');
+    } else {
+      assert.equal(state?.followup_worktree_status, '');
+      const finalizer = orchestrator! as unknown as {
+        finishFollowupReview(config:WorkflowConfig, issue:Issue, state:RunState):Promise<void>;
+      };
+      const {config} = await loadWorkflowFromFile(workflowPath);
+      const issue:Issue = {id:'77', identifier:'mangoappstudio/mdedit#77', number:77, title:'Review follow-up', description:'',
+        priority:null, state:'open', labels:[], assignees:[], milestone:null, blocked_by:[], pull_requests:[], workflow_state:null,
+        branch_name:'codex-77-review-follow-up', created_at:null, updated_at:null, ready_for_agent_labeled_at:null, url:null};
+      await fs.writeFile(path.join(selected, 'README.md'), 'unexpected code edit');
+      await assert.rejects(finalizer.finishFollowupReview(config, issue, state!), /changed the checkout/);
+      await execFileAsync('git', ['restore', 'README.md'], {cwd:selected});
+      reportedHeadSha = 'new-remote-head';
+      await assert.rejects(finalizer.finishFollowupReview(config, issue, state!), /head or base changed/);
+      reportedHeadSha = headSha;
+      const savedFeedback = feedbackStateComment;
+      feedbackStateComment = feedbackStateComment.replace(/"last_review_comment_id":\s*901/, '"last_review_comment_id":999');
+      await assert.rejects(finalizer.finishFollowupReview(config, issue, state!), /New feedback/);
+      feedbackStateComment = savedFeedback;
+      const receiptsBefore = calls.filter(call => call.url.endsWith('/issues/comments/900') && call.method === 'PATCH').length;
+      await updateRunState(selected, cur => cur ? {...cur, status:'finalizing'} : null);
+      await finalizer.finishFollowupReview(config, issue, (await readRunState(selected))!);
+      assert.equal((await readRunState(selected))?.status, 'completed');
+      assert.equal(calls.filter(call => call.url.endsWith('/issues/comments/900') && call.method === 'PATCH').length, receiptsBefore);
+    }
+  }
+  const prompt = await fs.readFile(path.join(selected, '.symphony', 'prompt.md'), 'utf8');
   assert.match(prompt, /Pull Request Review Instructions/);
   assert.match(prompt, /Please add the retry case\./);
-  await assert.rejects(() => fs.access(path.join(workspaceRoot, 'mangoappstudio_mdedit_77', '.symphony', 'review_prompt.md')));
-  assert.ok(
+  await assert.rejects(() => fs.access(path.join(selected, '.symphony', 'review_prompt.md')));
+  if (!blocking) assert.ok(
     calls.some(
       (call) =>
         call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/77/labels' &&
@@ -260,7 +330,7 @@ ${JSON.stringify({
         JSON.stringify(call.body) === JSON.stringify({ labels: ['symphony-review:passed', 'ready-for-human'] }),
     ),
   );
-  assert.ok(
+  if (!blocking) assert.ok(
     calls.some(
       (call) =>
         call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/comments/900' &&

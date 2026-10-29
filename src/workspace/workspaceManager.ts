@@ -73,14 +73,14 @@ export class WorkspaceManager {
 
   async ensureWorkspace(
     issue: Issue,
-    options: { strategy?: WorkspaceStrategy; epicRootIssueIdentifier?: string | null } = {},
+    options: { strategy?: WorkspaceStrategy; epicRootIssueIdentifier?: string | null; preferredBranch?: string; originatingIssueNumber?: number | null } = {},
   ): Promise<WorkspaceInfo> {
     await fs.mkdir(this.config.root, { recursive: true });
     if (!(await safeStoragePath(this.config.root))) throw new DispatchDeferredError('Workspace root is redirected through a symlink');
     const strategy = options.strategy ?? 'durable_issue_workspace';
     const workspacePath =
       strategy === 'pooled_isolated'
-        ? await this.acquirePoolWorkspace(issue)
+        ? (options.preferredBranch ? await this.preferredReviewWorkspace(issue, options.preferredBranch, options.originatingIssueNumber) : null) ?? await this.acquirePoolWorkspace(issue)
         : strategy === 'none_or_readonly'
           ? workspacePathForReadonlyIssue(this.config.root, issue)
           : strategy === 'durable_epic_workspace'
@@ -97,12 +97,43 @@ export class WorkspaceManager {
       await fs.mkdir(workspacePath, { recursive: true });
     }
     if (await hasLivePreparation(workspacePath)) throw new DispatchDeferredError('Workspace is being prepared by a live coordinator');
+    const previous = await readRunState(workspacePath);
+    if (strategy === 'pooled_isolated' && previous && ['completed', 'failed', 'cancelled'].includes(previous.status)
+      && await ownsLinkedWorktree(this.config.root, workspacePath) && await disposableCheckout(workspacePath, {linkedRoot:this.config.root})) {
+      await this.cleanWorkspace(workspacePath, {retainCheckout:true});
+    }
     this.allocations.set(issue.id, workspacePath);
     return { workspace_path: workspacePath, is_new: isNew, strategy };
   }
 
   lastWorkspaceForIssue(issueId: string): string | null {
     return this.allocations.get(issueId) ?? null;
+  }
+
+  private async preferredReviewWorkspace(issue: Issue, branch: string, originatingIssueNumber?: number | null): Promise<string | null> {
+    const candidates: Array<{workspace:string; priority:number}> = [];
+    for (const entry of await fs.readdir(this.config.root, {withFileTypes:true})) {
+      if (!entry.isDirectory() || entry.name.startsWith('.') || ['_archives', '_loops'].includes(entry.name)) continue;
+      const workspace = path.join(this.config.root, entry.name);
+      if (!(await ownsLinkedWorktree(this.config.root, workspace))) continue;
+      const state = await readRunState(workspace);
+      const sameReview = state?.issue_id === issue.id;
+      const currentBranch = (await execFileAsync('git', ['branch', '--show-current'], {cwd:workspace})).stdout.trim();
+      const original = originatingIssueNumber != null && state?.issue_number === originatingIssueNumber;
+      const matches = sameReview || original || currentBranch === branch;
+      if (!matches) continue;
+      if (await hasLivePreparation(workspace) || (state && ['preparing','agent-running','finalizing'].includes(state.status))) {
+        throw new DispatchDeferredError('PR worktree is active or reserved');
+      }
+      const resume = Boolean(sameReview && state && ['paused','retry-wait'].includes(state.status));
+      if (!resume && state && ['paused','retry-wait'].includes(state.status)) {
+        throw new DispatchDeferredError('Original PR worktree is reserved for unfinished work');
+      }
+      if (!resume && !(await disposableCheckout(workspace, {linkedRoot:this.config.root}))) continue;
+      candidates.push({workspace, priority:resume ? 0 : sameReview ? 1 : original ? 2 : 3});
+    }
+    candidates.sort((a,b) => a.priority-b.priority);
+    return candidates[0]?.workspace ?? null;
   }
 
   private async acquirePoolWorkspace(issue: Issue): Promise<string> {
@@ -196,12 +227,13 @@ export class WorkspaceManager {
     return promptPath;
   }
 
-  async cleanWorkspace(workspacePath: string, options: { evict?: boolean } = {}): Promise<void> {
-    if (!this.config.clean_on_terminal) return;
+  async cleanWorkspace(workspacePath: string, options: { evict?: boolean; retainCheckout?: boolean } = {}): Promise<void> {
+    if (!this.config.clean_on_terminal && !options.retainCheckout) return;
     assertPathWithinRoot(this.config.root, workspacePath);
     if (!(await safeStoragePath(workspacePath))) throw new Error('Unsafe workspace cleanup path');
     const linked = await ownsLinkedWorktree(this.config.root, workspacePath);
-    const pooled = /^_pool_[1-9][0-9]*$/.test(path.basename(workspacePath));
+    const pooled = options.retainCheckout || /^_pool_[1-9][0-9]*$/.test(path.basename(workspacePath))
+      || (linked && (await readRunState(workspacePath))?.workspace_strategy === 'pooled_isolated');
     if (linked && !(await disposableCheckout(workspacePath, { linkedRoot: this.config.root }))) throw new DispatchDeferredError('Preserving protected linked workspace');
     const stamp = linked && pooled ? await fs.readFile(path.join(workspacePath, '.symphony', 'dependencies.json')).catch(() => null) : null;
     const trackedArtifacts = linked

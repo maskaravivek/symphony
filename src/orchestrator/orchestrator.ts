@@ -123,6 +123,7 @@ interface PullRequestReviewDispatchOptions {
   max_feedback_rounds?: number;
   feedback_priorities?: string[];
   has_blocking_feedback?: boolean;
+  followup_only?: boolean;
 }
 
 interface RunningSession {
@@ -1300,6 +1301,11 @@ export class Orchestrator {
           continue;
         }
 
+        if (finalization?.review_pr?.followup_only) {
+          await this.finishFollowupReview(config, issue, state);
+          continue;
+        }
+
         const savedReview = finalization?.review_pr;
         const reviewPr = savedReview
           ? await tracker.fetchPullRequest(savedReview.pr_number).catch(() => null)
@@ -1700,6 +1706,7 @@ export class Orchestrator {
             max_feedback_rounds: config.review.max_feedback_rounds,
             feedback_priorities: feedbackState?.priorities,
             has_blocking_feedback: feedbackState?.has_blocking_feedback,
+            followup_only: Boolean(config.workspace.checkout && provider.handoff_command && feedbackState?.pending && !feedbackState.has_blocking_feedback && feedbackState.observed_head_sha === pr.head_sha),
           },
         });
         if (capacity.remaining !== null) capacity.remaining -= 1;
@@ -2022,6 +2029,7 @@ export class Orchestrator {
           continue;
         }
         const state = await this.readPullRequestReviewState(config, pr.number).catch(() => null);
+        const feedback = await this.readPullRequestFeedbackState(config, pr.number).catch(() => null);
         const lens = nextReviewLens(config, pr, state);
         const reviewKey = reviewExecutionKey(config, pr, lens);
         const reviewStore = new EpisodeStore(this.storePath(config));
@@ -2044,6 +2052,11 @@ export class Orchestrator {
           originating_issue_number: issueNumberFromPullRequestBody(pr.body) ?? candidate.number,
           review_key: reviewKey,
           lens,
+          feedback_round: feedback?.blocking_feedback_round,
+          max_feedback_rounds: config.review.max_feedback_rounds,
+          feedback_priorities: feedback?.priorities,
+          has_blocking_feedback: feedback?.has_blocking_feedback,
+          followup_only: Boolean(config.workspace.checkout && provider.handoff_command && feedback?.pending && !feedback.has_blocking_feedback && feedback.observed_head_sha === pr.head_sha),
         };
       }
       try {
@@ -2190,6 +2203,7 @@ export class Orchestrator {
     options: { mode: AgentMode; stackContext: StackContext | null },
   ): WorkspaceStrategy {
     if (options.mode === 'planning' || options.mode === 'grooming') return config.workspace.strategy.planning;
+    if (options.mode === 'pr-review' && config.workspace.checkout) return 'pooled_isolated';
     if (options.mode === 'resolve-conflicts' || options.mode === 'pr-review' || options.mode === 'interactive-handoff') {
       return 'durable_issue_workspace';
     }
@@ -2230,7 +2244,8 @@ export class Orchestrator {
       try {
         await previous;
         controller.signal.throwIfAborted();
-        allocation = await manager.ensureWorkspace(issue, { strategy, epicRootIssueIdentifier: opts.stackContext?.root_issue_identifier ?? null });
+        allocation = await manager.ensureWorkspace(issue, { strategy, epicRootIssueIdentifier: opts.stackContext?.root_issue_identifier ?? null,
+          preferredBranch: opts.prReview?.head_ref, originatingIssueNumber: opts.prReview?.originating_issue_number });
         reservation.workspace_path = allocation.workspace_path;
         const old = await readRunState(allocation.workspace_path);
         const prior = old?.issue_id === issue.id ? old : null;
@@ -2409,8 +2424,9 @@ export class Orchestrator {
       SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
     };
 
-    const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
-    if (!skipsWorkspaceHooks) await workspaceManager.prepareCheckout(workspacePath, signal, issue.branch_name ?? undefined);
+    const nativeReviewCheckout = isPullRequestReview && Boolean(config.workspace.checkout);
+    const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly' || nativeReviewCheckout;
+    if (!skipsWorkspaceHooks || nativeReviewCheckout) await workspaceManager.prepareCheckout(workspacePath, signal, nativeReviewCheckout ? undefined : issue.branch_name ?? undefined);
     const hasGitRepo = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
     const shouldRunAfterCreate = !skipsWorkspaceHooks && Boolean(config.hooks.after_create) && (isNew || !hasGitRepo);
 
@@ -2503,7 +2519,7 @@ export class Orchestrator {
       log('info', 'workspace_before_run_hook_skipped', {
         ...workspaceFields,
         event: 'workspace_before_run_hook_skipped',
-        reason: 'workspace_strategy_none_or_readonly',
+        reason: nativeReviewCheckout ? 'pr_checkout_preserves_warm_dependencies' : 'workspace_strategy_none_or_readonly',
       });
     }
 
@@ -2512,7 +2528,7 @@ export class Orchestrator {
       conflictBriefPath = await this.prepareConflictResolutionWorkspace(workspacePath, opts.conflict);
     }
     if (opts.mode === 'pr-review' && opts.prReview) {
-      await this.preparePullRequestReviewWorkspace(workspacePath, opts.prReview);
+      await this.preparePullRequestReviewWorkspace(workspacePath, opts.prReview, nativeReviewCheckout, isPausedResume);
     }
 
     const comments = await new GithubIssueTrackerClient(config.tracker).listIssueComments(issue.number);
@@ -2548,7 +2564,7 @@ export class Orchestrator {
       .join('/');
     const pullRequestReviewInstructions =
       isPullRequestReview && opts.prReview
-        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- This is blocking-feedback round ${opts.prReview.feedback_round ?? 1}/${opts.prReview.max_feedback_rounds ?? config.review.max_feedback_rounds}.\n- Address the new PR review comments and prioritized PR conversation comments included in the run context.\n- ${blockingPriorityText || 'No configured priority'} and unprioritized inline correctness, security, data-loss, and regression findings are blocking: fix them, verify the fix, commit, and push to the existing PR branch.\n- ${opts.prReview.has_blocking_feedback === false ? 'This batch contains only configured non-blocking feedback.' : 'This batch contains blocking or unprioritized inline feedback.'}\n- ${nonBlockingPriorityText || 'No priority'} findings are configured as non-blocking. Prefer creating a focused linked follow-up issue with exactly one priority label over extending the PR or causing another review cycle. Only fix one inline when it is truly trivial and cannot destabilize the reviewed change.\n- Before creating a follow-up issue, search open issues to avoid duplicates. Link both the PR and its originating issue, preserve enough context to implement it independently, and do not add \`ready-for-agent\` unless it is genuinely implementation-ready.\n- Do not open a replacement PR.\n`
+        ? `\n\n---\n\n## Pull Request Review Instructions\n\nYou are addressing review feedback on PR #${opts.prReview.pr_number}${opts.prReview.pr_url ? ` (${opts.prReview.pr_url})` : ''}.\n\n- The workspace has been checked out to the PR head branch \`${opts.prReview.head_ref}\`${opts.prReview.head_sha ? ` at \`${opts.prReview.head_sha}\`` : ''}.\n- This is blocking-feedback round ${opts.prReview.feedback_round ?? 1}/${opts.prReview.max_feedback_rounds ?? config.review.max_feedback_rounds}.\n- Address the new PR review comments and prioritized PR conversation comments included in the run context.\n- ${blockingPriorityText || 'No configured priority'} and unprioritized inline correctness, security, data-loss, and regression findings are blocking: fix them, verify the fix, commit, and push to the existing PR branch.\n- ${opts.prReview.has_blocking_feedback === false ? 'This batch contains only configured non-blocking feedback.' : 'This batch contains blocking or unprioritized inline feedback.'}\n- ${nonBlockingPriorityText || 'No priority'} findings are configured as non-blocking. Prefer creating a focused linked follow-up issue with exactly one priority label over extending the PR or causing another review cycle. Only fix one inline when it is truly trivial and cannot destabilize the reviewed change.\n- Before creating a follow-up issue, search open issues to avoid duplicates. Link both the PR and its originating issue, preserve enough context to implement it independently, and do not add \`ready-for-agent\` unless it is genuinely implementation-ready.\n- Linked worktrees may be detached at the PR head. Push code changes explicitly with git push origin HEAD:${opts.prReview.head_ref}; never force-push.\n- ${opts.prReview.followup_only ? 'FOLLOW-UP ONLY: use the read-only handoff to inspect feedback and create or update focused GitHub follow-ups. Do not change code, commit, push, install dependencies, or run builds/tests. Report the follow-up links.' : 'Before tests/builds, use the shared dependency helper to validate or reuse the installation against the current PR manifests. A resumed workspace may retain partial work; inspect HEAD and remote changes before editing.'}\n- Do not open a replacement PR.\n`
         : '';
     const stackInstructions = stackContext ? this.formatStackInstructions(stackContext) : '';
     const symphonyContext = {
@@ -2595,7 +2611,7 @@ export class Orchestrator {
     if (!agentThreadId && codexCompatible) agentThreadId = stackContext?.reusable_thread_id ?? null;
     let codexThreadId = codexCompatible ? agentThreadId : null;
     const pauseReason: PauseReason = isInteractiveHandoff ? 'interactive' : null;
-    const commandTemplate = isInteractiveHandoff || isPlanningRun || isGroomingRun
+    const commandTemplate = isInteractiveHandoff || isPlanningRun || isGroomingRun || opts.prReview?.followup_only
       ? provider.handoff_command ?? provider.command
       : agentThreadId && provider.resume_command
         ? provider.resume_command
@@ -2666,6 +2682,7 @@ export class Orchestrator {
       },
       finalization_step: 'pending',
       preparation_incomplete: true,
+      followup_worktree_status: opts.prReview?.followup_only ? await runGit(workspacePath, ['status', '--porcelain=v1', '-z']) : undefined,
       status: 'agent-running',
       started_at: new Date().toISOString(),
       finished_at: null,
@@ -2962,6 +2979,10 @@ export class Orchestrator {
           }
 
           let continuationQueued = false;
+          if (opts.prReview?.followup_only) {
+            await this.finishFollowupReview(config, issue, await this.mustReadRunState(workspacePath));
+            return;
+          }
           const reviewPr = await this.findReviewPullRequest(config, issue, opts.prReview);
           if (reviewPr) {
             const reviewPrompt = config.review.enabled
@@ -4339,6 +4360,48 @@ ${JSON.stringify(episodeSummary, null, 2)}
     await client.upsertStatusComment(state.pr_number, PR_FEEDBACK_STATE_MARKER, formatPullRequestFeedbackStateComment(state));
   }
 
+  /** Finish a read-only feedback handoff without manufacturing fresh build/test evidence. */
+  private async finishFollowupReview(config: WorkflowConfig, issue: Issue, state: RunState): Promise<void> {
+    const review = state.finalization_context?.review_pr;
+    if (!review?.followup_only || !review.head_sha || state.followup_worktree_status !== '') {
+      throw new Error('Follow-up-only review requires a clean captured PR checkout');
+    }
+    const head = await runGit(state.workspace_path, ['rev-parse', 'HEAD']);
+    const status = await runGit(state.workspace_path, ['status', '--porcelain=v1', '-z']);
+    if (head !== review.head_sha || status !== state.followup_worktree_status) {
+      throw new Error('Follow-up-only review changed the checkout; code validation is required');
+    }
+    const pr = await new GithubIssueTrackerClient(config.tracker).fetchPullRequest(review.pr_number);
+    if (!pr || pr.head_sha !== review.head_sha || pr.base_sha !== review.base_sha) {
+      throw new Error('PR head or base changed during follow-up handling; retry against the current PR');
+    }
+    const feedback = await this.readPullRequestFeedbackState(config, review.pr_number);
+    if (!feedback || feedback.has_blocking_feedback || feedback.observed_head_sha !== pr.head_sha) {
+      throw new Error('Feedback now requires a code review; retry with the current feedback');
+    }
+    if ((feedback.last_review_comment_id ?? 0) > (state.last_seen_pr_review_comment_id ?? 0)
+      || (feedback.last_issue_comment_id ?? 0) > (state.last_seen_comment_id ?? 0)) {
+      throw new Error('New feedback arrived during follow-up handling; retry before acknowledging it');
+    }
+    let continuationQueued = false;
+    if (feedback.pending) {
+      continuationQueued = await this.handlePassingPullRequestReview(config, issue, pr, state.workspace_path,
+        this.externalNonBlockingReviewResult(feedback));
+      await this.markPullRequestFeedbackAddressed(config, review.pr_number);
+    }
+    if (continuationQueued) return;
+    await this.applyLabels(config, issue.number!, {add:[LABEL_READY_FOR_HUMAN], remove:[LABEL_READY, LABEL_RUNNING]});
+    await this.updateLifecycleState(state.workspace_path, {
+      add:[LABEL_READY_FOR_HUMAN], remove:[LABEL_READY, LABEL_RUNNING], workflowState:LABEL_READY_FOR_HUMAN,
+    });
+    await this.upsertStatus(config, issue, await this.mustReadRunState(state.workspace_path),
+      'Non-blocking PR feedback follow-ups completed. The reviewed code is unchanged; installation and validation were not rerun.');
+    await this.completeWorkflowState(state.workspace_path);
+    this.appendEpisodeEvent(config, `pr-${review.pr_number}`, 'workflow.completed', {
+      issue_number:issue.number, session_id:state.session_id, outcome:'followup-only',
+    });
+  }
+
   private async markPullRequestFeedbackAddressed(config: WorkflowConfig, prNumber: number): Promise<void> {
     const state = await this.readPullRequestFeedbackState(config, prNumber);
     if (!state?.pending) return;
@@ -4487,9 +4550,9 @@ Final response requirements:
     return briefPath;
   }
 
-  private async preparePullRequestReviewWorkspace(workspacePath: string, pr: PullRequestReviewDispatchOptions): Promise<void> {
+  private async preparePullRequestReviewWorkspace(workspacePath: string, pr: PullRequestReviewDispatchOptions, detached = false, preserveWork = false): Promise<void> {
     await runGit(workspacePath, ['fetch', 'origin', pr.head_ref]);
-    await runGit(workspacePath, ['checkout', '-B', pr.head_ref, 'FETCH_HEAD']);
+    if (!preserveWork) await runGit(workspacePath, detached ? ['checkout', '--detach', 'FETCH_HEAD'] : ['checkout', '-B', pr.head_ref, 'FETCH_HEAD']);
   }
 
   private formatConflictResolutionPrompt(issue: Issue, conflict: ConflictDispatchOptions, briefPath: string, runContext: string): string {

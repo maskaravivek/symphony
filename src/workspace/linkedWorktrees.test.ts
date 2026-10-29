@@ -208,3 +208,46 @@ test('ignored cache files and unstaged tracked build caches do not block cleanup
   assert.equal(await fs.readFile(path.join(slot, 'tsconfig.tsbuildinfo'), 'utf8'), 'original cache');
   assert.equal(await fs.readFile(path.join(slot, 'extra.tsbuildinfo'), 'utf8'), 'generated');
 });
+
+
+test('PR feedback prefers its original linked worktree and falls back to a warm slot without disturbing edits', async t => {
+  const {config, slot} = await fixture(t), original = path.join(config.root, '_pool_2');
+  await ensureLinkedWorktree(config, slot); await ensureLinkedWorktree(config, original);
+  await git(original, 'checkout', '-b', 'symphony-17-change');
+  await fs.mkdir(path.join(original, 'node_modules')); await fs.writeFile(path.join(original, 'node_modules', 'warm'), 'installed');
+  const issue: Issue = {id:'42',number:42,identifier:'example/app#42',title:'Review',description:'',priority:null,url:null,state:'open',labels:[],assignees:[],milestone:null,blocked_by:[],pull_requests:[],workflow_state:null,branch_name:'symphony-17-change',created_at:null,updated_at:null,ready_for_agent_labeled_at:null};
+  const manager = new WorkspaceManager(config, 2);
+  const chosen = await manager.ensureWorkspace(issue, {strategy:'pooled_isolated', preferredBranch:'symphony-17-change', originatingIssueNumber:17});
+  assert.equal(chosen.workspace_path, original);
+  assert.equal(await fs.readFile(path.join(original, 'node_modules', 'warm'), 'utf8'), 'installed');
+  await fs.writeFile(path.join(original, 'source.txt'), 'keep unfinished work');
+  const fallback = await manager.ensureWorkspace(issue, {strategy:'pooled_isolated', preferredBranch:'symphony-17-change', originatingIssueNumber:17});
+  assert.equal(fallback.workspace_path, slot);
+  assert.equal(await fs.readFile(path.join(original, 'source.txt'), 'utf8'), 'keep unfinished work');
+  await fs.mkdir(path.join(original, '.symphony'), {recursive:true});
+  await fs.writeFile(path.join(original, '.symphony', 'run.json'), JSON.stringify({issue_id:'17', issue_number:17,status:'agent-running'}));
+  await assert.rejects(manager.ensureWorkspace(issue, {strategy:'pooled_isolated', preferredBranch:'symphony-17-change', originatingIssueNumber:17}), /active|reserved/);
+});
+
+
+test('adopted durable PR workspaces stay warm and paused feedback resumes local edits', async t => {
+  const {config} = await fixture(t), original = path.join(config.root, 'example_app_17');
+  await ensureLinkedWorktree(config, original);
+  await git(original, 'checkout', '-b', 'symphony-17-change');
+  await fs.mkdir(path.join(original, 'node_modules'));
+  await fs.writeFile(path.join(original, 'node_modules', 'warm'), 'installed');
+  await fs.mkdir(path.join(original, '.symphony'), {recursive:true});
+  const statePath = path.join(original, '.symphony', 'run.json');
+  await fs.writeFile(statePath, JSON.stringify({issue_id:'17',issue_number:17,status:'completed',workspace_strategy:'durable_issue_workspace'}));
+  const issue: Issue = {id:'42',number:42,identifier:'example/app#42',title:'Review',description:'',priority:null,url:null,state:'open',labels:[],assignees:[],milestone:null,blocked_by:[],pull_requests:[],workflow_state:null,branch_name:'symphony-17-change',created_at:null,updated_at:null,ready_for_agent_labeled_at:null};
+  const manager = new WorkspaceManager(config);
+  assert.equal((await manager.ensureWorkspace(issue, {strategy:'pooled_isolated',preferredBranch:'symphony-17-change',originatingIssueNumber:17})).workspace_path, original);
+  await assert.rejects(fs.access(statePath)); // Original run evidence was archived before adoption.
+  await fs.writeFile(statePath, JSON.stringify({issue_id:'42',issue_number:42,status:'completed',workspace_strategy:'pooled_isolated'}));
+  await manager.cleanWorkspace(original);
+  assert.equal(await fs.readFile(path.join(original, 'node_modules', 'warm'), 'utf8'), 'installed');
+  await fs.writeFile(statePath, JSON.stringify({issue_id:'42',issue_number:42,status:'paused',workspace_strategy:'pooled_isolated'}));
+  await fs.writeFile(path.join(original, 'source.txt'), 'partial review fix');
+  assert.equal((await manager.ensureWorkspace(issue, {strategy:'pooled_isolated',preferredBranch:'symphony-17-change',originatingIssueNumber:17})).workspace_path, original);
+  assert.equal(await fs.readFile(path.join(original, 'source.txt'), 'utf8'), 'partial review fix');
+});

@@ -28,6 +28,7 @@ export interface FinalizationContext {
     max_feedback_rounds?: number;
     feedback_priorities?: string[];
     has_blocking_feedback?: boolean;
+    followup_only?: boolean;
   } | null;
 }
 
@@ -72,6 +73,7 @@ export interface RunState {
   finalization_context?: FinalizationContext | null;
   finalization_step?: 'pending' | 'hook-running' | 'hook-completed' | 'effects-applied' | null;
 
+  followup_worktree_status?: string;
   preparation_incomplete?: boolean;
   preparation_failure_count?: number;
   status: RunStatus;
