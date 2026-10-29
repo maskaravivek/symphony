@@ -51,20 +51,20 @@ test('indexed Yarn queue handles every file once while preserving concurrency, e
   assert.throws(() => patchClassicQueue('unrecognized queue'), /Unsupported/);
 });
 
-test('Yarn runner creates a verified local copy and leaves the installed package unchanged', async t => {
+for (const version of ['1.22.19', '1.22.22']) test(`Yarn ${version} runner preserves the pinned version and installed package`, async t => {
   const { classicRunner } = await import(moduleURL);
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-yarn-runner-'));
   const home = process.env.COREPACK_HOME;
   t.after(async () => { if (home === undefined) delete process.env.COREPACK_HOME; else process.env.COREPACK_HOME = home; await fs.rm(root, { recursive: true, force: true }); });
   process.env.COREPACK_HOME = root;
-  const pkg = path.join(root, 'v1/yarn/1.22.22');
+  const pkg = path.join(root, 'v1/yarn', version);
   await fs.mkdir(path.join(pkg, 'lib'), { recursive: true }); await fs.mkdir(path.join(pkg, 'bin'));
-  await fs.writeFile(path.join(pkg, 'package.json'), '{"name":"yarn","version":"1.22.22"}');
+  await fs.writeFile(path.join(pkg, 'package.json'), JSON.stringify({ name: 'yarn', version }));
   await fs.writeFile(path.join(pkg, 'lib/cli.js'), source);
   await fs.writeFile(path.join(pkg, 'bin/yarn.js'), '// Yarn fixture entry');
   const cache = path.join(root, 'toolchains');
-  const entry = await classicRunner('1.22.22', cache);
-  assert.equal(await classicRunner('1.22.22', cache), entry);
+  const entry = await classicRunner(version, cache);
+  assert.equal(await classicRunner(version, cache), entry);
   assert.equal(await fs.readFile(path.join(pkg, 'lib/cli.js'), 'utf8'), source);
   assert.doesNotMatch(await fs.readFile(path.resolve(entry, '../../lib/cli.js'), 'utf8'), /arr\.shift\(/);
   assert.equal(await classicRunner('4.0.0', cache), null);

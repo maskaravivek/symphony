@@ -98,7 +98,7 @@ export function runAgent(options: AgentRunOptions): AgentRunResult {
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
-    env: { ...process.env, SYMPHONY_DEPENDENCY_HELPER: dependencyHelperPath(), ...options.env },
+    env: { ...process.env, SYMPHONY_DEPENDENCY_HELPER: dependencyHelperPath(), SYMPHONY_NODE_EXECUTABLE: process.execPath, ...options.env },
   });
 
   const fields = { ...options.logFields, session_id: sessionId };

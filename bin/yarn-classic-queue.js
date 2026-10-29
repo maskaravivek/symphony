@@ -23,7 +23,7 @@ export function patchClassicQueue(source) {
 }
 
 export async function classicRunner(version, cacheDirectory) {
-  if (version !== '1.22.22') return null;
+  if (!/^1\.22\.\d+$/.test(version)) return null;
   const homes = [process.env.COREPACK_HOME,
     path.join(os.homedir(), '.cache', 'node', 'corepack'),
     path.join(os.homedir(), 'Library', 'Caches', 'node', 'corepack'),
@@ -41,7 +41,7 @@ export async function classicRunner(version, cacheDirectory) {
     const source = await fs.readFile(path.join(candidate, 'lib', 'cli.js'), 'utf8').catch(() => null);
     if (source) { root = candidate; original = source; break; }
   }
-  if (!root) throw new Error('Cannot locate Yarn 1.22.22 source for the bounded-copy queue runner');
+  if (!root) throw new Error(`Cannot locate Yarn ${version} source for the bounded-copy queue runner`);
   const patched = patchClassicQueue(original);
   const digest = createHash('sha256').update(patched).digest('hex');
   const cache = cacheDirectory ?? fileURLToPath(new URL('../.symphony/toolchains', import.meta.url));

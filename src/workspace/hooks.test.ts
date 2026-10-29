@@ -95,3 +95,11 @@ test('terminates hook subprocesses when aborted', async () => {
     },
   );
 });
+
+
+test('hooks receive the coordinator Node executable', async t => {
+  const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-hook-node-'));
+  t.after(() => fs.rm(cwd, {recursive:true, force:true}));
+  const result = await runHookScript('echo "$SYMPHONY_NODE_EXECUTABLE"', cwd, 5000);
+  assert.equal(result.stdout.trim(), process.execPath);
+});

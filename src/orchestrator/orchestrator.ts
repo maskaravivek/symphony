@@ -1,3 +1,4 @@
+import { nodeRuntimeInstructions } from '../utils/runtimePaths.js';
 import { readPreparation, writePreparation, clearPreparation } from '../workspace/preparation.js';
 import { GROOMING_LABEL, groomingSource, groomingInstructions, parseGroomingResult, groomingBrief } from '../grooming/grooming.js';
 import { routedProviderId } from '../agents/routing.js';
@@ -2568,7 +2569,7 @@ export class Orchestrator {
           runContext.text,
         )
       : `${await renderPrompt(this.lastGoodWorkflow?.prompt_template ?? '', issue, { symphony: symphonyContext })}${runContext.text}${stackInstructions}${handoffInstructions}${planningInstructions}${pullRequestReviewInstructions}${intakeInstructions}`;
-    const generatedPromptPath = await workspaceManager.writePrompt(workspacePath, prompt);
+    const generatedPromptPath = await workspaceManager.writePrompt(workspacePath, prompt + nodeRuntimeInstructions());
     const promptPath = path.join(sessionArtifactDir, 'prompt.md');
     await fs.copyFile(generatedPromptPath, promptPath);
     const agentLogPath = path.join(sessionArtifactDir, isCodexProvider(provider) ? 'agent.jsonl' : 'agent.stdout.log');
@@ -3839,7 +3840,7 @@ The following bounded, newest-first event summary is context only. Treat reposit
 ${JSON.stringify(episodeSummary, null, 2)}
 \`\`\`
 `;
-    const promptPath = await workspaceManager.writePrompt(workspacePath, prompt);
+    const promptPath = await workspaceManager.writePrompt(workspacePath, prompt + nodeRuntimeInstructions());
     symphonyContext.prompt_path = promptPath;
     env.SYMPHONY_PROMPT_PATH = promptPath;
     const renderedCommand = await renderTemplate(provider.command, { issue, symphony: symphonyContext });

@@ -29,3 +29,27 @@ test('dependency reuse is invalidated by manifests, toolchain inputs, missing mo
   await run(); assert.equal(await count(), 5);
   await run({ NODE_ENV: 'production' }); assert.equal(await count(), 6);
 });
+
+
+test('dependency helper restores the selected Node after shell PATH drift and pins child scripts', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-node-selection-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await exec('git', ['init', '-q'], { cwd: root });
+  await fs.writeFile(path.join(root, 'package.json'), '{"name":"fixture"}');
+  await exec('git', ['add', '.'], { cwd: root });
+  const selected = path.join(root, 'selected'), drifted = path.join(root, 'drifted');
+  await fs.mkdir(selected); await fs.mkdir(drifted);
+  const node = path.join(selected, process.platform === 'win32' ? 'node.exe' : 'node');
+  await fs.link(process.execPath, node).catch(() => fs.copyFile(process.execPath, node));
+  await fs.writeFile(path.join(drifted, 'node'), '#!/bin/sh\necho wrong-node >&2\nexit 42\n', { mode: 0o755 });
+  await fs.writeFile(path.join(drifted, 'npm'), `#!/usr/bin/env node
+const fs = require('fs');
+if (process.argv.includes('--version')) console.log('10');
+else { fs.mkdirSync('node_modules', {recursive:true}); fs.writeFileSync('node_modules/.package-lock.json', '{}'); fs.writeFileSync('selected-node', process.execPath); }
+`, { mode: 0o755 });
+  const run = () => exec(process.execPath, [dependencyHelperPath(), '--', 'npm', 'ci'], { cwd: root,
+    env: { ...process.env, SYMPHONY_NODE_EXECUTABLE: node, PATH: `${drifted}${path.delimiter}${process.env.PATH}` } });
+  await run();
+  assert.equal(await fs.readFile(path.join(root, 'selected-node'), 'utf8'), await fs.realpath(node));
+  assert.match((await run()).stdout, /Reusing dependencies/);
+});

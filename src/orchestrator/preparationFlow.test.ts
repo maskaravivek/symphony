@@ -36,7 +36,7 @@ agents:
   providers:
     codex:
       usage_limit_exit_codes: []
-      command: 'echo started > agent-started; sleep 30'
+      command: 'echo "$SYMPHONY_NODE_EXECUTABLE" > node-runtime; echo started > agent-started; sleep 30'
 ---
 Task prompt.
 `);
@@ -85,6 +85,7 @@ test('ordinary issue setup reserves capacity without blocking another repository
   const slow = path.join(root, 'slow', '_pool_1'), fast = path.join(root, 'fast', '_pool_1');
   await waitFor(path.join(slow, 'setup-count'));
   await waitFor(path.join(fast, 'agent-started'));
+  assert.equal((await fs.readFile(path.join(fast, 'node-runtime'), 'utf8')).trim(), process.execPath);
   await assert.rejects(fs.access(path.join(slow, 'agent-started')));
   const states = await scanRunStates(path.join(root, 'slow'));
   assert.equal(states[0]?.status, 'preparing');

@@ -11,3 +11,8 @@ export function dependencyHelperPath(): string {
   }
   throw new Error('Symphony dependency helper is missing from this installation');
 }
+
+
+export function nodeRuntimeInstructions(): string {
+  return `\n\n## Node toolchain\nSymphony selected Node ${process.version} at ${process.execPath}. Login shells may reset PATH. Before running package-manager, build or test commands in each shell, run export PATH="$(dirname "$SYMPHONY_NODE_EXECUTABLE"):$PATH". Use "$SYMPHONY_NODE_EXECUTABLE" for Node scripts. The dependency helper automatically restores this runtime and pins it for install scripts. Preserve the repository's packageManager version; do not change pins or ignore engine checks to work around shell drift.\n`;
+}

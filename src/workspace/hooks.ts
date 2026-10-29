@@ -120,7 +120,7 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
       // Hooks are non-interactive. Point stdin at /dev/null so a backgrounded
       // Symphony process cannot be suspended by hook subprocesses reading TTY input.
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, SYMPHONY_DEPENDENCY_HELPER: dependencyHelperPath(), ...options.env },
+      env: { ...process.env, SYMPHONY_DEPENDENCY_HELPER: dependencyHelperPath(), SYMPHONY_NODE_EXECUTABLE: process.execPath, ...options.env },
       detached: true,
     });
 

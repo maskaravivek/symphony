@@ -1,13 +1,25 @@
 #!/usr/bin/env node
+import { nodeToolchainPath } from './node-toolchain.js';
+import { fileURLToPath } from 'node:url';
 import { classicRunner } from './yarn-classic-queue.js';
 // Kept as a standalone entry point so hooks and agents use the same install contract.
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 const args = process.argv.slice(2).filter((value, index) => !(index === 0 && value === '--'));
 const [command] = args;
 if (!['npm', 'yarn'].includes(command) || !args.includes(command === 'npm' ? 'ci' : 'install')) throw new Error('Usage: symphony-dependencies.js -- npm ci | yarn install [flags]');
+// Login shells can replace PATH after Symphony has selected its runtime.
+const selectedNode = process.env.SYMPHONY_NODE_EXECUTABLE ?? process.execPath;
+if (await fs.realpath(selectedNode) !== await fs.realpath(process.execPath)) {
+  const child = spawnSync(selectedNode, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], { env: process.env, stdio: 'inherit' });
+  if (child.error) throw child.error;
+  process.exit(child.status ?? 1);
+}
+const toolchain = await nodeToolchainPath();
+process.env.PATH = `${toolchain}${path.delimiter}${process.env.PATH ?? ''}`;
+console.log(`Using Node ${process.version} from ${process.execPath}`);
 const cwd = process.cwd();
 const managerVersion = execFileSync(command, ['--version'], { encoding: 'utf8' }).trim();
 const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
