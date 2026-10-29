@@ -2263,10 +2263,9 @@ export class Orchestrator {
         const store = new EpisodeStore(this.storePath(config));
         try { store.completeReviewClaim(this.durableRepoId(config), opts.prReview.review_key, 'error'); } finally { store.close(); }
       }
-      if (error instanceof DispatchDeferredError) {
-        log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: error.message });
-        return;
-      }
+      const deferred = error instanceof DispatchDeferredError;
+      if (deferred) log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: error.message });
+      let setupFailures = 0;
       const interrupted = controller.signal.aborted;
       if (!interrupted) controller.abort('preparation_failed');
       const detail = interrupted ? String(controller.signal.reason) : dispatchErrorDetails(error);
@@ -2274,11 +2273,20 @@ export class Orchestrator {
         const state = await readPreparation(reservation.workspace_path);
         const current = await readRunState(reservation.workspace_path);
         const failureState = current?.session_id === reservation.session_id ? current : state;
-        if (failureState) await writeRunState(reservation.workspace_path, { ...failureState, status: interrupted ? 'cancelled' : 'failed', worker_pid: null, last_error: detail, updated_at: new Date().toISOString() });
+        setupFailures = Math.max(0, failureState?.preparation_failure_count ?? 0) + (interrupted || deferred ? 0 : 1);
+        if (failureState) await writeRunState(reservation.workspace_path, { ...failureState, preparation_incomplete: true, preparation_failure_count: setupFailures, status: interrupted ? 'cancelled' : 'failed', worker_pid: null, last_error: detail, updated_at: new Date().toISOString() });
       }
-      log(interrupted ? 'info' : 'error', 'issue_preparation_failed', { ...getIssueLogFields(config, issue, this.repoId), event: 'issue_preparation_failed', error: detail });
+      log(interrupted || deferred ? 'info' : 'error', 'issue_preparation_failed', { ...getIssueLogFields(config, issue, this.repoId), event: 'issue_preparation_failed', error: detail });
       if (!interrupted || shouldRetryCancelledRun(reservation.cancelled_reason ?? '')) {
-        await this.scheduleRetry(config, issue, interrupted ? opts.attempt - 1 : opts.attempt, `preparation_error: ${detail}`, reservation.workspace_path || undefined, mode);
+        // No coding agent started: infrastructure retries must not exhaust its attempt budget.
+        await this.scheduleRetry(config, issue, opts.attempt - 1, `preparation_error: ${detail}`, reservation.workspace_path || undefined, mode, setupFailures + 1);
+        if (!interrupted && !deferred) {
+          const marker = `<!-- symphony-setup:${issue.identifier} -->`;
+          await new GithubIssueTrackerClient(config.tracker).upsertStatusComment(issue.number!, marker,
+            `${marker}\n### Symphony setup recovery\n\nSetup is blocked; Symphony will retry automatically with backoff. Implementation attempt ${opts.attempt} is preserved.\n\nReason: ${detail.slice(0, 3000)}`).catch(noticeError => {
+              log('warn', 'setup_notice_failed', {event:'setup_notice_failed', issue_id:issue.id, error:dispatchErrorDetails(noticeError)});
+            });
+        }
       }
     }).catch(error => {
       log('error', 'preparation_recovery_failed', { event: 'preparation_recovery_failed', issue_id: issue.id, error: dispatchErrorDetails(error) });
@@ -2800,6 +2808,7 @@ export class Orchestrator {
         session_id: agent.session_id,
         worker_pid: agent.child.pid ?? null,
         preparation_incomplete: false,
+        preparation_failure_count: 0,
         updated_at: new Date().toISOString(),
       };
     });
@@ -4758,7 +4767,7 @@ ${runContext}`;
     return state;
   }
 
-  private async scheduleRetry(config: WorkflowConfig, issue: Issue, attempt: number, reason: string, workspacePath?: string, modeOverride?: AgentMode): Promise<void> {
+  private async scheduleRetry(config: WorkflowConfig, issue: Issue, attempt: number, reason: string, workspacePath?: string, modeOverride?: AgentMode, backoffAttempt?: number): Promise<void> {
     const retryState = workspacePath ? await readRunState(workspacePath) : null;
     const retrySessionId = retryState?.session_id ?? null;
     if (retryState?.agent_mode === 'pr-review' && retryState.finalization_context?.review_pr?.review_key) {
@@ -4826,7 +4835,7 @@ ${runContext}`;
       }
       return;
     }
-    const delayMs = computeBackoffMs(nextAttempt, config.agent.max_retry_backoff_ms);
+    const delayMs = computeBackoffMs(backoffAttempt ?? nextAttempt, config.agent.max_retry_backoff_ms);
     const nextAt = nowMs() + delayMs;
 
     if (issue.number) {

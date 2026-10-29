@@ -26,7 +26,7 @@ function issuePayload(labels: string[]) {
   };
 }
 
-test('exhausted dispatch errors surface the failure without requesting reporter input', async () => {
+test('setup errors preserve the first implementation attempt and expose automatic recovery', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-retry-failure-workspace-'));
   const workflowDir = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-retry-failure-workflow-'));
   const workflowPath = path.join(workflowDir, 'WORKFLOW.md');
@@ -104,8 +104,8 @@ Prompt body
     .filter((call) => call.url.endsWith('/issues/42/comments') && call.method === 'POST')
     .map((call) => String((call.body as { body?: string } | null)?.body ?? ''));
 
-  assert.ok(labelWrites.includes('symphony-failed'));
+  assert.equal(labelWrites.includes('symphony-failed'), false);
   assert.equal(labelWrites.includes('needs-info'), false);
   assert.match(commentBodies.join('\n'), /fixture checkout failed/);
-  assert.match(commentBodies.join('\n'), /failed after 1 attempt/);
+  assert.match(commentBodies.join('\n'), /retry automatically/);
 });

@@ -287,3 +287,21 @@ test('multiword aliases and substrings create in the resolved repo; ambiguous co
   assert.match(f.sent.at(-1)!, /Use \/new/);
   assert.equal(f.created.length, 2);
 });
+
+
+test('setup recovery alerts once across retries and clears when the agent starts', async () => {
+  const entry = task();
+  Object.assign(entry.state, {status:'retry-wait', pause_reason:null, preparation_incomplete:true, preparation_failure_count:1, last_error:'Setup download failed'});
+  const f = fixture([entry]);
+  await f.bridge.notify();
+  assert.equal(f.sent.length, 1); assert.match(f.sent[0]!, /retry automatically/);
+  entry.state.session_id = 'retry-session'; entry.state.preparation_failure_count = 2;
+  await f.bridge.notify();
+  assert.equal(f.sent.length, 1);
+  Object.assign(entry.state, {status:'agent-running', preparation_incomplete:false, preparation_failure_count:0});
+  await f.bridge.notify(); await f.bridge.notify();
+  assert.equal(f.sent.length, 2); assert.match(f.sent[1]!, /Setup recovered/);
+  Object.assign(entry.state, {status:'retry-wait', preparation_incomplete:true, preparation_failure_count:1});
+  await f.bridge.notify();
+  assert.equal(f.sent.length, 3);
+});

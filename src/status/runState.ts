@@ -73,6 +73,7 @@ export interface RunState {
   finalization_step?: 'pending' | 'hook-running' | 'hook-completed' | 'effects-applied' | null;
 
   preparation_incomplete?: boolean;
+  preparation_failure_count?: number;
   status: RunStatus;
   started_at: string | null;
   finished_at: string | null;

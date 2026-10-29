@@ -121,3 +121,36 @@ test('shutdown preserves an incomplete preparation for retry without exhausting 
   assert.equal(states[0]?.preparation_incomplete, true);
   await assert.rejects(fs.access(path.join(slow, 'agent-started')));
 });
+
+
+test('repeated setup failures back off across restart and recover without spending an agent attempt', async t => {
+  const { orchestrator, root } = await fixture(t);
+  const workflow = path.join(root, 'slow.md');
+  const original = await fs.readFile(workflow, 'utf8');
+  await fs.writeFile(workflow, original.replace('echo preparing >> setup-count; sleep 2', 'echo failed >> setup-count; exit 17'));
+  const realNow = Date.now.bind(Date);
+  let offset = 0;
+  t.mock.method(Date, 'now', () => realNow() + offset);
+  await orchestrator.tickOnce(); await orchestrator.waitForPreparations();
+  let state = (await scanRunStates(path.join(root, 'slow')))[0]!;
+  assert.equal(state.status, 'retry-wait'); assert.equal(state.attempt, 1);
+  assert.equal(state.preparation_failure_count, 1);
+  const firstDelay = Date.parse(state.retry_not_before!) - realNow();
+  await orchestrator.shutdown('restart');
+  const restarted = new MultiRepoOrchestrator({configPath:path.join(root, 'config.yml')});
+  try {
+  offset = 600000;
+  await restarted.tickOnce(); await restarted.waitForPreparations();
+  state = (await scanRunStates(path.join(root, 'slow')))[0]!;
+  assert.equal(state.status, 'retry-wait'); assert.equal(state.attempt, 1);
+  assert.equal(state.preparation_failure_count, 2);
+  assert.ok(Date.parse(state.retry_not_before!) - Date.now() > firstDelay);
+  await fs.writeFile(workflow, original.replace('sleep 2', 'true'));
+  offset += 600000;
+  await restarted.tickOnce(); await restarted.waitForPreparations();
+  await waitFor(path.join(root, 'slow', '_pool_1', 'agent-started'));
+  state = (await scanRunStates(path.join(root, 'slow')))[0]!;
+  assert.equal(state.status, 'agent-running'); assert.equal(state.attempt, 1);
+  assert.equal(state.preparation_failure_count, 0);
+  } finally { await restarted.shutdown('test'); }
+});

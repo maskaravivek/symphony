@@ -132,6 +132,18 @@ export class TelegramBridge {
       await this.persist();
     }
     for (const task of await this.backend.tasks()) {
+      const setupKey = `$setup:${task.key}`;
+      if (task.state.status === 'retry-wait' && task.state.preparation_incomplete && (task.state.preparation_failure_count ?? 0) > 0) {
+        if (this.state.seen[setupKey] !== 'blocked') {
+          await this.taskMessage(task, `Setup is blocked; Symphony will retry automatically without consuming an implementation attempt.\n\n${(task.state.last_error ?? task.state.retry_reason ?? '').slice(0, 1800)}`);
+          this.state.seen[setupKey] = 'blocked';
+          await this.persist();
+        }
+      } else if (task.state.status === 'agent-running' && !task.state.preparation_incomplete && this.state.seen[setupKey] === 'blocked') {
+        await this.taskMessage(task, 'Setup recovered. The coding agent has started.');
+        delete this.state.seen[setupKey];
+        await this.persist();
+      }
       const fingerprint = `${task.state.session_id}:${task.state.attempt}:${task.state.status}:${task.state.finished_at}`;
       const previous = this.state.seen[task.key];
       if (previous === fingerprint) continue;
