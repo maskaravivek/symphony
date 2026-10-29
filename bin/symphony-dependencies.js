@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { classicRunner } from './yarn-classic-queue.js';
 // Kept as a standalone entry point so hooks and agents use the same install contract.
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -8,11 +9,12 @@ const args = process.argv.slice(2).filter((value, index) => !(index === 0 && val
 const [command] = args;
 if (!['npm', 'yarn'].includes(command) || !args.includes(command === 'npm' ? 'ci' : 'install')) throw new Error('Usage: symphony-dependencies.js -- npm ci | yarn install [flags]');
 const cwd = process.cwd();
+const managerVersion = execFileSync(command, ['--version'], { encoding: 'utf8' }).trim();
 const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
 const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\0').filter(name =>
   /(^|\/)(package.json|yarn.lock|package-lock.json|npm-shrinkwrap.json|\.npmrc|\.yarnrc|\.yarnrc.yml)$/.test(name) || /(^|\/)(scripts|\.yarn)\//.test(name));
 const hash = createHash('sha256').update(JSON.stringify({ args, node: process.version, platform: process.platform, arch: process.arch,
-  manager: execFileSync(command, ['--version'], { encoding: 'utf8' }).trim(), cwd: path.relative(root, cwd), nodeEnv: process.env.NODE_ENV ?? '', installEnv: Object.fromEntries(['npm_config_omit', 'npm_config_production', 'npm_config_ignore_scripts', 'YARN_PRODUCTION', 'npm_config_arch', 'npm_config_platform'].map(key => [key, process.env[key] ?? ''])) }));
+  manager: managerVersion, cwd: path.relative(root, cwd), nodeEnv: process.env.NODE_ENV ?? '', installEnv: Object.fromEntries(['npm_config_omit', 'npm_config_production', 'npm_config_ignore_scripts', 'YARN_PRODUCTION', 'npm_config_arch', 'npm_config_platform'].map(key => [key, process.env[key] ?? ''])) }));
 for (const file of files.sort()) { hash.update(file); hash.update(await fs.readFile(path.join(root, file)).catch(() => Buffer.from('<missing>'))); }
 const fingerprint = hash.digest('hex');
 const directory = path.join(cwd, '.symphony'), stamp = path.join(directory, 'dependencies.json');
@@ -26,7 +28,9 @@ if (process.env.SYMPHONY_FORCE_INSTALL !== '1' && previous?.fingerprint === fing
   await fs.mkdir(directory, { recursive: true });
   // Invalidate before installing: a failed install must never leave a valid old stamp.
   await fs.rm(stamp, { force: true });
-  const child = spawn(command, args.slice(1), { cwd, env: process.env, stdio: ['ignore', 'inherit', 'inherit'] });
+  const runner = command === 'yarn' ? await classicRunner(managerVersion) : null;
+  if (runner) console.log('Using Symphony Yarn Classic runner with an indexed file-copy queue.');
+  const child = spawn(runner ? process.execPath : command, runner ? [runner, ...args.slice(1)] : args.slice(1), { cwd, env: process.env, stdio: ['ignore', 'inherit', 'inherit'] });
   const exit = await new Promise((resolve, reject) => { child.on('error', reject); child.on('exit', (code, signal) => resolve({ code, signal })); });
   if (exit.code !== 0 || exit.signal) process.exit(exit.code || 1);
   if (!(await fs.lstat(path.join(cwd, 'node_modules')).then(s => s.isDirectory(), () => false))) throw new Error('Install completed without node_modules');
