@@ -86,13 +86,20 @@ test('maintenance retains warm dependencies, prunes stale output and unregisters
   for (const directory of [slot, second]) {
     await ensureLinkedWorktree(config, directory);
     await fs.mkdir(path.join(directory, 'node_modules')); await fs.writeFile(path.join(directory, 'node_modules', 'keep'), 'dependency');
-    await fs.mkdir(path.join(directory, '.next')); await fs.writeFile(path.join(directory, '.next', 'old'), 'cache');
+    const exclude = path.join(config.root, '.symphony', 'repository.git', 'info', 'exclude');
+    await fs.appendFile(exclude, '\n.open-next/\ntest-results/\n');
     const old = new Date(Date.now() - 40 * 86400000);
-    await fs.utimes(path.join(directory, '.next'), old, old); await fs.utimes(directory, old, old);
+    for (const name of ['.next', '.open-next', 'test-results']) {
+      await fs.mkdir(path.join(directory, name)); await fs.writeFile(path.join(directory, name, 'old'), 'cache');
+      await fs.utimes(path.join(directory, name), old, old);
+    }
+    await fs.utimes(directory, old, old);
   }
   await maintainStorage(config, false);
   assert.equal(await fs.readFile(path.join(slot, 'node_modules', 'keep'), 'utf8'), 'dependency');
   await assert.rejects(fs.access(path.join(slot, '.next')));
+  await assert.rejects(fs.access(path.join(slot, '.open-next')));
+  await assert.rejects(fs.access(path.join(slot, 'test-results')));
   await assert.rejects(fs.access(second));
   assert.ok(!(await git(path.join(config.root, '.symphony', 'repository.git'), 'worktree', 'list', '--porcelain')).includes(second));
 });
@@ -132,4 +139,39 @@ test('task checkout releases a branch retained by an idle warm slot but protects
   await assert.rejects(manager.prepareCheckout(slot, undefined, 'symphony-task'), /protected/);
   assert.equal(await git(second, 'branch', '--show-current'), 'symphony-task');
   assert.equal(await fs.readFile(path.join(second, 'source.txt'), 'utf8'), 'unfinished');
+});
+
+
+test('terminal evidence and ignored build outputs release a warm slot without discarding other edits', async t => {
+  const { config, slot } = await fixture(t);
+  await ensureLinkedWorktree(config, slot);
+  await git(slot, 'config', 'user.email', 'test@example.com');
+  await git(slot, 'config', 'user.name', 'Test');
+  const exclude = path.join(config.root, '.symphony', 'repository.git', 'info', 'exclude');
+  await fs.appendFile(exclude, '\n.open-next/\ntest-results/\nyarn-error.log\nprivate-backup.txt\n');
+  for (const name of ['.open-next', 'test-results']) {
+    await fs.mkdir(path.join(slot, name)); await fs.writeFile(path.join(slot, name, 'generated'), 'output');
+  }
+  await fs.writeFile(path.join(slot, 'yarn-error.log'), 'generated error log');
+  const artifacts = path.join(slot, '.symphony', 'runs', 'session');
+  await fs.mkdir(artifacts, {recursive:true});
+  const evidence = JSON.stringify({version:1, head_sha:await git(slot, 'rev-parse', 'HEAD'), evidence:[]});
+  await fs.writeFile(path.join(slot, '.symphony', 'verification.json'), evidence);
+  await fs.writeFile(path.join(artifacts, 'verification.json'), evidence);
+  await fs.writeFile(path.join(slot, '.symphony', 'run.json'), JSON.stringify({status:'completed', workspace_path:slot, session_artifact_dir:artifacts}));
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), true);
+  await fs.writeFile(path.join(slot, 'source.txt'), 'unfinished edit');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  await git(slot, 'restore', '--', 'source.txt');
+  await fs.writeFile(path.join(slot, 'private-backup.txt'), 'preserve');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  await fs.rm(path.join(slot, 'private-backup.txt'));
+  await fs.writeFile(path.join(slot, '.symphony', 'verification.json'), 'unarchived evidence');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  await fs.writeFile(path.join(slot, '.symphony', 'verification.json'), evidence);
+  await new WorkspaceManager(config).cleanWorkspace(slot);
+  assert.equal(await git(slot, 'status', '--porcelain'), '');
+  const archived = await fs.readdir(path.join(config.root, '_archives'));
+  assert.equal(await fs.readFile(path.join(config.root, '_archives', archived[0]!, 'verification.json'), 'utf8'), evidence);
+  assert.equal(await fs.readFile(path.join(slot, '.symphony', 'verification.json'), 'utf8'), '{}');
 });

@@ -1,3 +1,4 @@
+import { generatedOutput } from './generatedArtifacts.js';
 import { hasLivePreparation } from '../workspace/preparation.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -71,7 +72,7 @@ async function pruneWorkspaceCaches(workspace: string, cutoff: number, budget: n
   const { stdout } = await promisify(execFile)('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: workspace, timeout: 15_000 });
   const candidates = [];
   for (const name of stdout.split('\0').filter(Boolean)) {
-    if (!/(^|\/)(\.next|\.turbo|\.gradle|dist|build|coverage)\/$/.test(name)) continue;
+    if (!generatedOutput(name)) continue;
     const file = path.resolve(workspace, name);
     if (!file.startsWith(`${path.resolve(workspace)}${path.sep}`) || !(await safeStoragePath(file))) continue;
     const tracked = await promisify(execFile)('git', ['ls-files', '--', name], { cwd: workspace, timeout: 15_000 });
