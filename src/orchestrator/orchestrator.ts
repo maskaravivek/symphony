@@ -766,7 +766,9 @@ export class Orchestrator {
     for (const entry of [...this.retries.values()]) {
       let issue: Issue | null;
       try {
-        issue = await tracker.fetchIssueByNumber(entry.issue_number);
+        issue = entry.mode === 'pr-review'
+          ? await tracker.fetchIssueOrPullRequestByNumber(entry.issue_number)
+          : await tracker.fetchIssueByNumber(entry.issue_number);
       } catch (error) {
         log('warn', 'retry_reconcile_issue_fetch_failed', {
           repo_id: this.repoId ?? undefined,
@@ -1266,7 +1268,9 @@ export class Orchestrator {
     const states = await scanRunStates(config.workspace.root);
     for (const state of states.filter((candidate) => candidate.status === 'finalizing' && candidate.issue_number)) {
       if (this.running.has(state.issue_id) || this.recoveringFinalizations.has(state.issue_id)) continue;
-      const issue = await tracker.fetchIssueByNumber(state.issue_number!).catch(() => null);
+      const issue = await (state.agent_mode === 'pr-review' || state.finalization_context?.mode === 'pr-review'
+        ? tracker.fetchIssueOrPullRequestByNumber(state.issue_number!)
+        : tracker.fetchIssueByNumber(state.issue_number!)).catch(() => null);
       if (!issue) continue;
       this.recoveringFinalizations.add(state.issue_id);
       try {
@@ -1967,7 +1971,9 @@ export class Orchestrator {
       let candidate = candidates.find((c) => c.id === entry.issue_id || c.number === entry.issue_number) ?? null;
       if (!candidate) {
         try {
-          candidate = await tracker.fetchIssueByNumber(entry.issue_number);
+          candidate = entry.mode === 'pr-review'
+            ? await tracker.fetchIssueOrPullRequestByNumber(entry.issue_number)
+            : await tracker.fetchIssueByNumber(entry.issue_number);
         } catch (error) {
           log('warn', 'retry_dispatch_issue_fetch_failed', {
             repo_id: this.repoId ?? undefined,

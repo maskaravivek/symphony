@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 
 import { Orchestrator } from './orchestrator.js';
+import { GithubIssueTrackerClient } from '../github/githubClient.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import { ensureLinkedWorktree } from '../workspace/linkedWorktrees.js';
 import type { Issue } from '../domain/issue.js';
@@ -296,6 +297,7 @@ ${JSON.stringify({
       assert.equal(state?.followup_worktree_status, '');
       const finalizer = orchestrator! as unknown as {
         finishFollowupReview(config:WorkflowConfig, issue:Issue, state:RunState):Promise<void>;
+        recoverFinalizingRuns(config:WorkflowConfig, client:GithubIssueTrackerClient):Promise<void>;
       };
       const {config} = await loadWorkflowFromFile(workflowPath);
       const issue:Issue = {id:'77', identifier:'mangoappstudio/mdedit#77', number:77, title:'Review follow-up', description:'',
@@ -313,7 +315,7 @@ ${JSON.stringify({
       feedbackStateComment = savedFeedback;
       const receiptsBefore = calls.filter(call => call.url.endsWith('/issues/comments/900') && call.method === 'PATCH').length;
       await updateRunState(selected, cur => cur ? {...cur, status:'finalizing'} : null);
-      await finalizer.finishFollowupReview(config, issue, (await readRunState(selected))!);
+      await finalizer.recoverFinalizingRuns(config, new GithubIssueTrackerClient(config.tracker));
       assert.equal((await readRunState(selected))?.status, 'completed');
       assert.equal(calls.filter(call => call.url.endsWith('/issues/comments/900') && call.method === 'PATCH').length, receiptsBefore);
     }
