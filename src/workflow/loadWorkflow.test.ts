@@ -381,7 +381,12 @@ test('ships checked-out read-only planning runs in the example workflow', async 
   const loaded = await loadWorkflowFromFile(path.resolve('WORKFLOW.example.md'));
 
   assert.equal(loaded.config.workspace.strategy.planning, 'durable_issue_workspace');
-  assert.match(loaded.config.agents.providers.codex?.handoff_command ?? '', /-s read-only/);
+  const handoff = loaded.config.agents.providers.codex?.handoff_command ?? '';
+  assert.match(handoff, /default_permissions=symphony-readonly-network/);
+  assert.match(handoff, /extends=:read-only/);
+  assert.match(handoff, /network.enabled=true/);
+  assert.match(handoff, /filesystem.:slash_tmp=write/);
+  assert.doesNotMatch(handoff, /--dangerously-bypass|-s read-only/);
 });
 
 test('loads workspace strategies', async () => {

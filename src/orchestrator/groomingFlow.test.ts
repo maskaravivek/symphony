@@ -154,3 +154,18 @@ test('intake respects human and blocker labels even with readiness present', asy
   assert.equal(f.comments.length, 0);
   assert(f.labels().includes('requires-grooming'));
 });
+
+
+test('human grooming without a priority preserves existing classification and publishes the handoff', async t => {
+  const output = result('human').replace('"labels":["priority: medium","bug"]', '"labels":[]');
+  const f = await fixture(t, output, ['requires-grooming', 'priority: medium', 'bug']);
+  await f.orchestrator.tickOnce(); await f.finish();
+  assert(f.labels().includes('ready-for-human'));
+  assert(f.labels().includes('priority: medium'));
+  assert(f.labels().includes('bug'));
+  assert(!f.labels().includes('ready-for-agent'));
+  assert(!f.labels().includes('symphony-failed'));
+  assert(!f.labels().includes('requires-grooming'));
+  assert(f.comments.some(c => c.body.includes('Human attention required')));
+  assert.equal((await scanRunStates(f.workspace))[0]?.status, 'completed');
+});

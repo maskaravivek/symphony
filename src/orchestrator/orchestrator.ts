@@ -2128,7 +2128,7 @@ export class Orchestrator {
     if (overrides.length && result.labels.some(l => l.startsWith('agent:') && !overrides.includes(l))) throw new Error('Grooming conflicts with the reporter agent override');
     const selectedPriority = result.labels.find(l => Object.keys(config.tracker.priority_labels ?? {}).includes(l));
     const existingPriority = current.labels.filter(l => Object.keys(config.tracker.priority_labels ?? {}).includes(l));
-    if (existingPriority.some(l => l !== selectedPriority)) throw new Error('Grooming must preserve an existing priority or request clarification');
+    if ((result.outcome === 'ready' || selectedPriority) && existingPriority.some(l => l !== selectedPriority)) throw new Error('Grooming must preserve an existing priority or request clarification');
     await updateRunState(workspace, cur => cur ? { ...cur, grooming_result: result } : null);
     await client.upsertStatusComment(issue.number!, marker, `${marker}\n${groomingBrief(result)}`);
     // Clear the intake gate last: a partial write cannot dispatch implementation early.

@@ -31,7 +31,8 @@ export function parseGroomingResult(text: string, config: WorkflowConfig, knownL
   value.labels = [...new Set(value.labels.map(l => l.trim().toLowerCase()))];
   if (value.labels.some(l => lifecycle.has(l) || !knownLabels.has(l) || l.startsWith('symphony-review:'))) throw new Error('Grooming selected an unsupported or lifecycle label');
   const priorityLabels = Object.keys(config.tracker.priority_labels ?? {});
-  if (priorityLabels.length && value.labels.filter(l => priorityLabels.includes(l)).length !== 1) throw new Error('Grooming must select exactly one configured priority');
+  const selectedPriorities = value.labels.filter(l => priorityLabels.includes(l));
+  if (selectedPriorities.length > 1 || (value.outcome === 'ready' && priorityLabels.length && selectedPriorities.length !== 1)) throw new Error('Grooming must select exactly one configured priority when ready, and at most one when human attention is needed');
   if (JSON.stringify(value).length > 40_000) throw new Error('Grooming result exceeds the brief size limit');
   return value;
 }
@@ -43,6 +44,7 @@ export function groomingInstructions(knownLabels: string[], config: WorkflowConf
 This issue is a rough capture tagged requires-grooming, authorizing investigation, grooming, and automatic queuing of clearly scoped bounded work after successful grooming. Read the repository's symphony-plan-issues skill, or its specialized issue planner such as mdedit-issue-planner, and apply its scoping, deduplication, priority and verification guidance. Inspect relevant code/docs, attachments when accessible, issue comments, and existing GitHub issues. Do not implement, edit repo files, commit, push, open PRs, create issues/epics, change labels, or mutate GitHub yourself. Symphony publishes your brief and performs validated label transitions.
 Preserve the reporter's intent. Distinguish evidence from assumptions; do not invent product requirements, reproduction results or tests run. Do not create arbitrary complexity/agent labels. Existing labels: ${JSON.stringify(knownLabels)}. Priority map: ${JSON.stringify(config.tracker.priority_labels)}.
 If a required intent/product/safety decision is unclear, use SYMPHONY_PAUSE with a concrete question and useful options. The existing Telegram bridge will deliver it; a reply resumes grooming, not implementation. If work is a duplicate, spans an unapproved epic, is unsupported, or needs human action instead of clarification, return outcome human and explain why. For clearly scoped work, return ready with concrete acceptance criteria, real verification steps, and one configured priority. Preserve existing explicit agent, planning, risk and priority labels unless the reporter clearly superseded them; describe conflicts and return human instead of guessing.
+For outcome human, labels may be empty; a priority is optional. Existing classification is preserved unless you explicitly propose a compatible label. Never select multiple priorities.
 Otherwise finish with exactly:
 SYMPHONY_GROOMING_RESULT
 {"outcome":"ready","summary":"desired behavior","scope":"bounded scope and non-goals","acceptance_criteria":["observable result"],"verification":["real command/flow and expected result"],"evidence":["repo/source references and any explicit assumptions"],"labels":["one configured priority and appropriate existing labels"]}

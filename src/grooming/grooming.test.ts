@@ -19,3 +19,12 @@ test('source fingerprints ignore operational labels but detect changes to intent
   assert.notEqual(groomingSource(issue), groomingSource({ ...issue, description: 'Different intent' }));
   assert.notEqual(groomingSource(issue), groomingSource({ ...issue, labels: [...issue.labels, 'agent:codex'] }));
 });
+
+
+test('human grooming can omit priority without accepting conflicting or unsupported labels', () => {
+  assert.equal(parseGroomingResult(encode({ ...result, outcome: 'human', labels: [] }), config, known).outcome, 'human');
+  assert.throws(() => parseGroomingResult(encode({ ...result, outcome: 'ready', labels: [] }), config, known));
+  assert.throws(() => parseGroomingResult(encode({ ...result, outcome: 'human', labels: ['made-up'] }), config, known));
+  const multiConfig = { tracker: { priority_labels: { 'priority: medium': 3, 'priority: high': 2 } } } as unknown as WorkflowConfig;
+  assert.throws(() => parseGroomingResult(encode({ ...result, outcome: 'human', labels: ['priority: medium', 'priority: high'] }), multiConfig, new Set([...known, 'priority: high'])));
+});
