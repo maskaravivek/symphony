@@ -14,12 +14,28 @@ test('GitHub adapter records idempotent comments and rechecks lifecycle before e
   let labels = ['needs-info'];
   let savedComment: { id: number; body: string } | null = null;
   let reads = 0;
+  let captureBody = '';
+  let capturePosts = 0;
   globalThis.fetch = async (input, init) => {
     const url = new URL(String(input)).pathname;
     const method = init?.method ?? 'GET';
     let data: unknown = [];
     if (method !== 'GET') mutations.push({ method, url, body: init?.body as string | undefined });
-    if (url.endsWith('/comments')) {
+    if (url.endsWith('/issues') && method === 'POST') {
+      capturePosts += 1;
+      const payload = JSON.parse(String(init?.body));
+      assert.deepEqual(payload.labels, ['requires-grooming']);
+      assert.equal(payload.title, 'Improve capture');
+      captureBody = payload.body;
+      data = { number: 42, title: payload.title, html_url: 'https://github.test/42' };
+    } else if (url.endsWith('/issues') && method === 'GET') {
+      assert.equal(new URL(String(input)).searchParams.get('state'), 'all');
+      assert.ok(new URL(String(input)).searchParams.get('since'));
+      if (!new URL(String(input)).searchParams.has('page')) {
+        return new Response('[]', { headers: { link: `<${String(input)}&page=2>; rel="next"` } });
+      }
+      data = captureBody ? [{ number: 42, title: 'Improve capture', html_url: 'https://github.test/42', body: captureBody, state: 'closed' }] : [];
+    } else if (url.endsWith('/comments')) {
       if (method === 'GET') data = savedComment ? [savedComment] : [];
       else data = savedComment = { id: 101, body: (JSON.parse(String(init?.body)) as { body: string }).body };
     } else if (url.includes('/issues/comments/')) {
@@ -39,13 +55,22 @@ test('GitHub adapter records idempotent comments and rechecks lifecycle before e
     const workflow = path.join(dir, 'WORKFLOW.md');
     await fs.writeFile(workflow, `---\ntracker:\n  kind: github\n  owner: owner\n  repo: repo\n  token: test\n  ignored_labels: [needs-info, interactive, blocked, symphony-failed]\nworkspace:\n  root: ${path.join(dir, 'workspaces')}\nagents:\n  default: codex\n  providers:\n    codex:\n      command: codex exec -\n---\nPrompt\n`);
     const backend = await createBridgeBackend({ workflow });
+    assert.deepEqual(await backend.repositories!(), [{ id: 'default', repository: 'owner/repo', aliases: [] }]);
+    await assert.rejects(backend.createIntake!('unconfigured', 'Improve capture', '<!-- test -->'));
+    assert.equal(capturePosts, 0);
+    assert.equal(await backend.findIntake!('default', '<!-- capture -->', '2026-10-28T00:00:00Z'), null);
+    await backend.createIntake!('default', 'Improve capture\nPreserve attachments.', '<!-- capture -->', '\n\n![Screenshot](https://github.test/image.png)');
+    assert.match(captureBody, /Original request:\n\nImprove capture\nPreserve attachments\./);
+    assert.equal((await backend.findIntake!('default', '<!-- capture -->', '2026-10-28T00:00:00Z'))!.number, 42);
+    assert.match(captureBody, /!\[Screenshot\]\(https:\/\/github.test\/image.png\)/);
+    assert.equal(capturePosts, 1);
     const task = (await backend.tasks())[0]!;
     assert.equal(task.key, 'default#12');
     assert.equal(await backend.comment(task, '<!-- symphony-telegram:123:1 -->', 'Answer'), 101);
     assert.equal(await backend.comment(task, '<!-- symphony-telegram:123:1 -->', 'Answer'), 101);
     assert.equal(mutations.filter((entry) => entry.method === 'POST' && entry.url.endsWith('/comments')).length, 1);
     assert.equal(await backend.resume(task), true);
-    const labelWrites = mutations.filter((entry) => entry.url.includes('/labels'));
+    const labelWrites = mutations.filter((entry) => entry.url.includes('/issues/12/labels'));
     assert.equal(labelWrites[0]!.method, 'DELETE');
     assert.match(labelWrites.at(-1)!.body!, /ready-for-agent/);
     const count = mutations.length;

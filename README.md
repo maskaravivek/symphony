@@ -185,7 +185,7 @@ Maintenance intentionally leaves removed repositories, unknown directories, epis
 - **Local visibility:** Provides a read-only dashboard, CLI status tools, logs, run artifacts, and a SQLite event ledger.
 - **Multi-repository operation:** Runs one workflow or coordinates several repositories from a central config.
 
-For private Telegram questions, replies, and outcome notifications alongside your existing orchestrator, see the optional [Telegram bridge setup](docs/telegram.md).
+For Telegram issue intake with text/images, private questions, replies, and outcome notifications alongside your existing orchestrator, see the optional [Telegram bridge setup](docs/telegram.md).
 
 By default, autonomous merging requires one fresh passing review for both standard and elevated changes. With PR shepherding enabled, a fresh Codex review bot approval can supply that review even when Symphony's own post-run review is disabled. Elevated changes still require any additional verification evidence configured in the workflow. Blocking findings, human pauses, prohibited changes, and unsuccessful checks continue to prevent automatic merging.
 

@@ -502,7 +502,8 @@ async function main(): Promise<void> {
 
   program
     .command('telegram')
-    .description('Bridge Symphony questions, replies, and outcomes to an authorized private Telegram chat')
+    .description('Bridge Symphony intake, images, questions, replies, and outcomes to an authorized private Telegram chat')
+    .option('--attachment-config <path>', 'Shared TaskDrop attachment service config (defaults to attachments.json in state-dir)')
     .option('-c, --config <path>', 'Path to symphony.config.yml')
     .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
     .option('--token-file <path>', 'Local file containing the bot token (or use SYMPHONY_TELEGRAM_BOT_TOKEN)')

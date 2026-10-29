@@ -333,6 +333,39 @@ export class GithubIssueTrackerClient implements IssueTrackerClient {
     this.tracker = tracker;
   }
 
+  async findTelegramIntake(marker: string, since: string): Promise<{ number: number; title: string; url: string } | null> {
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues`, this.tracker.api_base_url);
+    url.searchParams.set('state', 'all');
+    url.searchParams.set('since', since);
+    url.searchParams.set('per_page', '100');
+    let found: { number: number; title: string; url: string } | null = null;
+    await this.forEachPage<GithubIssuePayload>(url.toString(), page => {
+      const issue = page.find(issue => !issue.pull_request && issue.body?.startsWith(`${marker}\n`));
+      if (issue) found = this.intakeResult(issue);
+      return !found;
+    });
+    return found;
+  }
+
+  async createTelegramIntake(text: string, marker: string, images = ''): Promise<{ number: number; title: string; url: string }> {
+    await this.createLabelIfMissing('requires-grooming');
+    const title = text.split(/\r?\n/).find(line => line.trim())!.trim().slice(0, 180);
+    const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues`, this.tracker.api_base_url);
+    const { data } = await this.fetchJson(url.toString(), { method: 'POST', body: {
+      title, body: `${marker}\nCaptured through Telegram. Original request:\n\n${text}${images}`,
+      labels: ['requires-grooming'],
+    } });
+    return this.intakeResult(data as GithubIssuePayload);
+  }
+
+  private intakeResult(issue: GithubIssuePayload): { number: number; title: string; url: string } {
+    if (!issue || !Number.isSafeInteger(issue.number) || issue.number! <= 0 ||
+        typeof issue.title !== 'string' || typeof issue.html_url !== 'string') {
+      throw new SymphonyRuntimeError('Invalid GitHub intake response');
+    }
+    return { number: issue.number!, title: issue.title, url: issue.html_url };
+  }
+
   async fetchGroomingIssues(): Promise<Issue[]> {
     const url = new URL(`/repos/${this.tracker.owner}/${this.tracker.repo}/issues`, this.tracker.api_base_url);
     url.searchParams.set('state', 'open');

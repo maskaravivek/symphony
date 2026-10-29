@@ -7,10 +7,14 @@ import { scanRunStates } from '../status/scanRunStates.js';
 import { readRunState } from '../status/runState.js';
 import { acquireWorkflowLock } from '../orchestrator/workflowLock.js';
 import { sleep } from '../utils/sleep.js';
+import { loadAttachmentStorage } from './attachmentStorage.js';
+import { TelegramMediaError } from './media.js';
+import { intakeAliases } from './intakeRouting.js';
 import { TelegramBotApi } from './api.js';
 import { TelegramBridge, loadBridgeState, saveBridgeState, type BridgeBackend, type BridgeTask } from './bridge.js';
 
 export interface TelegramBridgeOptions {
+  attachmentConfig?: string;
   config?: string;
   workflow?: string;
   tokenFile?: string;
@@ -25,7 +29,8 @@ function telegramId(raw: string, name: string): number {
   return id;
 }
 
-export async function createBridgeBackend(options: { config?: string; workflow?: string }): Promise<BridgeBackend> {
+export async function createBridgeBackend(options: { config?: string; workflow?: string; attachmentConfig?: string }): Promise<BridgeBackend> {
+  const attachments = options.attachmentConfig ? await loadAttachmentStorage(options.attachmentConfig) : null;
   const repos = options.config
     ? (await loadServerConfigFromFile(path.resolve(options.config))).repos.filter((repo) => repo.enabled)
     : [{ id: 'default', workflow: path.resolve(options.workflow ?? 'WORKFLOW.md') }];
@@ -38,7 +43,29 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
     if (!entry) throw new Error('Task repository is no longer configured');
     return entry;
   }
+  function intakeEntry(repoId: string) {
+    const entry = entries.find(entry => entry.id === repoId);
+    if (!entry) throw new Error('Intake repository is no longer configured');
+    return entry;
+  }
   return {
+    async repositories() {
+      return entries.map(entry => ({ id: entry.id, repository: `${entry.config.tracker.owner}/${entry.config.tracker.repo}`, aliases: intakeAliases(entry.config.tracker.repo) }));
+    },
+    async findIntake(repoId, marker, since) {
+      return intakeEntry(repoId).github.findTelegramIntake(marker, since);
+    },
+    async createIntake(repoId, text, marker, images) {
+      return intakeEntry(repoId).github.createTelegramIntake(text, marker, images);
+    },
+    async storeImage(repoId, key, image) {
+      intakeEntry(repoId);
+      if (!attachments) throw new TelegramMediaError('Image uploads are not configured. Configure the shared TaskDrop attachment service and resend.');
+      return attachments.store(key, image);
+    },
+    async capturedComment(repoId, number, marker, text) {
+      return (await intakeEntry(repoId).github.upsertStatusComment(number, marker, `${marker}\n${text}`)).id;
+    },
     async storageAlerts() {
       const alerts = await Promise.all(entries.map(async entry => {
         const status = await fs.readFile(path.join(entry.config.workspace.root, '.symphony', 'storage-status.json'), 'utf8')
@@ -121,9 +148,9 @@ export async function runTelegramBridge(options: TelegramBridgeOptions): Promise
     if (existing !== null && existing !== identity) throw new Error('Use a different --state-dir for a different bot/chat/user');
     await fs.writeFile(identityPath, identity, { mode: 0o600 });
     const state = await loadBridgeState(statePath);
-    const backend = await createBridgeBackend(options);
+    const backend = await createBridgeBackend({ ...options, attachmentConfig: options.attachmentConfig ?? path.join(stateDir, 'attachments.json') });
     const api = new TelegramBotApi(token, chatId);
-    const bridge = new TelegramBridge(api, backend, state, { chatId, userId }, () => saveBridgeState(statePath, state));
+    const bridge = new TelegramBridge(api, backend, state, { chatId, userId }, () => saveBridgeState(statePath, state), identity);
     console.log('Telegram bridge started. Only the configured private chat and user are authorized.');
     while (!stopped) {
       try {

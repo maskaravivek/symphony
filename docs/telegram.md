@@ -1,6 +1,6 @@
 # Telegram communication bridge
 
-TaskDrop creates GitHub captures with `requires-grooming`. Symphony grooms them before implementation. This optional bridge forwards Symphony questions and outcomes to a private Telegram chat. Replies become GitHub issue comments and eligible tasks are requeued. It runs alongside Symphony on the **same host**, using the same workflows and workspace roots; it does not start coding agents itself.
+TaskDrop creates GitHub captures with `requires-grooming`. Symphony grooms them before implementation. Telegram can also create captures with `/new <repo> <task>`. This optional bridge forwards Symphony questions and outcomes to a private Telegram chat. Replies become GitHub issue comments and eligible tasks are requeued. It runs alongside Symphony on the **same host**, using the same workflows and workspace roots; it does not start coding agents itself.
 
 ## Setup
 
@@ -32,21 +32,47 @@ For macOS background operation, adapt [`ops/com.mangoappstudio.symphony-telegram
 
 ## Use
 
+- `/repos` lists enabled repository IDs, their GitHub repositories, and aliases.
+- `/new taskdrop Improve the capture screen` creates a GitHub issue in that configured repository. Replace `taskdrop` with a name or alias from `/repos`. Names are case-insensitive. Unique substrings also work; ambiguous matches list the candidates without creating an issue. Exact names take precedence. Multiword aliases need no quotes, for example `/new camera coach Improve framing tips`. Multiline requests are supported, up to 8000 characters; the first line becomes the title (up to 180 characters), and the entire request is preserved in the body.
+- Short names: `mdedit`, `pdfkit` → `pdfkit.app`, `camera coach` → `ai-photographer`, `taskdrop`, `ratelens`, `aarti` → `myaarti`, and `calculator` → `freecalculator`. Aliases only apply to enabled, configured repositories. `markdownlist` remains available.
+- Captures receive only `requires-grooming`. When the orchestrator runs, it gathers context, asks clarification questions if necessary, and adds readiness/routing labels through the existing grooming flow. The bridge itself does not launch agents. Reply to the capture confirmation with more text or images, even before grooming starts.
+- `/intakes` shows the last ten Telegram captures and checks any unconfirmed creations again.
+
 - `/questions` sends current questions again, including any that existed before the bridge started.
 - Reply directly to a question to record your answer and requeue the paused issue.
 - Reply to an outcome with follow-up instructions to request another run of an open, eligible issue.
 - `/status` lists known task statuses. `/help` explains the available commands.
 - The bridge forwards new completion, failure, cancellation, and pause transitions. Historical outcomes are baselined on first observation, avoiding a backlog of old alerts. Existing questions are sent immediately. Completion messages include the agent's final output, which may contain a PR link; completion alone does not mean a PR was merged.
 
-The repository ID and issue number are attached to every task message. Replies use persisted message IDs, so identical issue numbers in different repositories cannot be confused. Unknown replies and stale question replies are rejected. Plain unthreaded messages do not create issues.
+The repository ID and issue number are attached to every task message. Replies use persisted message IDs, so identical issue numbers in different repositories cannot be confused. Unknown replies and stale question replies are rejected. Only the explicit `/new` command creates issues; ordinary unthreaded messages do not.
 
 Instructions sent while an agent runs are saved immediately and queued after the active run finishes. They are **not live steering**. The bridge checks the agent's last-consumed GitHub comment ID before requesting another run. Closed, blocked, ignored, and interactive tasks are not automatically resumed. Existing workflow concurrency, dependencies, retry limits, and review policies still apply. A queued task may therefore wait or require manual attention.
 
 Questions raised during intake grooming use the same reply flow. The `requires-grooming` gate is retained while awaiting clarification; answering requeues grooming, and only successful grooming can queue implementation. A grooming completion notification contains the enriched brief and is distinct from implementation completion.
 
+## Images
+
+Send a photo (or a JPEG, PNG, GIF, or WebP image file) with a caption such as `/new pdfkit Fix this layout`. The issue includes the caption text and embedded image links. For multiple screenshots, send an album with one `/new` caption: the bridge buffers the album before creating one issue. Album processing may take roughly one polling cycle after the last photo (about 30 seconds). A delayed album photo is appended as an issue comment.
+
+Reply with images to a capture confirmation, agent question, or task outcome to add context to that exact issue. A photo-only reply is supported; a caption can provide instructions. Replies to running tasks follow the existing deferred-follow-up behavior. A photo without `/new` or a known task reply is rejected before downloading or uploading it. Unsupported files and images larger than **8 MiB each** are rejected. Albums support up to ten images.
+
+Images use TaskDrop's shared Cloudflare Worker/R2 service. The R2 bucket stays private; the Worker serves public, high-entropy image URLs so GitHub can render them. This also means images linked from private issues are publicly accessible to anyone who has the image URL, matching TaskDrop's attachment model. New uploads do not create GitHub branches or commits, and the bridge only needs GitHub issue permissions for publishing issue context.
+
+The bridge reads `attachments.json` inside `--state-dir`, or the path supplied through `--attachment-config`. For the current host:
+
+```json
+{"url":"https://taskdrop-api.maskaravivek.workers.dev","tokenFile":"../taskdrop-upload-token"}
+```
+
+The upload token is shared only between the Worker secret and an owner-only local file (`chmod 600`); it is never posted to GitHub or embedded in an image URL. The TaskDrop apps authenticate using their GitHub user tokens instead. Server deployment is documented in TaskDrop's `backend/README.md`. When attachment configuration is absent, text commands continue working and image uploads report that configuration is needed.
+
+The bridge downloads files through Telegram's [getFile API](https://core.telegram.org/bots/api#getfile), checks image signatures and size, and uploads with stable hashed IDs. The Worker verifies byte content on replay and prevents overwriting existing image paths with different data. The bridge verifies the public image bytes before publishing the issue/comment. Telegram bot-token URLs are never posted or persisted, and Cloudflare image URLs remain usable after Telegram download links expire. An interrupted publication can leave an unreferenced object; retry reuses the same ID. Pending albums and intake preparation survive restarts.
+
+Stored images are durable issue context and are not automatically expired. Historical image links remain unchanged. The old Supabase project's images cannot currently be copied or verified because the project is inactive; new uploads have no Supabase dependency.
+
 ## Recovery and delivery
 
-The bridge persists Telegram update cursors, message-to-task mappings, outcome fingerprints, and deferred follow-ups with owner-only file permissions. GitHub comments have stable update-specific markers, allowing retry without creating duplicate comments. It does not modify agent run-state files.
+The bridge persists Telegram update cursors, message-to-task mappings, outcome fingerprints, and deferred follow-ups with owner-only file permissions. GitHub comments have stable update-specific markers, allowing retry without creating duplicate comments. Issue creation records a durable intent before posting, using an opaque marker in the issue body. On replay, the bridge searches GitHub's issue listing across open and closed issues for that marker. An interrupted or ambiguous issue POST is never automatically repeated. Interrupted image preparation can retry safely before issue posting starts. If creation remains unconfirmed, use `/intakes` to reconcile and check GitHub before submitting a new command. Keep the marker in the issue body for recovery. The bridge does not modify agent run-state files.
 
 Run only one bridge per bot and state directory; a local process lock prevents duplicate instances using the same directory. Telegram sends and local state writes are not transactional: a crash after sending but before saving can duplicate a notification. Use `/questions` to recover question routing. Do not delete state to fix connectivity problems, since doing so loses routing and replay protection. GitHub/Telegram outage cycles retry after ten seconds without logging private message bodies or token-bearing URLs.
 

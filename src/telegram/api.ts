@@ -1,8 +1,14 @@
+import { MAX_IMAGE_BYTES, TelegramMediaError, imageExtension, type DownloadedImage, type TelegramImage } from './media.js';
+
 export interface TelegramMessage {
   message_id: number;
   chat: { id: number; type: string };
   from?: { id: number; is_bot?: boolean };
   text?: string;
+  caption?: string;
+  media_group_id?: string;
+  photo?: Array<TelegramImage & { width: number; height: number }>;
+  document?: TelegramImage & { mime_type?: string };
   reply_to_message?: { message_id: number };
 }
 
@@ -12,12 +18,46 @@ export interface TelegramUpdate {
 }
 
 export interface TelegramApi {
+  downloadImage?(fileId: string): Promise<DownloadedImage>;
   updates(offset: number): Promise<TelegramUpdate[]>;
   send(text: string): Promise<number>;
 }
 
 export class TelegramBotApi implements TelegramApi {
   constructor(private token: string, private chatId: number) {}
+
+  async downloadImage(fileId: string): Promise<DownloadedImage> {
+    const file = await this.call<{ file_path?: string; file_size?: number }>('getFile', { file_id: fileId });
+    if ((file.file_size ?? 0) > MAX_IMAGE_BYTES) throw new TelegramMediaError('Images must be at most 8 MiB each.');
+    if (!file.file_path || !/^[a-zA-Z0-9_./-]+$/.test(file.file_path) || file.file_path.split('/').includes('..')) {
+      throw new Error('Telegram returned an invalid file path');
+    }
+    let response: Response;
+    try {
+      response = await fetch(`https://api.telegram.org/file/bot${this.token}/${file.file_path}`, {
+        signal: AbortSignal.timeout(45_000), redirect: 'error',
+      });
+    } catch { throw new Error('Telegram image download failed'); }
+    if (!response.ok || !response.body) throw new Error('Telegram image download failed');
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.length;
+        if (size > MAX_IMAGE_BYTES) throw new TelegramMediaError('Images must be at most 8 MiB each.');
+        chunks.push(value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      if (error instanceof TelegramMediaError) throw error;
+      throw new Error('Telegram image download failed');
+    } finally { reader.releaseLock(); }
+    const bytes = Buffer.concat(chunks);
+    return { bytes, extension: imageExtension(bytes) };
+  }
 
   async username(): Promise<string> {
     const bot = await this.call<{ username: string }>('getMe', {});
