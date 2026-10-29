@@ -99,7 +99,7 @@ export async function saveBridgeState(file: string, state: BridgeState): Promise
 }
 
 function busy(task: BridgeTask): boolean {
-  return ['agent-running', 'finalizing', 'retry-wait'].includes(task.state.status);
+  return ['preparing', 'agent-running', 'finalizing', 'retry-wait'].includes(task.state.status);
 }
 
 export class TelegramBridge {

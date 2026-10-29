@@ -172,7 +172,7 @@ export function classifyRunState(state: RunState, terminalStates: string[]): Boa
   const terminal = new Set(terminalStates.map((value) => value.trim().toLowerCase()));
 
   if (issueState && terminal.has(issueState)) return 'closed';
-  if (state.status === 'agent-running' || state.status === 'finalizing' || workflowState === 'agent-running') return 'active';
+  if (state.status === 'preparing' || state.status === 'agent-running' || state.status === 'finalizing' || workflowState === 'agent-running') return 'active';
   if (hasLabel(labels, 'symphony-failed') || workflowState === 'symphony-failed') return 'failed-cancelled';
   if (state.pause_reason === 'needs-info' || hasLabel(labels, 'needs-info')) return 'needs-info';
   if (hasLabel(labels, 'blocked') || workflowState === 'blocked') return 'blocked';

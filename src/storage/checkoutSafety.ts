@@ -25,6 +25,8 @@ export async function disposableCheckout(workspace: string, options: { linkedRoo
     // Only known generated ignored directories may disappear with the checkout.
     const ignored = await git(workspace, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory');
     for (const name of ignored.split('\n').filter(Boolean)) {
+      // Tracked configuration within .symphony makes Git enumerate ignored artifacts individually.
+      if (name.startsWith('.symphony/')) continue;
       if (/(^|\/)(\.symphony|node_modules|\.next|\.turbo|\.gradle|\.kotlin|\.cxx|\.build|\.swiftpm|DerivedData|dist|build|coverage)\/$/.test(name)) continue;
       // Android setup may generate this file. Credentials/custom settings remain protected.
       if (/(^|\/)local.properties$/.test(name)) {

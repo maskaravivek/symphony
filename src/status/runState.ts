@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-export type RunStatus = 'agent-running' | 'finalizing' | 'retry-wait' | 'completed' | 'failed' | 'cancelled' | 'paused';
+export type RunStatus = 'preparing' | 'agent-running' | 'finalizing' | 'retry-wait' | 'completed' | 'failed' | 'cancelled' | 'paused';
 
 export type AgentOutcome = 'completed' | 'failed' | 'cancelled' | null;
 export type WorkflowOutcome = 'completed' | 'failed' | 'cancelled' | 'paused' | 'retry-scheduled' | null;
@@ -72,6 +72,7 @@ export interface RunState {
   finalization_context?: FinalizationContext | null;
   finalization_step?: 'pending' | 'hook-running' | 'hook-completed' | 'effects-applied' | null;
 
+  preparation_incomplete?: boolean;
   status: RunStatus;
   started_at: string | null;
   finished_at: string | null;

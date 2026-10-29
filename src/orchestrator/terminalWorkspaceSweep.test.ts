@@ -152,6 +152,7 @@ test('sweeps completed workspaces for closed issues when clean_on_terminal is en
   try {
     const orchestrator = new Orchestrator({ workflowPath });
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     await orchestrator.shutdown('test');
   } finally {
     restoreFetch();
@@ -180,6 +181,7 @@ test('keeps live running workspaces during terminal sweeps', async () => {
   try {
     const orchestrator = new Orchestrator({ workflowPath });
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     await orchestrator.shutdown('test');
   } finally {
     restoreFetch();
@@ -230,6 +232,7 @@ test('orphan reconciliation recovers live pooled workspaces', async () => {
   try {
     const orchestrator = new Orchestrator({ workflowPath });
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;
@@ -293,6 +296,7 @@ test('live orphaned workers are recovered before dispatch capacity is checked', 
   try {
     const orchestrator = new Orchestrator({ workflowPath });
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;
@@ -330,6 +334,7 @@ test('workflow lock prevents a duplicate orchestrator tick', async () => {
   try {
     const orchestrator = new Orchestrator({ workflowPath });
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     await orchestrator.shutdown('test');
   } finally {
     globalThis.fetch = originalFetch;

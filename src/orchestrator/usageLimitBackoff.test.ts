@@ -185,6 +185,7 @@ test('blocks new dispatches to the provider after a usage-limit exit code is see
   try {
     tickCount = 0;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
 
     // Verify issue 10 was dispatched
     assert.ok(wasDispatched(calls, 10), 'issue 10 should have been dispatched on first tick');
@@ -205,6 +206,7 @@ test('blocks new dispatches to the provider after a usage-limit exit code is see
 
     tickCount = 1;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
 
     // Issue 11 is new and ready, but the codex provider is in backoff — it must not be dispatched
     assert.equal(wasDispatched(calls, 11), false, 'issue 11 should not be dispatched while provider is in usage limit backoff');
@@ -266,6 +268,7 @@ test('does not block dispatch when exit code is not in usage_limit_exit_codes', 
   try {
     tickCount = 0;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
 
     assert.ok(wasDispatched(calls, 20), 'issue 20 should have been dispatched on first tick');
 
@@ -283,6 +286,7 @@ test('does not block dispatch when exit code is not in usage_limit_exit_codes', 
 
     tickCount = 1;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
 
     // With no usage limit backoff, issue 21 should be dispatched normally
     assert.ok(wasDispatched(calls, 21), 'issue 21 should be dispatched when exit code is not a usage limit code');
@@ -585,6 +589,7 @@ test('blocks dispatch when usage_limit_check_command exits non-zero', async () =
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     // The check command exits non-zero, so issue 30 must not be dispatched
     assert.equal(wasDispatched(calls, 30), false, 'issue 30 should not be dispatched when check command exits non-zero');
     await orchestrator.shutdown('test');
@@ -606,6 +611,7 @@ test('blocks sibling providers in the same provider_group when usage_limit_check
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.equal(wasDispatched(calls, 32), false, 'codex-secondary should not dispatch while the codex provider group is blocked');
     await orchestrator.shutdown('test');
   } finally {
@@ -632,6 +638,7 @@ test('applies max_concurrent across providers in the same provider_group', async
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.ok(wasDispatched(calls, 40), 'high-complexity UX issue should dispatch to claude-fable');
     assert.equal(wasDispatched(calls, 41), false, 'default UX issue should wait while a claude-group sibling is running');
     await orchestrator.shutdown('test');
@@ -653,6 +660,7 @@ test('planning issues post the final message as an issue comment and skip after_
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     await waitFor(() => commentBodies(calls, 50).some((body) => body.includes('## Symphony Technical Specification') && body.includes('Detailed plan')));
     assert.ok(commentBodies(calls, 50).some((body) => body.includes('Detailed plan')), 'planning result should be posted as an issue comment');
     const workspacePath = path.join(workspaceRoot, 'mangoappstudio_mdedit_50');
@@ -677,6 +685,7 @@ test('allows dispatch when usage_limit_check_command exits zero', async () => {
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     // The check command exits zero (within limit), so issue 31 should be dispatched normally
     assert.ok(wasDispatched(calls, 31), 'issue 31 should be dispatched when check command exits zero');
     await orchestrator.shutdown('test');
@@ -698,6 +707,7 @@ test('allows dispatch when usage_limit_check_command returns unknown', async () 
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.ok(wasDispatched(calls, 33), 'issue 33 should dispatch when usage check result is unknown');
     await orchestrator.shutdown('test');
   } finally {
@@ -718,6 +728,7 @@ test('blocks dispatch when a codexbar usage payload is at or above 90%', async (
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.equal(wasDispatched(calls, 40), false, 'issue should not be dispatched when codexbar reports usage >= 90%');
     await orchestrator.shutdown('test');
   } finally {
@@ -740,6 +751,7 @@ test('blocks dispatch when codexbar cannot return a parseable usage snapshot', a
   const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.equal(wasDispatched(calls, 44), false, 'issue should not dispatch when codexbar is unavailable');
     await orchestrator.shutdown('test');
   } finally {
@@ -760,6 +772,7 @@ test('allows dispatch when a codexbar usage payload is below 90%', async () => {
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.ok(wasDispatched(calls, 41), 'issue should be dispatched when codexbar reports usage below 90%');
     await orchestrator.shutdown('test');
   } finally {
@@ -795,10 +808,12 @@ test('backs off GitHub polling after rate limit responses', async () => {
 
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     const afterFirstTick = calls.length;
     assert.ok(afterFirstTick > 0, 'first tick should hit GitHub and see the rate limit');
 
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.equal(calls.length, afterFirstTick, 'second tick should skip GitHub while rate limit backoff is active');
     await orchestrator.shutdown('test');
   } finally {
@@ -860,6 +875,7 @@ test('uses codexbar resetsAt to skip usage checks until reset', async () => {
   try {
     tickCount = 0;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.equal(wasDispatched(calls, 30), false, 'initial check at >=90% should block dispatch');
     const checksAfterFirstTick = Number((await fs.readFile(stateFilePath, 'utf8')).trim());
     assert.equal(checksAfterFirstTick, 1, 'usage check should run once on first tick');
@@ -867,6 +883,7 @@ test('uses codexbar resetsAt to skip usage checks until reset', async () => {
     calls.length = 0;
     tickCount = 1;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     assert.equal(wasDispatched(calls, 31), false, 'while reset window is active, dispatch should remain blocked');
     const checksAfterSecondTick = Number((await fs.readFile(stateFilePath, 'utf8')).trim());
     assert.equal(checksAfterSecondTick, 1, 'usage check should not run again during resetsAt backoff');
@@ -876,6 +893,7 @@ test('uses codexbar resetsAt to skip usage checks until reset', async () => {
     calls.length = 0;
     tickCount = 2;
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
     const checksAfterThirdTick = Number((await fs.readFile(stateFilePath, 'utf8')).trim());
     assert.equal(checksAfterThirdTick, 2, 'usage check should rerun after reset');
     assert.ok(wasDispatched(calls, 30), 'issue should dispatch after backoff resets');

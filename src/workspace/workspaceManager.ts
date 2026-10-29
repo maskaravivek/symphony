@@ -1,4 +1,5 @@
-import { ensureLinkedWorktree, ownsLinkedWorktree, removeLinkedWorktree } from './linkedWorktrees.js';
+import { hasLivePreparation } from './preparation.js';
+import { ensureLinkedWorktree, ownsLinkedWorktree, releaseIdleTaskBranch, removeLinkedWorktree } from './linkedWorktrees.js';
 import { disposableCheckout } from '../storage/checkoutSafety.js';
 import { safeStoragePath } from '../storage/paths.js';
 import { DispatchDeferredError, storagePolicy } from '../storage/policy.js';
@@ -94,6 +95,7 @@ export class WorkspaceManager {
       isNew = true;
       await fs.mkdir(workspacePath, { recursive: true });
     }
+    if (await hasLivePreparation(workspacePath)) throw new DispatchDeferredError('Workspace is being prepared by a live coordinator');
     this.allocations.set(issue.id, workspacePath);
     return { workspace_path: workspacePath, is_new: isNew, strategy };
   }
@@ -126,6 +128,7 @@ export class WorkspaceManager {
     const limit = Math.max(this.poolSize, storagePolicy(this.config.storage_maintenance).max_pool_slots);
     for (let slot = 1; slot <= Math.min(highestReusableSlot, limit); slot += 1) {
       const workspacePath = workspacePathForPoolSlot(this.config.root, slot);
+      if (await hasLivePreparation(workspacePath)) continue;
       const state = await readRunState(workspacePath);
       if (state && reservedStatuses.has(state.status)) continue;
       const entries = await fs.readdir(workspacePath).catch((error: NodeJS.ErrnoException) => {
@@ -142,11 +145,12 @@ export class WorkspaceManager {
     return workspacePathForPoolSlot(this.config.root, highestReusableSlot + 1);
   }
 
-  async prepareCheckout(workspacePath: string, signal?: AbortSignal): Promise<void> {
+  async prepareCheckout(workspacePath: string, signal?: AbortSignal, branch?: string): Promise<void> {
     assertPathWithinRoot(this.config.root, workspacePath);
     const state = await readRunState(workspacePath);
     const resume = state?.status === 'paused' || state?.status === 'retry-wait';
     await ensureLinkedWorktree(this.config, workspacePath, signal, resume);
+    if (branch) await releaseIdleTaskBranch(this.config, workspacePath, branch, signal);
   }
 
   async hasGitRepo(workspacePath: string): Promise<boolean> {
@@ -199,7 +203,11 @@ export class WorkspaceManager {
     const pooled = /^_pool_[1-9][0-9]*$/.test(path.basename(workspacePath));
     if (linked && !(await disposableCheckout(workspacePath, { linkedRoot: this.config.root }))) throw new DispatchDeferredError('Preserving protected linked workspace');
     const stamp = linked && pooled ? await fs.readFile(path.join(workspacePath, '.symphony', 'dependencies.json')).catch(() => null) : null;
+    const trackedArtifacts = linked
+      ? (await execFileAsync('git', ['ls-files', '-z', '--', '.symphony'], { cwd: workspacePath })).stdout
+      : '';
     const archive = await this.archiveSymphonyArtifacts(workspacePath);
+    if (trackedArtifacts) await execFileAsync('git', ['restore', '--worktree', '--', '.symphony'], { cwd: workspacePath });
     if (linked && pooled && !options.evict) {
       await fs.mkdir(path.join(workspacePath, '.symphony'), { recursive: true });
       if (stamp) await fs.writeFile(path.join(workspacePath, '.symphony', 'dependencies.json'), stamp);

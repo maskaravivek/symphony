@@ -33,6 +33,10 @@ export class MultiRepoOrchestrator {
     this.runtimes.clear();
   }
 
+  async waitForPreparations(): Promise<void> {
+    await Promise.all([...this.runtimes.values()].map(entry => entry.orchestrator.waitForPreparations()));
+  }
+
   async runForever(): Promise<void> {
     while (!this.stopped) {
       await this.tickOnce().catch((err) => {

@@ -7,6 +7,8 @@ import type { WorkspaceConfig } from '../workflow/types.js';
 import { safeStoragePath } from '../storage/paths.js';
 import { DispatchDeferredError } from '../storage/policy.js';
 import { disposableCheckout } from '../storage/checkoutSafety.js';
+import { readRunState } from '../status/runState.js';
+import { hasLivePreparation } from './preparation.js';
 
 const exec = promisify(execFile);
 const git = async (cwd: string, args: string[], signal?: AbortSignal) => (await exec('git', args, { cwd, signal, timeout: 120_000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })).stdout.trim();
@@ -145,4 +147,31 @@ export async function removeLinkedWorktree(root: string, workspace: string): Pro
   if (!(await ownsLinkedWorktree(root, workspace)) || !(await disposableCheckout(workspace, { linkedRoot: root }))) throw new DispatchDeferredError('Linked workspace contains protected work');
   // Ignored build artifacts are intentionally evicted only after the safety check.
   await git(mirrorFor(root), ['worktree', 'remove', '--force', workspace]);
+}
+
+
+/** A warm idle slot can retain a branch after its run artifacts have been archived. */
+export async function releaseIdleTaskBranch(config: WorkspaceConfig, workspace: string, branch: string, signal?: AbortSignal): Promise<void> {
+  if (!config.checkout || !branch) return;
+  const previous = queues.get(config.root) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    const target = await fs.realpath(workspace);
+    const records = (await git(mirrorFor(config.root), ['worktree', 'list', '--porcelain', '-z'], signal)).split('\0\0');
+    for (const record of records) {
+      const fields = record.split('\0');
+      if (!fields.includes(`branch refs/heads/${branch}`)) continue;
+      const other = fields.find(field => field.startsWith('worktree '))?.slice(9);
+      if (!other || await fs.realpath(other) === target) continue;
+      const state = await readRunState(other);
+      const reserved = state && ['preparing', 'agent-running', 'finalizing', 'paused', 'retry-wait'].includes(state.status);
+      if (reserved || await hasLivePreparation(other) || !(await ownsLinkedWorktree(config.root, other)) ||
+          !(await disposableCheckout(other, { linkedRoot: config.root }))) {
+        throw new DispatchDeferredError(`Task branch ${branch} belongs to a protected workspace`);
+      }
+      // Detaching at HEAD preserves every commit, source file, dependency and cache.
+      await git(other, ['checkout', '--detach', 'HEAD'], signal);
+    }
+  });
+  queues.set(config.root, next);
+  try { await next; } finally { if (queues.get(config.root) === next) queues.delete(config.root); }
 }

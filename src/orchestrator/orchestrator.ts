@@ -1,3 +1,4 @@
+import { readPreparation, writePreparation, clearPreparation } from '../workspace/preparation.js';
 import { GROOMING_LABEL, groomingSource, groomingInstructions, parseGroomingResult, groomingBrief } from '../grooming/grooming.js';
 import { routedProviderId } from '../agents/routing.js';
 import { maintainStorage, storageAvailable } from '../storage/maintenance.js';
@@ -25,7 +26,7 @@ import { SymphonyConfigError } from '../utils/errors.js';
 import { log, type LogFields } from '../utils/log.js';
 import { recoverFreshRunGitState } from '../workspace/gitRecovery.js';
 import { HookScriptError, runHookScript } from '../workspace/hooks.js';
-import { WorkspaceManager, workspacePathForIssue } from '../workspace/workspaceManager.js';
+import { WorkspaceManager, workspacePathForIssue, type WorkspaceInfo } from '../workspace/workspaceManager.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { AgentProviderConfig, LoadedWorkflow, ScheduledLoopConfig, WorkflowConfig, WorkspaceStrategy } from '../workflow/types.js';
 import { readRunState, updateRunState, writeRunState, type AgentMode, type PauseReason, type RunState } from '../status/runState.js';
@@ -45,6 +46,15 @@ import { pruneSessionArtifacts, sessionArtifactDirectory } from '../artifacts/se
 
 interface DispatchCapacity {
   remaining: number | null;
+}
+
+interface IssueDispatchOptions {
+  attempt: number;
+  mode?: AgentMode;
+  provider?: AgentProviderConfig;
+  conflict?: ConflictDispatchOptions;
+  prReview?: PullRequestReviewDispatchOptions;
+  stackContext?: StackContext | null;
 }
 
 type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity' | 'usage_limit';
@@ -686,6 +696,9 @@ export class Orchestrator {
 
   private storageBlocked = false;
   private running = new Map<string, RunningSession>();
+  private preparing = new Set<string>();
+  private preparationJobs = new Map<string, Promise<void>>();
+  private allocationTail: Promise<void> = Promise.resolve();
   private runningLoops = new Map<string, RunningLoop>();
   private retries = new Map<string, RetryEntry>();
   private conflictQueue = new Map<number, ConflictEntry>();
@@ -775,6 +788,10 @@ export class Orchestrator {
 
   getRunningCount(): number {
     return this.running.size + this.runningLoops.size + this.liveOrphanClaims.size + this.recoveringFinalizations.size;
+  }
+
+  async waitForPreparations(): Promise<void> {
+    await Promise.all([...this.preparationJobs.values()]);
   }
 
   getRepoId(): string | null {
@@ -1067,6 +1084,7 @@ export class Orchestrator {
         session.cancelled_reason = 'terminal_state';
         await session.cancel('issue reached terminal state');
         if (issue.number) await this.applyLabels(config, issue.number, { remove: [LABEL_READY, LABEL_RUNNING] }).catch(() => {});
+        if (!session.workspace_path) continue;
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -1088,6 +1106,7 @@ export class Orchestrator {
         log('info', 'worker_cancelled_by_reconciliation', { ...fields, event: 'worker_cancelled_by_reconciliation', reason: 'ignored_label' });
         session.cancelled_reason = 'ignored_label';
         await session.cancel('issue gained ignored label');
+        if (!session.workspace_path) continue;
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -1102,6 +1121,7 @@ export class Orchestrator {
         continue;
       }
 
+      if (this.preparing.has(issue.id)) continue;
       const isClaimedByAgent = issue.labels.includes(LABEL_RUNNING);
       if (!isClaimedByAgent && !hasAllLabels(issue.labels, config.tracker.required_labels)) {
         log('info', 'worker_cancelled_by_reconciliation', {
@@ -1111,6 +1131,7 @@ export class Orchestrator {
         });
         session.cancelled_reason = 'missing_required_label';
         await session.cancel('issue missing required labels');
+        if (!session.workspace_path) continue;
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -1133,6 +1154,7 @@ export class Orchestrator {
         });
         session.cancelled_reason = 'missing_any_required_labels';
         await session.cancel('issue missing any-required labels');
+        if (!session.workspace_path) continue;
         await updateRunState(session.workspace_path, (cur) => {
           if (!cur) return null;
           return {
@@ -2174,18 +2196,109 @@ export class Orchestrator {
     return config.workspace.strategy.implementation;
   }
 
-  private async dispatchIssue(
+  private async dispatchIssue(config: WorkflowConfig, issue: Issue, manager: WorkspaceManager, opts: IssueDispatchOptions): Promise<void> {
+    if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
+    if (this.running.has(issue.id)) throw new DispatchDeferredError('Issue already has a reserved worker');
+    if (issue.labels.includes(GROOMING_LABEL) && opts.mode !== 'grooming') throw new DispatchDeferredError('Issue requires grooming');
+    if (!(await this.hasStorageCapacity(config))) throw new DispatchDeferredError('Insufficient free disk space');
+    const provider = opts.provider ?? selectAgentProvider(config, issue);
+    const mode: AgentMode = opts.mode ?? (issue.labels.includes(LABEL_INTERACTIVE) ? 'interactive-handoff' : isPlanningIssue(issue.labels) ? 'planning' : 'autonomous');
+    const strategy = this.selectWorkspaceStrategy(config, { mode, stackContext: opts.stackContext ?? null });
+    const controller = new AbortController();
+    const reservation: RunningSession = {
+      issue_id: issue.id, issue_number: issue.number, issue_identifier: issue.identifier, issue_url: issue.url,
+      issue_state: mode === 'resolve-conflicts' ? 'conflict-resolution' : issue.state,
+      workspace_path: '', session_id: randomUUID(), agent_provider: provider.id,
+      agent_provider_group: providerLimitKey(provider), started_at_ms: nowMs(), cancelled_reason: null,
+      cancel: async reason => {
+        reservation.cancelled_reason = reason; controller.abort(reason);
+        await reservation.done;
+        const active = this.running.get(issue.id);
+        if (active && active !== reservation) { active.cancelled_reason = reason; await active.cancel(reason); await active.done; }
+      },
+      done: null,
+    };
+    this.running.set(issue.id, reservation);
+    this.preparing.add(issue.id);
+    // Start after the caller has updated retry bookkeeping and dispatch capacity.
+    const done = new Promise<void>(resolve => setImmediate(resolve)).then(async () => {
+      const previous = this.allocationTail;
+      let release!: () => void;
+      this.allocationTail = new Promise<void>(resolve => { release = resolve; });
+      let allocation: WorkspaceInfo;
+      try {
+        await previous;
+        controller.signal.throwIfAborted();
+        allocation = await manager.ensureWorkspace(issue, { strategy, epicRootIssueIdentifier: opts.stackContext?.root_issue_identifier ?? null });
+        reservation.workspace_path = allocation.workspace_path;
+        const old = await readRunState(allocation.workspace_path);
+        const prior = old?.issue_id === issue.id ? old : null;
+        const state: RunState = {
+          repo_id: this.repoId, owner: config.tracker.owner, repo: config.tracker.repo,
+          issue_id: issue.id, issue_number: issue.number, issue_identifier: issue.identifier, issue_url: issue.url,
+          issue_title: issue.title, issue_state: issue.state, labels: issue.labels, workflow_state: issue.workflow_state,
+          workspace_path: allocation.workspace_path, workspace_strategy: strategy, attempt: opts.attempt,
+          agent_provider: provider.id, agent_provider_group: providerLimitKey(provider), agent_provider_kind: provider.provider_kind,
+          codex_thread_id: null, codex_mode: mode, agent_mode: mode, pause_reason: null,
+          started_at: new Date().toISOString(), finished_at: null, last_exit_code: null, last_signal: null, last_error: null,
+          prompt_path: null, codex_jsonl_path: null, last_message_path: null, last_seen_comment_id: null,
+          status_comment_id: null, last_handoff_at: null,
+          ...prior,
+          status: 'preparing', session_id: reservation.session_id, worker_pid: process.pid, updated_at: new Date().toISOString(),
+        };
+        Object.assign(state, { attempt: opts.attempt, agent_provider: provider.id,
+          agent_provider_group: providerLimitKey(provider), agent_provider_kind: provider.provider_kind,
+          agent_mode: mode, codex_mode: mode, labels: issue.labels, issue_title: issue.title, issue_state: issue.state,
+          started_at: new Date().toISOString(), finished_at: null, last_error: null, pause_reason: null,
+          preparation_incomplete: true, session_artifact_dir: null, agent_outcome: null, workflow_outcome: null,
+          finalization_context: { mode, review_pr: opts.prReview ?? null } });
+        await writePreparation(allocation.workspace_path, state);
+      } finally { release(); }
+      log('info', 'issue_preparing', { ...getIssueLogFields(config, issue, this.repoId), event: 'issue_preparing', workspace_path: allocation.workspace_path, status: 'preparing' });
+      controller.signal.throwIfAborted();
+      await this.prepareIssue(config, issue, manager, opts, allocation, reservation, controller.signal);
+    }).catch(async error => {
+      if (opts.prReview?.review_key) {
+        const store = new EpisodeStore(this.storePath(config));
+        try { store.completeReviewClaim(this.durableRepoId(config), opts.prReview.review_key, 'error'); } finally { store.close(); }
+      }
+      if (error instanceof DispatchDeferredError) {
+        log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: error.message });
+        return;
+      }
+      const interrupted = controller.signal.aborted;
+      if (!interrupted) controller.abort('preparation_failed');
+      const detail = interrupted ? String(controller.signal.reason) : dispatchErrorDetails(error);
+      if (reservation.workspace_path) {
+        const state = await readPreparation(reservation.workspace_path);
+        const current = await readRunState(reservation.workspace_path);
+        const failureState = current?.session_id === reservation.session_id ? current : state;
+        if (failureState) await writeRunState(reservation.workspace_path, { ...failureState, status: interrupted ? 'cancelled' : 'failed', worker_pid: null, last_error: detail, updated_at: new Date().toISOString() });
+      }
+      log(interrupted ? 'info' : 'error', 'issue_preparation_failed', { ...getIssueLogFields(config, issue, this.repoId), event: 'issue_preparation_failed', error: detail });
+      if (!interrupted || shouldRetryCancelledRun(reservation.cancelled_reason ?? '')) {
+        await this.scheduleRetry(config, issue, interrupted ? opts.attempt - 1 : opts.attempt, `preparation_error: ${detail}`, reservation.workspace_path || undefined, mode);
+      }
+    }).catch(error => {
+      log('error', 'preparation_recovery_failed', { event: 'preparation_recovery_failed', issue_id: issue.id, error: dispatchErrorDetails(error) });
+    }).finally(async () => {
+      if (reservation.workspace_path) await clearPreparation(reservation.workspace_path, reservation.session_id).catch(() => {});
+      this.preparing.delete(issue.id);
+      this.preparationJobs.delete(issue.id);
+      if (this.running.get(issue.id) === reservation) this.running.delete(issue.id);
+    });
+    reservation.done = done;
+    this.preparationJobs.set(issue.id, done);
+  }
+
+  private async prepareIssue(
     config: WorkflowConfig,
     issue: Issue,
     workspaceManager: WorkspaceManager,
-    opts: {
-      attempt: number;
-      mode?: AgentMode;
-      provider?: AgentProviderConfig;
-      conflict?: ConflictDispatchOptions;
-      prReview?: PullRequestReviewDispatchOptions;
-      stackContext?: StackContext | null;
-    },
+    opts: IssueDispatchOptions,
+    allocation: WorkspaceInfo,
+    preparation: RunningSession,
+    signal: AbortSignal,
   ): Promise<void> {
     if (!issue.number) throw new SymphonyConfigError('issue.number is required to dispatch work');
     if (issue.labels.includes(GROOMING_LABEL) && opts.mode !== 'grooming') throw new DispatchDeferredError('Issue requires grooming before implementation');
@@ -2215,11 +2328,8 @@ export class Orchestrator {
 
     log('info', 'issue_claimed', { ...issueFields, event: 'issue_claimed', status: 'claimed', agent_provider: provider.id });
 
-    const { workspace_path: workspacePath, is_new: isNew } = await workspaceManager.ensureWorkspace(issue, {
-      strategy: workspaceStrategy,
-      epicRootIssueIdentifier: stackContext?.root_issue_identifier ?? null,
-    });
-    const sessionId = randomUUID();
+    const { workspace_path: workspacePath, is_new: isNew } = allocation;
+    const sessionId = preparation.session_id;
     const sessionArtifactDir = sessionArtifactDirectory(workspacePath, opts.attempt, sessionId);
     const stableLastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
     const lastMessagePath = path.join(sessionArtifactDir, 'last_message.md');
@@ -2291,7 +2401,7 @@ export class Orchestrator {
     };
 
     const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
-    if (!skipsWorkspaceHooks) await workspaceManager.prepareCheckout(workspacePath, this.shutdownController.signal);
+    if (!skipsWorkspaceHooks) await workspaceManager.prepareCheckout(workspacePath, signal, issue.branch_name ?? undefined);
     const hasGitRepo = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
     const shouldRunAfterCreate = !skipsWorkspaceHooks && Boolean(config.hooks.after_create) && (isNew || !hasGitRepo);
 
@@ -2318,7 +2428,7 @@ export class Orchestrator {
           env: hookEnv,
           logPath: afterCreateLogPath,
           streamOutput: shouldStreamHookOutput(),
-          signal: this.shutdownController.signal,
+          signal: signal,
         });
       } catch (err) {
         log('error', 'workspace_after_create_hook_failed', {
@@ -2337,7 +2447,7 @@ export class Orchestrator {
       previousWorkspaceState?.issue_id === issue.id || previousWorkspaceState?.issue_number === issue.number
         ? previousWorkspaceState
         : null;
-    const isPausedResume = existingState?.status === 'paused' || existingState?.status === 'retry-wait';
+    const isPausedResume = (existingState?.status === 'paused' || existingState?.status === 'retry-wait') && !existingState.preparation_incomplete;
 
     const hasGitRepoBeforeRun = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
     if (hasGitRepoBeforeRun && !isPausedResume) {
@@ -2362,7 +2472,7 @@ export class Orchestrator {
           env: hookEnv,
           logPath: beforeRunLogPath,
           streamOutput: shouldStreamHookOutput(),
-          signal: this.shutdownController.signal,
+          signal: signal,
         });
       } catch (err) {
         log('error', 'workspace_before_run_hook_failed', {
@@ -2546,6 +2656,7 @@ export class Orchestrator {
         review_pr: opts.prReview ?? null,
       },
       finalization_step: 'pending',
+      preparation_incomplete: true,
       status: 'agent-running',
       started_at: new Date().toISOString(),
       finished_at: null,
@@ -2563,6 +2674,7 @@ export class Orchestrator {
       updated_at: new Date().toISOString(),
     };
 
+    signal.throwIfAborted();
     await writeRunState(workspacePath, initialState);
     await fs.writeFile(path.join(sessionArtifactDir, 'manifest.json'), `${JSON.stringify({
       version: 1,
@@ -2630,6 +2742,7 @@ export class Orchestrator {
 
     log('info', 'issue_dispatched', { ...workspaceFields, event: 'issue_dispatched', status: 'dispatched' });
 
+    signal.throwIfAborted();
     const agent = runAgent({
       command: renderedCommand,
       cwd: workspacePath,
@@ -2656,6 +2769,8 @@ export class Orchestrator {
         });
       },
     });
+    const abortUnregistered = () => { void agent.cancel(String(signal.reason ?? 'preparation_cancelled')); };
+    signal.addEventListener('abort', abortUnregistered, { once: true });
     const episodeId = `${issue.identifier}:attempt:${opts.attempt}`;
     this.appendEpisodeEvent(config, episodeId, 'workflow.started', {
       issue_number: issue.number,
@@ -2683,6 +2798,7 @@ export class Orchestrator {
         ...cur,
         session_id: agent.session_id,
         worker_pid: agent.child.pid ?? null,
+        preparation_incomplete: false,
         updated_at: new Date().toISOString(),
       };
     });
@@ -2698,12 +2814,13 @@ export class Orchestrator {
       agent_provider: provider.id,
       agent_provider_group: provider.provider_group,
       started_at_ms: nowMs(),
-      cancelled_reason: null,
+      cancelled_reason: preparation.cancelled_reason,
       cancel: agent.cancel,
       done: null,
     };
 
     this.running.set(issue.id, session);
+    signal.removeEventListener('abort', abortUnregistered);
 
     const done = agent.exit
       .then(async ({ code, signal }) => {
@@ -3678,7 +3795,7 @@ export class Orchestrator {
       SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
     };
 
-    await workspaceManager.prepareCheckout(workspacePath, signal);
+    await workspaceManager.prepareCheckout(workspacePath, signal, issue.branch_name ?? undefined);
     const hasGitRepo = await workspaceManager.hasGitRepo(workspacePath);
     if (!hasGitRepo && config.hooks.after_create) {
       const entries = await fs.readdir(workspacePath);

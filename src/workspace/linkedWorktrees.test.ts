@@ -23,6 +23,11 @@ async function fixture(t: TestContext) {
   await fs.writeFile(path.join(source, 'source.txt'), 'source');
   await fs.writeFile(path.join(source, '.gitignore'), 'node_modules/\n.next/\n.symphony/\n');
   await git(source, 'add', '.'); await git(source, 'commit', '-qm', 'initial');
+  // Real repositories can track verification configuration inside the otherwise ignored artifact directory.
+  await fs.mkdir(path.join(source, '.symphony'));
+  await fs.writeFile(path.join(source, '.symphony', 'verification.json'), '{}');
+  await git(source, 'add', '-f', '.symphony/verification.json');
+  await git(source, 'commit', '-qm', 'tracked verification configuration');
   await git(root, 'clone', '--bare', source, remote); await git(source, 'remote', 'add', 'origin', remote);
   const config: WorkspaceConfig = { root: path.join(root, 'workspaces'), clean_on_terminal: true,
     checkout: { kind: 'linked_worktree', source, base_branch: 'main' },
@@ -49,11 +54,12 @@ test('parallel linked slots share Git objects and isolate edits without touching
 test('terminal release preserves a warm linked slot, dependencies and install stamp; explicit eviction unregisters it', async t => {
   const { config, slot } = await fixture(t); await ensureLinkedWorktree(config, slot);
   await fs.mkdir(path.join(slot, 'node_modules')); await fs.writeFile(path.join(slot, 'node_modules', 'cached'), 'keep');
-  await fs.mkdir(path.join(slot, '.symphony')); await fs.writeFile(path.join(slot, '.symphony', 'dependencies.json'), '{"fingerprint":"valid"}');
+  await fs.mkdir(path.join(slot, '.symphony'), { recursive: true }); await fs.writeFile(path.join(slot, '.symphony', 'dependencies.json'), '{"fingerprint":"valid"}');
   await fs.writeFile(path.join(slot, '.symphony', 'state.json'), 'old state');
   const manager = new WorkspaceManager(config);
   await manager.cleanWorkspace(slot);
   assert.equal(await disposableCheckout(slot, { linkedRoot: config.root }), true);
+  assert.equal(await fs.readFile(path.join(slot, '.symphony', 'verification.json'), 'utf8'), '{}');
   assert.equal(await fs.readFile(path.join(slot, 'node_modules', 'cached'), 'utf8'), 'keep');
   assert.equal(JSON.parse(await fs.readFile(path.join(slot, '.symphony', 'dependencies.json'), 'utf8')).fingerprint, 'valid');
   const next: Issue = { id: '2', identifier: 'example/app#2', number: 2, title: 'Next task', description: '', priority: null, url: null,
@@ -97,10 +103,33 @@ test('clean legacy clones migrate without copying or discarding dependency insta
   await git(config.root, 'clone', path.join(root, 'remote.git'), slot);
   // The local source is our remote in this fixture, so main is remotely accounted for.
   await fs.mkdir(path.join(slot, 'node_modules')); await fs.writeFile(path.join(slot, 'node_modules', 'keep'), 'installed');
-  await fs.mkdir(path.join(slot, '.symphony')); await fs.writeFile(path.join(slot, '.symphony', 'dependencies.json'), 'stamp');
+  await fs.mkdir(path.join(slot, '.symphony'), { recursive: true }); await fs.writeFile(path.join(slot, '.symphony', 'dependencies.json'), 'stamp');
   const before = await fs.stat(path.join(slot, 'node_modules', 'keep'));
   await ensureLinkedWorktree(config, slot);
   assert.equal(await ownsLinkedWorktree(config.root, slot), true);
   assert.equal((await fs.stat(path.join(slot, 'node_modules', 'keep'))).ino, before.ino);
   assert.equal(await fs.readFile(path.join(slot, '.symphony', 'dependencies.json'), 'utf8'), 'stamp');
+});
+
+
+test('task checkout releases a branch retained by an idle warm slot but protects unfinished work', async t => {
+  const { config, slot } = await fixture(t), second = path.join(config.root, '_pool_2');
+  await ensureLinkedWorktree(config, slot);
+  await ensureLinkedWorktree(config, second);
+  await git(slot, 'checkout', '-b', 'symphony-task');
+  const manager = new WorkspaceManager(config);
+  await fs.mkdir(path.join(slot, '.symphony'), { recursive: true });
+  for (const status of ['agent-running', 'paused', 'retry-wait']) {
+    await fs.writeFile(path.join(slot, '.symphony', 'run.json'), JSON.stringify({ status }));
+    await assert.rejects(manager.prepareCheckout(second, undefined, 'symphony-task'), /protected/);
+    assert.equal(await git(slot, 'branch', '--show-current'), 'symphony-task');
+  }
+  await fs.rm(path.join(slot, '.symphony', 'run.json'));
+  await manager.prepareCheckout(second, undefined, 'symphony-task');
+  await git(second, 'checkout', '-B', 'symphony-task');
+  assert.equal(await git(slot, 'rev-parse', '--abbrev-ref', 'HEAD'), 'HEAD');
+  await fs.writeFile(path.join(second, 'source.txt'), 'unfinished');
+  await assert.rejects(manager.prepareCheckout(slot, undefined, 'symphony-task'), /protected/);
+  assert.equal(await git(second, 'branch', '--show-current'), 'symphony-task');
+  assert.equal(await fs.readFile(path.join(second, 'source.txt'), 'utf8'), 'unfinished');
 });

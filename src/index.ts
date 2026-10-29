@@ -265,6 +265,7 @@ async function main(): Promise<void> {
       });
       if (options.once) {
         await orchestrator.tickOnce();
+        await orchestrator.waitForPreparations();
         await orchestrator.shutdown('once_complete');
         return;
       }

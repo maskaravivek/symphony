@@ -198,6 +198,7 @@ Prompt
 test('classifies local run states into dashboard columns by priority', () => {
   const terminalStates = ['closed'];
   const cases: Array<[string, RunState, string]> = [
+    ['preparing', makeRunState({ status: 'preparing', labels: ['ready-for-agent'] }), 'active'],
     ['active', makeRunState({ status: 'agent-running', labels: ['blocked'] }), 'active'],
     ['needs info', makeRunState({ pause_reason: 'needs-info', labels: ['blocked'] }), 'needs-info'],
     ['blocked', makeRunState({ labels: ['blocked', 'symphony-review:blocking'] }), 'blocked'],

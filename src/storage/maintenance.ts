@@ -1,3 +1,4 @@
+import { hasLivePreparation } from '../workspace/preparation.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ownsLinkedWorktree } from '../workspace/linkedWorktrees.js';
@@ -101,6 +102,7 @@ export async function maintainStorage(config: WorkspaceConfig, busy: boolean, no
     // A restarted daemon may not have recovered live workers into its maps yet.
     for (const entry of await fs.readdir(config.root, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      if (await hasLivePreparation(path.join(config.root, entry.name))) return;
       const state = await readRunState(path.join(config.root, entry.name));
       if (state?.worker_pid) {
         try { process.kill(state.worker_pid, 0); return; }

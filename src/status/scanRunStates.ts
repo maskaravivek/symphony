@@ -1,3 +1,4 @@
+import { readPreparation, preparationAlive } from '../workspace/preparation.js';
 import fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import path from 'node:path';
@@ -18,6 +19,8 @@ export async function scanRunStates(workspaceRoot: string): Promise<RunState[]> 
       .filter((e) => e.isDirectory())
       .map(async (e) => {
         const workspacePath = path.join(workspaceRoot, e.name);
+        const preparing = await readPreparation(workspacePath).catch(() => null);
+        if (preparing && preparationAlive(preparing)) return preparing;
         return await readRunState(workspacePath);
       }),
   );

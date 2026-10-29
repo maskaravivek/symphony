@@ -89,6 +89,7 @@ Prompt body
   const orchestrator = new Orchestrator({ workflowPath, repoId: 'mdedit' });
   try {
     await orchestrator.tickOnce();
+    await orchestrator.waitForPreparations();
   } finally {
     await orchestrator.shutdown('test');
     globalThis.fetch = originalFetch;
