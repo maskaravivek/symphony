@@ -3528,6 +3528,8 @@ export class Orchestrator {
     try {
       store = new EpisodeStore(databasePath);
       for (const loop of config.loops) {
+        // A live preparation/agent is not an orphan from a previous process.
+        if (this.runningLoops.has(loop.id)) continue;
         const triggered = store.latest({
           repo_id: this.repoId ?? `${config.tracker.owner}/${config.tracker.repo}`,
           episode_id: `loop-${loop.id}`,
@@ -3585,6 +3587,46 @@ export class Orchestrator {
     const provider = config.agents.providers[loop.provider ?? config.agents.default];
     if (!provider) throw new SymphonyConfigError(`scheduled loop ${loop.id} references an unknown provider`);
     if (!(await this.hasStorageCapacity(config))) return;
+    const controller = new AbortController();
+    let cancelAgent: ((reason: string) => Promise<void>) | null = null;
+    const workspacePath = path.join(config.workspace.root, '_loops', loop.id);
+    this.appendEpisodeEvent(config, `loop-${loop.id}`, 'loop.triggered', {
+      loop_id: loop.id, provider: provider.id, workspace_path: workspacePath, phase: 'preparing',
+    });
+    log('info', 'scheduled_loop_preparing', {
+      repo_id: this.repoId ?? undefined, event: 'scheduled_loop_preparing',
+      loop_id: loop.id, agent_provider: provider.id, workspace_path: workspacePath,
+    });
+    // Reserve capacity before asynchronous preparation. Slow hooks must not hold
+    // the repository tick (and every subsequent repository) hostage.
+    const done = this.prepareScheduledLoop(config, loop, recentEvents, controller.signal, cancel => { cancelAgent = cancel; })
+      .catch(err => {
+        this.appendEpisodeEvent(config, `loop-${loop.id}`, 'loop.failed', {
+          loop_id: loop.id, reason: controller.signal.aborted ? 'preparation_cancelled' : 'preparation_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+        log(controller.signal.aborted ? 'info' : 'error', 'scheduled_loop_preparation_failed', {
+          repo_id: this.repoId ?? undefined, event: 'scheduled_loop_preparation_failed', loop_id: loop.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => { this.runningLoops.delete(loop.id); });
+    this.runningLoops.set(loop.id, {
+      agent_provider_group: providerLimitKey(provider),
+      cancel: async reason => { controller.abort(reason); if (cancelAgent) await cancelAgent(reason); },
+      done,
+    });
+  }
+
+  private async prepareScheduledLoop(
+    config: WorkflowConfig,
+    loop: ScheduledLoopConfig,
+    recentEvents: ReturnType<EpisodeStore['list']>,
+    signal: AbortSignal,
+    setAgentCancel: (cancel: (reason: string) => Promise<void>) => void,
+  ): Promise<void> {
+    const provider = config.agents.providers[loop.provider ?? config.agents.default]!;
+    signal.throwIfAborted();
     const workspacePath = path.join(config.workspace.root, '_loops', loop.id);
     const lastMessagePath = path.join(workspacePath, '.symphony', 'last_message.md');
     const workspaceManager = new WorkspaceManager(config.workspace, 1);
@@ -3631,6 +3673,7 @@ export class Orchestrator {
       SYMPHONY_AGENT_PROVIDER_GROUP: provider.provider_group,
       SYMPHONY_AGENT_PROVIDER_KIND: provider.provider_kind,
       SYMPHONY_LOOP_ID: loop.id,
+      SYMPHONY_AGENT_MODE: 'scheduled_loop',
       SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
     };
 
@@ -3643,7 +3686,7 @@ export class Orchestrator {
         env,
         logPath: hookLogPath(workspacePath, `loop-${loop.id}-after_create`),
         streamOutput: shouldStreamHookOutput(),
-        signal: this.shutdownController.signal,
+        signal,
       });
     }
     if (await workspaceManager.hasGitRepo(workspacePath)) await recoverFreshRunGitState(workspacePath);
@@ -3653,7 +3696,7 @@ export class Orchestrator {
         env,
         logPath: hookLogPath(workspacePath, `loop-${loop.id}-before_run`),
         streamOutput: shouldStreamHookOutput(),
-        signal: this.shutdownController.signal,
+        signal,
       });
     }
 
@@ -3682,12 +3725,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
     env.SYMPHONY_PROMPT_PATH = promptPath;
     const renderedCommand = await renderTemplate(provider.command, { issue, symphony: symphonyContext });
 
-    this.appendEpisodeEvent(config, `loop-${loop.id}`, 'loop.triggered', {
-      loop_id: loop.id,
-      provider: provider.id,
-      prompt_path: promptPath,
-      workspace_path: workspacePath,
-    });
+    signal.throwIfAborted();
     const agent = runAgent({
       command: renderedCommand,
       cwd: workspacePath,
@@ -3702,7 +3740,8 @@ ${JSON.stringify(episodeSummary, null, 2)}
         agent_provider: provider.id,
       },
     });
-    const done = agent.exit
+    setAgentCancel(agent.cancel);
+    await agent.exit
       .then(({ code, signal }) => {
         this.appendEpisodeEvent(config, `loop-${loop.id}`, code === 0 && !signal ? 'loop.completed' : 'loop.failed', {
           loop_id: loop.id,
@@ -3730,11 +3769,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
           session_id: agent.session_id,
           error: err instanceof Error ? err.message : String(err),
         });
-      })
-      .finally(() => {
-        this.runningLoops.delete(loop.id);
       });
-    this.runningLoops.set(loop.id, { agent_provider_group: provider.provider_group, cancel: agent.cancel, done });
   }
 
   private async assessAutonomousMerge(

@@ -119,3 +119,56 @@ Prompt.
   await waitForFile(marker);
   assert.equal((await status()).blocked, false);
 });
+
+test('slow scheduled preparation reserves capacity without blocking polling and cancels on shutdown', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-loop-preparation-'));
+  const workflowPath = path.join(root, 'WORKFLOW.md');
+  const workspaceRoot = path.join(root, 'workspaces');
+  await fs.writeFile(workflowPath, `---
+tracker:
+  owner: example
+  repo: app
+  token: token
+  api_base_url: https://api.github.test
+workspace:
+  root: ${workspaceRoot}
+hooks:
+  before_run: 'echo preparing > preparing; sleep 2; echo finished > finished'
+loops:
+  - id: quality
+    interval_ms: 86400000
+    prompt: Read repository context.
+agent:
+  max_concurrent_agents: 1
+agents:
+  providers:
+    codex:
+      command: 'echo ran > agent-ran'
+---
+Prompt.
+`);
+  const original = globalThis.fetch;
+  let polls = 0;
+  globalThis.fetch = async input => {
+    if (String(input).includes('/issues')) polls += 1;
+    return new Response('[]', { headers: { 'content-type': 'application/json' } });
+  };
+  const orchestrator = new Orchestrator({ workflowPath, repoId: 'app' });
+  t.after(async () => {
+    await orchestrator.shutdown('test');
+    globalThis.fetch = original;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const started = Date.now();
+  await orchestrator.tickOnce({ maxNewDispatches: 1 });
+  assert.ok(Date.now() - started < 1500, 'Scheduled setup must not block candidate polling');
+  const workspace = path.join(workspaceRoot, '_loops', 'quality');
+  await waitForFile(path.join(workspace, 'preparing'));
+  assert.ok(polls > 0, 'Issue polling continues while the hook is preparing');
+  assert.equal(orchestrator.getRunningCount(), 1, 'Preparation consumes an agent slot');
+  await orchestrator.tickOnce({ maxNewDispatches: 0 });
+  assert.equal(orchestrator.getRunningCount(), 1, 'A subsequent poll cannot duplicate preparation');
+  await orchestrator.shutdown('test');
+  assert.equal(orchestrator.getRunningCount(), 0);
+  await assert.rejects(fs.access(path.join(workspace, 'agent-ran')));
+});
