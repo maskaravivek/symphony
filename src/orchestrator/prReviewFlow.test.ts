@@ -97,6 +97,7 @@ agents:
 ---
 
 Prompt body
+{% if symphony.followup_only %}READ_ONLY_CONTEXT{% else %}WRITE_VERIFICATION_CONTEXT{% endif %}
 `,
     'utf8',
   );
@@ -321,6 +322,11 @@ ${JSON.stringify({
     }
   }
   const prompt = await fs.readFile(path.join(selected, '.symphony', 'prompt.md'), 'utf8');
+  if (native && !blocking) {
+    assert.match(prompt, /READ_ONLY_CONTEXT/);
+    assert.doesNotMatch(prompt, /WRITE_VERIFICATION_CONTEXT/);
+    assert.match(prompt, /Do not create, refresh, or write.*verification\.json/);
+  }
   assert.match(prompt, /Pull Request Review Instructions/);
   assert.match(prompt, /Please add the retry case\./);
   await assert.rejects(() => fs.access(path.join(selected, '.symphony', 'review_prompt.md')));
