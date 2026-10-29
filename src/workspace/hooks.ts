@@ -1,3 +1,4 @@
+import { dependencyHelperPath } from '../utils/runtimePaths.js';
 import { spawn } from 'node:child_process';
 import { createWriteStream, type WriteStream } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -119,7 +120,7 @@ export async function runHookScript(script: string, cwd: string, timeoutMs: numb
       // Hooks are non-interactive. Point stdin at /dev/null so a backgrounded
       // Symphony process cannot be suspended by hook subprocesses reading TTY input.
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...options.env },
+      env: { ...process.env, SYMPHONY_DEPENDENCY_HELPER: dependencyHelperPath(), ...options.env },
       detached: true,
     });
 

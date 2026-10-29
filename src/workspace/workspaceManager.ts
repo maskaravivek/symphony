@@ -1,3 +1,4 @@
+import { ensureLinkedWorktree, ownsLinkedWorktree, removeLinkedWorktree } from './linkedWorktrees.js';
 import { disposableCheckout } from '../storage/checkoutSafety.js';
 import { safeStoragePath } from '../storage/paths.js';
 import { DispatchDeferredError, storagePolicy } from '../storage/policy.js';
@@ -132,11 +133,20 @@ export class WorkspaceManager {
         throw error;
       });
       // Reusing a slot runs destructive checkout hooks: apply the same local-work protections as deletion.
-      if (entries.length === 0 || (state && await disposableCheckout(workspacePath))) return workspacePath;
+      const owned = await ownsLinkedWorktree(this.config.root, workspacePath);
+      const reusable = await disposableCheckout(workspacePath, { linkedRoot: this.config.root });
+      if (entries.length === 0 || (reusable && (owned || Boolean(state)))) return workspacePath;
     }
 
     if (highestReusableSlot >= limit) throw new DispatchDeferredError(`Workspace pool limit (${limit}) reached; resume or finish reserved jobs before dispatching more work`);
     return workspacePathForPoolSlot(this.config.root, highestReusableSlot + 1);
+  }
+
+  async prepareCheckout(workspacePath: string, signal?: AbortSignal): Promise<void> {
+    assertPathWithinRoot(this.config.root, workspacePath);
+    const state = await readRunState(workspacePath);
+    const resume = state?.status === 'paused' || state?.status === 'retry-wait';
+    await ensureLinkedWorktree(this.config, workspacePath, signal, resume);
   }
 
   async hasGitRepo(workspacePath: string): Promise<boolean> {
@@ -181,13 +191,24 @@ export class WorkspaceManager {
     return promptPath;
   }
 
-  async cleanWorkspace(workspacePath: string): Promise<void> {
+  async cleanWorkspace(workspacePath: string, options: { evict?: boolean } = {}): Promise<void> {
     if (!this.config.clean_on_terminal) return;
     assertPathWithinRoot(this.config.root, workspacePath);
     if (!(await safeStoragePath(workspacePath))) throw new Error('Unsafe workspace cleanup path');
+    const linked = await ownsLinkedWorktree(this.config.root, workspacePath);
+    const pooled = /^_pool_[1-9][0-9]*$/.test(path.basename(workspacePath));
+    if (linked && !(await disposableCheckout(workspacePath, { linkedRoot: this.config.root }))) throw new DispatchDeferredError('Preserving protected linked workspace');
+    const stamp = linked && pooled ? await fs.readFile(path.join(workspacePath, '.symphony', 'dependencies.json')).catch(() => null) : null;
     const archive = await this.archiveSymphonyArtifacts(workspacePath);
+    if (linked && pooled && !options.evict) {
+      await fs.mkdir(path.join(workspacePath, '.symphony'), { recursive: true });
+      if (stamp) await fs.writeFile(path.join(workspacePath, '.symphony', 'dependencies.json'), stamp);
+      const now = new Date(); await fs.utimes(workspacePath, now, now);
+      return; // Warm slots retain source, dependency installations and build caches.
+    }
     try {
-      await fs.rm(workspacePath, { recursive: true, force: true });
+      if (linked) await removeLinkedWorktree(this.config.root, workspacePath);
+      else await fs.rm(workspacePath, { recursive: true, force: true });
     } catch (error) {
       if (archive) {
         await fs.mkdir(workspacePath, { recursive: true });

@@ -1,3 +1,6 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { ownsLinkedWorktree } from '../workspace/linkedWorktrees.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -61,6 +64,28 @@ export async function storageAvailable(root: string, minFreeGiB: number): Promis
   }
 }
 
+
+/** Reclaim ignored generated output, keeping installed dependencies in warm slots. */
+async function pruneWorkspaceCaches(workspace: string, cutoff: number, budget: number): Promise<number> {
+  const { stdout } = await promisify(execFile)('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: workspace, timeout: 15_000 });
+  const candidates = [];
+  for (const name of stdout.split('\0').filter(Boolean)) {
+    if (!/(^|\/)(\.next|\.turbo|\.gradle|dist|build|coverage)\/$/.test(name)) continue;
+    const file = path.resolve(workspace, name);
+    if (!file.startsWith(`${path.resolve(workspace)}${path.sep}`) || !(await safeStoragePath(file))) continue;
+    const tracked = await promisify(execFile)('git', ['ls-files', '--', name], { cwd: workspace, timeout: 15_000 });
+    if (tracked.stdout.trim()) continue;
+    candidates.push({ file, time: (await fs.stat(file)).mtimeMs, size: await bytes(file) });
+  }
+  candidates.sort((a, b) => b.time - a.time);
+  let kept = 0, removed = 0;
+  for (const item of candidates) {
+    if (item.time >= cutoff && kept + item.size <= budget) kept += item.size;
+    else { await fs.rm(item.file, { recursive: true, force: true }); removed += item.size; }
+  }
+  return removed;
+}
+
 /** Called only under the workflow lock. Busy repositories are retried on the next tick. */
 export async function maintainStorage(config: WorkspaceConfig, busy: boolean, now = Date.now()): Promise<void> {
   const policy = storagePolicy(config.storage_maintenance);
@@ -86,11 +111,24 @@ export async function maintainStorage(config: WorkspaceConfig, busy: boolean, no
     let reclaimed = 0;
     let workspacesRemoved = 0;
     const manager = new WorkspaceManager(config);
-    for (const entry of await fs.readdir(config.root, { withFileTypes: true })) {
+    let warmSlots = 0;
+    const entries = await fs.readdir(config.root, { withFileTypes: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith('.') || ['_archives', '_loops'].includes(entry.name)) continue;
       const workspace = path.join(config.root, entry.name);
       if (!(await safeStoragePath(workspace))) continue;
       const state = await readRunState(workspace);
+      if (/^_pool_[1-9][0-9]*$/.test(entry.name) && await ownsLinkedWorktree(config.root, workspace)) {
+        if (state && !['completed', 'failed', 'cancelled'].includes(state.status)) continue;
+        if (!(await disposableCheckout(workspace, { linkedRoot: config.root }))) continue;
+        if (warmSlots++ < policy.warm_pool_slots) {
+          reclaimed += await pruneWorkspaceCaches(workspace, cutoff, policy.max_cache_gib * GIB);
+        } else if ((await fs.stat(workspace)).mtimeMs < now - policy.idle_days * DAY) {
+          await manager.cleanWorkspace(workspace, { evict: true }); workspacesRemoved++;
+        }
+        continue;
+      }
       // Unknown, interrupted, paused, finalizing and retry workspaces need human/runtime recovery.
       if (!state || !['completed', 'failed', 'cancelled'].includes(state.status)) continue;
       if (state.worker_pid) {

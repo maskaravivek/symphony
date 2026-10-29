@@ -809,3 +809,28 @@ test('rejects a malformed route list instead of silently falling back to the def
   const workflow = await writeWorkflow(`tracker:\n  owner: test\n  repo: app\n  token: test\nagents:\n  providers:\n    codex:\n      command: codex exec -\n  routes:\n    provider: codex\n`);
   await assert.rejects(loadWorkflowFromFile(workflow), /agents.routes must be an array/);
 });
+
+test('linked checkout source resolves relative to its workflow and warm slots are bounded', async () => {
+  const file = await writeWorkflow(`tracker:
+  owner: example
+  repo: app
+  token: token
+workspace:
+  checkout:
+    kind: linked_worktree
+    source: .
+  storage_maintenance:
+    warm_pool_slots: 2
+    max_pool_slots: 4
+agents:
+  providers:
+    codex:
+      command: echo done
+`);
+  const loaded = await loadWorkflowFromFile(file);
+  assert.equal(loaded.config.workspace.checkout?.source, path.dirname(file));
+  assert.equal(loaded.config.workspace.checkout?.base_branch, 'main');
+  const text = await fs.readFile(file, 'utf8');
+  await fs.writeFile(file, text.replace('max_pool_slots: 4', 'max_pool_slots: 1'));
+  await assert.rejects(loadWorkflowFromFile(file), /warm_pool_slots/);
+});

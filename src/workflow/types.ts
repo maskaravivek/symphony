@@ -35,6 +35,7 @@ export interface PollingConfig {
 export interface WorkspaceConfig {
   root: string;
   clean_on_terminal: boolean;
+  checkout?: { kind: 'linked_worktree'; source: string; base_branch: string };
   strategy: WorkspaceStrategyConfig;
   storage_maintenance?: Partial<StorageMaintenanceConfig>;
 }
@@ -47,6 +48,7 @@ export interface StorageMaintenanceConfig {
   retention_days: number;
   max_artifact_gib: number;
   max_pool_slots: number;
+  warm_pool_slots: number;
   cache_root: string | null;
   max_cache_gib: number;
 }

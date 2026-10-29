@@ -10,6 +10,7 @@ export const DEFAULT_STORAGE_POLICY: StorageMaintenanceConfig = {
   retention_days: 30,
   max_artifact_gib: 2,
   max_pool_slots: 8,
+  warm_pool_slots: 1,
   cache_root: null,
   max_cache_gib: 10,
 };

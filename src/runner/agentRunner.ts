@@ -1,3 +1,4 @@
+import { dependencyHelperPath } from '../utils/runtimePaths.js';
 import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
@@ -97,7 +98,7 @@ export function runAgent(options: AgentRunOptions): AgentRunResult {
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
-    env: { ...process.env, ...options.env },
+    env: { ...process.env, SYMPHONY_DEPENDENCY_HELPER: dependencyHelperPath(), ...options.env },
   });
 
   const fields = { ...options.logFields, session_id: sessionId };

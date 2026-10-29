@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 
@@ -472,6 +473,16 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   const workspaceRoot = expandHomeDir(asString(workspaceRaw.root, 'workspace.root') ?? defaultWorkspaceRoot);
   const cleanOnTerminal = asBoolean(workspaceRaw.clean_on_terminal, 'workspace.clean_on_terminal') ?? false;
   const workspaceStrategy = normalizeWorkspaceStrategy(workspaceRaw.strategy);
+  let checkout: WorkflowConfig['workspace']['checkout'];
+  if (workspaceRaw.checkout !== undefined) {
+    const value = workspaceRaw.checkout;
+    if (!isRecord(value) || value.kind !== 'linked_worktree' || typeof value.source !== 'string' || !value.source.trim()) {
+      throw new SymphonyConfigError('workspace.checkout requires kind: linked_worktree and a source checkout path');
+    }
+    const base = asString(value.base_branch, 'workspace.checkout.base_branch') ?? 'main';
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(base) || base.includes('..') || base.endsWith('/') || base.endsWith('.lock')) throw new SymphonyConfigError('Invalid workspace.checkout.base_branch');
+    checkout = { kind: 'linked_worktree', source: expandHomeDir(value.source), base_branch: base };
+  }
   if (workspaceRaw.storage_maintenance !== undefined && !isRecord(workspaceRaw.storage_maintenance)) {
     throw new SymphonyConfigError('workspace.storage_maintenance must be an object');
   }
@@ -480,14 +491,14 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   storage.enabled = asBoolean(storageRaw.enabled, 'workspace.storage_maintenance.enabled') ?? storage.enabled;
   storage.cache_root = asString(storageRaw.cache_root, 'workspace.storage_maintenance.cache_root');
   if (storage.cache_root) storage.cache_root = expandHomeDir(storage.cache_root);
-  for (const key of ['interval_ms', 'min_free_gib', 'idle_days', 'retention_days', 'max_artifact_gib', 'max_pool_slots', 'max_cache_gib'] as const) {
+  for (const key of ['interval_ms', 'min_free_gib', 'idle_days', 'retention_days', 'max_artifact_gib', 'max_pool_slots', 'warm_pool_slots', 'max_cache_gib'] as const) {
     const value = asNumber(storageRaw[key], `workspace.storage_maintenance.${key}`) ?? storage[key];
-    if (!Number.isFinite(value) || value <= 0 || (key === 'max_pool_slots' && !Number.isInteger(value))) {
+    if (!Number.isFinite(value) || value <= 0 || (['max_pool_slots', 'warm_pool_slots'].includes(key) && !Number.isInteger(value))) {
       throw new SymphonyConfigError(`workspace.storage_maintenance.${key} must be a positive ${key === 'max_pool_slots' ? 'integer' : 'number'}`);
     }
     storage[key] = value;
   }
-
+  if (storage.warm_pool_slots > storage.max_pool_slots) throw new SymphonyConfigError('workspace.storage_maintenance.warm_pool_slots must not exceed max_pool_slots');
 
   const hooksRaw = isRecord(raw.hooks) ? raw.hooks : {};
   const hooksTimeout = asNumber(hooksRaw.timeout_ms, 'hooks.timeout_ms') ?? 120000;
@@ -578,7 +589,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       request_timeout_ms: requestTimeoutMs,
     },
     polling: { interval_ms: pollingInterval },
-    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy, storage_maintenance: storage },
+    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy, checkout, storage_maintenance: storage },
     hooks: {
       after_create: afterCreate ?? null,
       before_run: beforeRun ?? null,
@@ -616,6 +627,9 @@ export async function loadWorkflowFromFile(
   const rawConfig = yaml ? parseYaml(yaml) : {};
   const resolved = resolveEnvRefs(rawConfig, env);
   let config = normalizeWorkflowConfig(resolved);
+  if (config.workspace.checkout) {
+    config.workspace.checkout.source = path.resolve(path.dirname(path.resolve(workflowPath)), config.workspace.checkout.source);
+  }
   const workflowSha = createHash('sha256').update(rawText).digest('hex');
   config = { ...config, workflow_sha: workflowSha, merge: { ...config.merge, workflow_sha: workflowSha } };
 

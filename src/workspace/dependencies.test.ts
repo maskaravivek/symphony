@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { dependencyHelperPath } from '../utils/runtimePaths.js';
+const exec = promisify(execFile);
+
+test('dependency reuse is invalidated by manifests, toolchain inputs, missing modules and failed installs', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-dependencies-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await exec('git', ['init', '-q'], { cwd: root });
+  await fs.writeFile(path.join(root, 'package.json'), '{"name":"fixture"}');
+  await fs.writeFile(path.join(root, 'package-lock.json'), '{}');
+  await exec('git', ['add', '.'], { cwd: root });
+  const bin = path.join(root, 'bin'); await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'npm'), '#!/bin/sh\nif [ "$1" = --version ]; then echo 10; exit 0; fi\necho install >> installs\n[ "$FAIL_INSTALL" = 1 ] && exit 1\nmkdir -p node_modules\ntouch node_modules/.package-lock.json\n', { mode: 0o755 });
+  const run = (env: Record<string, string> = {}) => exec(process.execPath, [dependencyHelperPath(), '--', 'npm', 'ci'], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env } });
+  const count = async () => (await fs.readFile(path.join(root, 'installs'), 'utf8')).trim().split('\n').length;
+  await run(); await run(); assert.equal(await count(), 1);
+  await fs.writeFile(path.join(root, 'package.json'), '{"name":"fixture","scripts":{"postinstall":"echo changed"}}');
+  await run(); assert.equal(await count(), 2);
+  await fs.rm(path.join(root, 'node_modules'), { recursive: true });
+  await run(); assert.equal(await count(), 3);
+  await assert.rejects(run({ SYMPHONY_FORCE_INSTALL: '1', FAIL_INSTALL: '1' }));
+  await assert.rejects(fs.access(path.join(root, '.symphony', 'dependencies.json')));
+  await run(); assert.equal(await count(), 5);
+  await run({ NODE_ENV: 'production' }); assert.equal(await count(), 6);
+});

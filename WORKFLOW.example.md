@@ -72,7 +72,17 @@ loops:
 
 workspace:
   root: ~/.symphony/workspaces/mdedit
-  clean_on_terminal: false
+  clean_on_terminal: true
+  checkout:
+    kind: linked_worktree
+    source: . # Resolve relative to this workflow; keep the primary checkout outside workspace.root.
+    base_branch: main
+  storage_maintenance:
+    enabled: true
+    interval_ms: 86400000
+    warm_pool_slots: 1
+    max_pool_slots: 4
+    max_cache_gib: 10
   strategy:
     implementation: pooled_isolated
     # Planning still needs repository context; the agent uses handoff_command
@@ -85,109 +95,73 @@ workspace:
 hooks:
   after_create: |
     set -euo pipefail
-
-    cache_root="${SYMPHONY_CACHE_ROOT:-$HOME/.symphony/cache/mdedit}"
-    mirror="$cache_root/repo.git"
-    mirror_lock="$cache_root/repo.git.lock"
-    mirror_lock_stale_after=900
-    mirror_lock_wait_timeout=1200
-    mirror_lock_wait_started="$(date +%s)"
-    mkdir -p "$cache_root"
-
-    until mkdir "$mirror_lock" 2>/dev/null; do
-      now="$(date +%s)"
-      lock_mtime="$(stat -f %m "$mirror_lock" 2>/dev/null || echo 0)"
-      lock_pid="$(cat "$mirror_lock/pid" 2>/dev/null || true)"
-      lock_is_live=0
-      if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-        lock_is_live=1
-      fi
-      if [ "$lock_is_live" -eq 0 ] && [ "$lock_mtime" -gt 0 ] && [ $((now - lock_mtime)) -ge "$mirror_lock_stale_after" ]; then
-        echo "Recovering stale shared Git cache lock: $mirror_lock"
-        rm -f "$mirror_lock/pid"
-        rmdir "$mirror_lock" 2>/dev/null || true
-        continue
-      fi
-      if [ $((now - mirror_lock_wait_started)) -ge "$mirror_lock_wait_timeout" ]; then
-        echo "ERROR: timed out waiting for shared Git cache lock: $mirror_lock"
-        exit 1
-      fi
-      echo "Waiting for shared Git cache lock: $mirror_lock"
-      sleep 2
-    done
-    printf '%s\n' "$$" > "$mirror_lock/pid"
-    trap 'rm -f "$mirror_lock/pid"; rmdir "$mirror_lock" 2>/dev/null || true' EXIT
-
-    if [ -d "$mirror" ]; then
-      git -C "$mirror" remote update --prune
-    else
-      git clone --mirror git@github.com:mangoappstudio/mdedit.git "$mirror"
-    fi
-
-    rm -f "$mirror_lock/pid"
-    rmdir "$mirror_lock"
-    trap - EXIT
-
-    git clone --reference-if-able "$mirror" git@github.com:mangoappstudio/mdedit.git .
-    mkdir -p .git/info
-    touch .git/info/exclude
-    grep -qxF '.symphony/' .git/info/exclude || echo '.symphony/' >> .git/info/exclude
+    # Symphony creates and owns the linked checkout before repository hooks run.
+    git rev-parse --show-toplevel >/dev/null
   before_run: |
     set -euo pipefail
 
-    git fetch origin
     base_branch="${SYMPHONY_STACK_BASE_BRANCH:-main}"
-    git checkout -B "$base_branch" "origin/$base_branch"
-    git reset --hard "origin/$base_branch"
-    git clean -fdx -e .symphony/ -e node_modules/
+    git fetch origin "$base_branch"
 
-    mkdir -p .git/info
-    touch .git/info/exclude
-    grep -qxF '.symphony/' .git/info/exclude || echo '.symphony/' >> .git/info/exclude
+    if [ -n "$(git status --porcelain)" ]; then
+      if [ "${SYMPHONY_WORKSPACE_STRATEGY:-}" = "pooled_isolated" ]; then
+        echo "Found stale local changes in pooled workspace; discarding before base checkout."
+      else
+        echo "Found local changes in workspace; discarding before base checkout."
+      fi
+      git reset --hard
+    fi
+    git clean -fdx -e .symphony/ -e node_modules/ -e .next/ -e .turbo/ -e .gradle/ -e .kotlin/ -e .cxx/ -e .build/ -e build/ -e dist/ -e coverage/ -e DerivedData/ -e .swiftpm/ -e local.properties
+
+    git checkout --detach "origin/$base_branch"
+    git reset --hard "origin/$base_branch"
+
+    exclude_file="$(git rev-parse --git-path info/exclude)"
+    mkdir -p "$(dirname "$exclude_file")"
+    touch "$exclude_file"
+    grep -qxF '.symphony/' "$exclude_file" || echo '.symphony/' >> "$exclude_file"
 
     if ! git config user.email >/dev/null; then git config user.email "symphony@localhost"; fi
     if ! git config user.name >/dev/null; then git config user.name "Symphony"; fi
 
     gh auth status -h github.com
 
-    git checkout -B "{{ issue.branch_name }}"
+    if git ls-remote --exit-code --heads origin "{{ issue.branch_name }}" >/dev/null 2>&1; then
+      git fetch origin "{{ issue.branch_name }}"
+      git checkout -B "{{ issue.branch_name }}" FETCH_HEAD
+    else
+      git checkout -B "{{ issue.branch_name }}"
+    fi
+
+    if [ "${SYMPHONY_AGENT_MODE:-}" = "grooming" ]; then
+      echo "Grooming reads repository context without installing build dependencies."
+      exit 0
+    fi
+
+    # These discovery passes inspect source/GitHub/telemetry without building apps.
+    # Keep QA and implementation preparation unchanged.
+    case "${SYMPHONY_LOOP_ID:-}" in
+      daily-steward|weekly-observability|weekly-evolve)
+        echo "Read-only discovery loop: skipping build dependency installation."
+        exit 0
+        ;;
+    esac
+
+    export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+    if [ -s "$NVM_DIR/nvm.sh" ]; then
+      . "$NVM_DIR/nvm.sh"
+      nvm use 24
+      hash -r
+    fi
+    unset npm_config_user_agent npm_node_execpath npm_execpath
+    echo "Using node $(node -v) from $(command -v node)"
+    echo "Using yarn $(yarn -v) from $(command -v yarn)"
 
     cache_root="${SYMPHONY_CACHE_ROOT:-$HOME/.symphony/cache/mdedit}"
     yarn_cache="$cache_root/yarn"
     mkdir -p "$yarn_cache" .symphony
 
-    lock_hash="$(shasum -a 256 yarn.lock | awk '{print $1}')"
-    install_stamp=".symphony/yarn-install-$lock_hash.stamp"
-    node_modules_cache="$cache_root/node_modules/$lock_hash"
-
-    if [ ! -d node_modules ] && [ -d "$node_modules_cache/node_modules" ]; then
-      echo "Seeding node_modules from $node_modules_cache"
-      cp -R "$node_modules_cache/node_modules" node_modules
-      touch "$install_stamp"
-    fi
-
-    if [ -d node_modules ] && [ -f "$install_stamp" ]; then
-      echo "Skipping yarn install; yarn.lock hash is unchanged ($lock_hash)."
-    else
-      YARN_CACHE_FOLDER="$yarn_cache" yarn install --frozen-lockfile --non-interactive --prefer-offline
-      rm -f .symphony/yarn-install-*.stamp
-      touch "$install_stamp"
-    fi
-
-    if [ -d node_modules ] && [ ! -d "$node_modules_cache/node_modules" ]; then
-      mkdir -p "$(dirname "$node_modules_cache")"
-      node_modules_lock="$node_modules_cache.lock"
-      if mkdir "$node_modules_lock" 2>/dev/null; then
-        if [ ! -d "$node_modules_cache/node_modules" ]; then
-          tmp_cache="$node_modules_cache.tmp.$$"
-          rm -rf "$tmp_cache"
-          mkdir -p "$tmp_cache"
-          cp -R node_modules "$tmp_cache/node_modules"
-          mv "$tmp_cache" "$node_modules_cache"
-        fi
-        rmdir "$node_modules_lock"
-      fi
-    fi
+    YARN_CACHE_FOLDER="$yarn_cache" node "$SYMPHONY_DEPENDENCY_HELPER" -- yarn install --frozen-lockfile --non-interactive --prefer-offline
   after_run: |
     set -euo pipefail
 

@@ -213,3 +213,30 @@ Use the project's actual check commands. Symphony runs them after successful PR 
 - Results depend on clear issues, strong repository instructions, and reliable tests. Ambiguous work still benefits from an interactive agent session.
 - `WORKFLOW.md` contains executable shell commands. Those commands inherit the host and agent permissions you configure. Review the example's approval and sandbox settings before running it against a repository.
 - GitHub writes, commits, pushes, and pull requests are performed by the configured agent and tools; Symphony primarily schedules work, manages lifecycle state, and records outcomes.
+
+## Persistent linked workspaces
+
+Managed repositories can use a Symphony-owned bare repository and a persistent pool of linked worktrees:
+
+```yaml
+workspace:
+  root: ~/.symphony/workspaces/your-repo
+  checkout:
+    kind: linked_worktree
+    source: .
+    base_branch: main
+  clean_on_terminal: true
+  strategy:
+    implementation: pooled_isolated
+  storage_maintenance:
+    enabled: true
+    interval_ms: 86400000
+    warm_pool_slots: 1
+    max_pool_slots: 4
+```
+
+`source` resolves relative to WORKFLOW.md and must be an existing checkout outside the workspace root. Its origin supplies the remote. Symphony seeds its own bare repository locally (sharing immutable Git object files where Git supports it), fetches the remote base, and creates detached linked worktrees before repository hooks run. The primary checkout's files, branch and index are not changed. Per-task branches stay isolated in the worktrees; hooks must start from a detached base instead of trying to check out main in multiple slots. Use `git rev-parse --git-path` for Git metadata paths, because `.git` is a file in a linked worktree.
+
+Terminal cleanup archives run artifacts and releases managed pool slots while preserving dependencies, install fingerprints and generated caches. Slots with paused/retry/running work, uncommitted changes, unpushed commits, stashes or unknown ignored files remain protected. New slots use linked worktrees. Clean standalone clones with remotely accounted-for commits migrate on preparation, moving dependencies and artifacts without copying them. Dirty/unpublished legacy clones remain intact for recovery. Daily maintenance keeps the configured number of idle warm slots, unregisters excess slots after the idle period, and prunes stale/over-budget ignored build output. Installed dependencies in retained slots are preserved; the cache limit is not a hard cap on all dependency trees or protected work. Unknown worktrees and the shared Git repository are not automatically deleted.
+
+Hooks, validation commands and agents receive `SYMPHONY_DEPENDENCY_HELPER`. Run `node "$SYMPHONY_DEPENDENCY_HELPER" -- npm ci` or `node "$SYMPHONY_DEPENDENCY_HELPER" -- yarn install --frozen-lockfile --non-interactive --prefer-offline`. The helper fingerprints manifests, lockfiles, package-manager configuration, repository install scripts, install arguments, Node/package-manager versions, platform and architecture. It reuses an installation only when the fingerprint and package-manager integrity marker match. Failed installs invalidate the stamp. `SYMPHONY_FORCE_INSTALL=1` forces a reinstall. Each concurrent slot owns its mutable dependencies; no node_modules symlink is shared between agents. Preserve dependencies/caches in checkout hooks, and never clean unknown user files to obtain a free slot.

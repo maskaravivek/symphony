@@ -2291,6 +2291,7 @@ export class Orchestrator {
     };
 
     const skipsWorkspaceHooks = workspaceStrategy === 'none_or_readonly';
+    if (!skipsWorkspaceHooks) await workspaceManager.prepareCheckout(workspacePath, this.shutdownController.signal);
     const hasGitRepo = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
     const shouldRunAfterCreate = !skipsWorkspaceHooks && Boolean(config.hooks.after_create) && (isNew || !hasGitRepo);
 
@@ -2336,7 +2337,7 @@ export class Orchestrator {
       previousWorkspaceState?.issue_id === issue.id || previousWorkspaceState?.issue_number === issue.number
         ? previousWorkspaceState
         : null;
-    const isPausedResume = existingState?.status === 'paused';
+    const isPausedResume = existingState?.status === 'paused' || existingState?.status === 'retry-wait';
 
     const hasGitRepoBeforeRun = skipsWorkspaceHooks ? false : await workspaceManager.hasGitRepo(workspacePath);
     if (hasGitRepoBeforeRun && !isPausedResume) {
@@ -3677,6 +3678,7 @@ export class Orchestrator {
       SYMPHONY_LAST_MESSAGE_PATH: lastMessagePath,
     };
 
+    await workspaceManager.prepareCheckout(workspacePath, signal);
     const hasGitRepo = await workspaceManager.hasGitRepo(workspacePath);
     if (!hasGitRepo && config.hooks.after_create) {
       const entries = await fs.readdir(workspacePath);
