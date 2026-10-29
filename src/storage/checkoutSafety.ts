@@ -1,4 +1,4 @@
-import { generatedOutput } from './generatedArtifacts.js';
+import { generatedOutput, unstagedCacheChanges } from './generatedArtifacts.js';
 import { readRunState } from '../status/runState.js';
 import { ownsLinkedWorktree } from '../workspace/linkedWorktrees.js';
 import fs from 'node:fs/promises';
@@ -19,7 +19,15 @@ export async function disposableCheckout(workspace: string, options: { linkedRoo
     const linked = Boolean(options.linkedRoot && await ownsLinkedWorktree(options.linkedRoot, workspace));
     if ((!gitDir.isDirectory() && !linked) || gitDir.isSymbolicLink()) return false;
     const dirty = (await exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: workspace, timeout: 15_000 })).stdout;
-    if (dirty && (!linked || dirty !== ' M .symphony/verification.json\0' || !(await archivedTerminalEvidence(workspace)))) return false;
+    if (dirty) {
+      if (!linked) return false;
+      const caches = new Set(unstagedCacheChanges(dirty));
+      for (const entry of dirty.split('\0').filter(Boolean)) {
+        if ((entry.startsWith(' M ') || entry.startsWith(' D ')) && caches.has(entry.slice(3))) continue;
+        if (entry === ' M .symphony/verification.json' && await archivedTerminalEvidence(workspace)) continue;
+        return false;
+      }
+    }
     if (await git(workspace, 'stash', 'list')) return false;
     for (const marker of ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply']) {
       if (await exists(path.resolve(workspace, await git(workspace, 'rev-parse', '--git-path', marker)))) return false;

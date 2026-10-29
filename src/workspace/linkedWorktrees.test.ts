@@ -87,10 +87,14 @@ test('maintenance retains warm dependencies, prunes stale output and unregisters
     await ensureLinkedWorktree(config, directory);
     await fs.mkdir(path.join(directory, 'node_modules')); await fs.writeFile(path.join(directory, 'node_modules', 'keep'), 'dependency');
     const exclude = path.join(config.root, '.symphony', 'repository.git', 'info', 'exclude');
-    await fs.appendFile(exclude, '\n.open-next/\ntest-results/\n');
+    await fs.appendFile(exclude, '\n.open-next/\ntest-results/\n*.tsbuildinfo\n.eslintcache\n');
     const old = new Date(Date.now() - 40 * 86400000);
     for (const name of ['.next', '.open-next', 'test-results']) {
       await fs.mkdir(path.join(directory, name)); await fs.writeFile(path.join(directory, name, 'old'), 'cache');
+      await fs.utimes(path.join(directory, name), old, old);
+    }
+    for (const name of ['tsconfig.tsbuildinfo', '.eslintcache']) {
+      await fs.writeFile(path.join(directory, name), 'generated cache');
       await fs.utimes(path.join(directory, name), old, old);
     }
     await fs.utimes(directory, old, old);
@@ -100,6 +104,8 @@ test('maintenance retains warm dependencies, prunes stale output and unregisters
   await assert.rejects(fs.access(path.join(slot, '.next')));
   await assert.rejects(fs.access(path.join(slot, '.open-next')));
   await assert.rejects(fs.access(path.join(slot, 'test-results')));
+  await assert.rejects(fs.access(path.join(slot, 'tsconfig.tsbuildinfo')));
+  await assert.rejects(fs.access(path.join(slot, '.eslintcache')));
   await assert.rejects(fs.access(second));
   assert.ok(!(await git(path.join(config.root, '.symphony', 'repository.git'), 'worktree', 'list', '--porcelain')).includes(second));
 });
@@ -174,4 +180,31 @@ test('terminal evidence and ignored build outputs release a warm slot without di
   const archived = await fs.readdir(path.join(config.root, '_archives'));
   assert.equal(await fs.readFile(path.join(config.root, '_archives', archived[0]!, 'verification.json'), 'utf8'), evidence);
   assert.equal(await fs.readFile(path.join(slot, '.symphony', 'verification.json'), 'utf8'), '{}');
+});
+
+
+test('ignored cache files and unstaged tracked build caches do not block cleanup, but staged work does', async t => {
+  const { config, source, slot, root } = await fixture(t);
+  await fs.writeFile(path.join(source, 'tsconfig.tsbuildinfo'), 'original cache');
+  await git(source, 'add', 'tsconfig.tsbuildinfo'); await git(source, 'commit', '-qm', 'tracked cache fixture');
+  await git(source, 'push', path.join(root, 'remote.git'), 'main');
+  await ensureLinkedWorktree(config, slot);
+  const exclude = path.join(config.root, '.symphony', 'repository.git', 'info', 'exclude');
+  await fs.appendFile(exclude, '\n*.tsbuildinfo\n.eslintcache\n.stylelintcache\n.DS_Store\nnpm-debug.log\n.env.local\n');
+  for (const name of ['extra.tsbuildinfo', '.eslintcache', '.stylelintcache', '.DS_Store', 'npm-debug.log']) await fs.writeFile(path.join(slot, name), 'generated');
+  await fs.writeFile(path.join(slot, 'tsconfig.tsbuildinfo'), 'rebuilt');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), true);
+  await git(slot, 'add', 'tsconfig.tsbuildinfo');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  await git(slot, 'restore', '--staged', 'tsconfig.tsbuildinfo');
+  await fs.writeFile(path.join(slot, '.env.local'), 'CUSTOM_SETTING=preserve');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  await fs.rm(path.join(slot, '.env.local'));
+  await fs.writeFile(path.join(slot, 'source.txt'), 'source edit');
+  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  await git(slot, 'restore', 'source.txt');
+  await new WorkspaceManager(config).cleanWorkspace(slot);
+  assert.equal(await git(slot, 'status', '--porcelain'), '');
+  assert.equal(await fs.readFile(path.join(slot, 'tsconfig.tsbuildinfo'), 'utf8'), 'original cache');
+  assert.equal(await fs.readFile(path.join(slot, 'extra.tsbuildinfo'), 'utf8'), 'generated');
 });

@@ -1,3 +1,4 @@
+import { unstagedCacheChanges } from '../storage/generatedArtifacts.js';
 import { hasLivePreparation } from './preparation.js';
 import { ensureLinkedWorktree, ownsLinkedWorktree, releaseIdleTaskBranch, removeLinkedWorktree } from './linkedWorktrees.js';
 import { disposableCheckout } from '../storage/checkoutSafety.js';
@@ -206,7 +207,10 @@ export class WorkspaceManager {
     const trackedArtifacts = linked
       ? (await execFileAsync('git', ['ls-files', '-z', '--', '.symphony'], { cwd: workspacePath })).stdout
       : '';
+    const cacheChanges = linked ? unstagedCacheChanges((await execFileAsync('git',
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: workspacePath })).stdout) : [];
     const archive = await this.archiveSymphonyArtifacts(workspacePath);
+    if (cacheChanges.length) await execFileAsync('git', ['restore', '--worktree', '--', ...cacheChanges], { cwd: workspacePath });
     if (trackedArtifacts) await execFileAsync('git', ['restore', '--worktree', '--', '.symphony'], { cwd: workspacePath });
     if (linked && pooled && !options.evict) {
       await fs.mkdir(path.join(workspacePath, '.symphony'), { recursive: true });
