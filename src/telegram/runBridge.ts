@@ -1,3 +1,4 @@
+import { scanLoopStates, recordLoopInput, requestLoopResume } from '../loops/state.js';
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import type { ActivityBatch, Activity } from './notifications.js';
 import fs from 'node:fs/promises';
@@ -40,10 +41,10 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
     : [{ id: 'default', workflow: path.resolve(options.workflow ?? 'WORKFLOW.md') }];
   const entries = await Promise.all(repos.map(async (repo) => {
     const { config } = await loadWorkflowFromFile(repo.workflow);
-    return { id: repo.id, config, github: new GithubIssueTrackerClient(config.tracker) };
+    return { id: repo.id, workflow:repo.workflow, config, github: new GithubIssueTrackerClient(config.tracker) };
   }));
   function entryFor(task: BridgeTask) {
-    const entry = entries.find((candidate) => task.key === `${candidate.id}#${task.state.issue_number}`);
+    const entry = entries.find((candidate) => task.key === `${candidate.id}#${task.state.loop_id ? `loop:${task.state.loop_id}` : task.state.issue_number}`);
     if (!entry) throw new Error('Task repository is no longer configured');
     return entry;
   }
@@ -71,6 +72,14 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
             batch.cursor = event.sequence;
             if (!repoIds.includes(event.repo_id)) continue;
             const payload = event.payload;
+            if (event.event.startsWith('loop.') && typeof payload.loop_id==='string') {
+              const kind:Activity['kind']|undefined = ({'loop.completed':'loop_completed','loop.failed':'loop_failed','loop.paused':'loop_paused','loop.retry_scheduled':'loop_retrying'} as Record<string,Activity['kind']>)[event.event];
+              if (kind) batch.activities.push({repo:entry.id,key:`${entry.id}#loop:${payload.loop_id}`,kind,detail:payload.loop_id});
+              if (kind==='loop_completed' && Array.isArray(payload.result_urls)) for (const url of payload.result_urls) {
+                if (typeof url==='string' && /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+$/.test(url)) batch.activities.push({repo:entry.id,key:url,kind:'followup',url});
+              }
+              continue;
+            }
             const number = event.event === 'merge.merged' ? payload.pr_number : payload.issue_number;
             const kind: Activity['kind'] | null = event.event === 'merge.merged' ? 'merged'
               : event.event === 'workflow.completed' ? 'completed' : event.event === 'workflow.failed' ? 'failed'
@@ -116,11 +125,11 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
     },
     async tasks() {
       const all = await Promise.all(entries.map(async (entry) => {
-        const states = await scanRunStates(entry.config.workspace.root);
-        return Promise.all(states.filter((state) => state.issue_number !== null &&
+        const states = [...await scanRunStates(entry.config.workspace.root),...await scanLoopStates(entry.config)];
+        return Promise.all(states.filter((state) => (state.issue_number !== null || Boolean(state.loop_id)) &&
           (!state.owner || state.owner === entry.config.tracker.owner) &&
           (!state.repo || state.repo === entry.config.tracker.repo)).map(async (state) => ({
-          key: `${entry.id}#${state.issue_number}`,
+          key: `${entry.id}#${state.loop_id ? `loop:${state.loop_id}` : state.issue_number}`,
           state,
           lastMessage: state.last_message_path
             ? await fs.readFile(state.last_message_path, 'utf8').catch(() => '') : '',
@@ -133,10 +142,12 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
       return [...latest.values()];
     },
     async comment(task, marker, text) {
+      if (task.state.loop_id) return recordLoopInput(entryFor(task).config,task.state.loop_id,task.state.session_id,marker,text);
       return (await entryFor(task).github.upsertStatusComment(task.state.issue_number!, marker, `${marker}\n${text}`)).id;
     },
     async resume(task) {
       const entry = entryFor(task);
+      if (task.state.loop_id) return requestLoopResume((await loadWorkflowFromFile(entry.workflow)).config,task.state.loop_id,task.state.session_id);
       const current = await readRunState(task.state.workspace_path);
       // Never requeue a newer session or a worker which is still running/finalizing.
       if (!current || current.session_id !== task.state.session_id ||

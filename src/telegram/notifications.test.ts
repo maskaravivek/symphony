@@ -12,3 +12,10 @@ test('daily brief remains bounded with many repositories and links',()=>{
  const brief=formatBrief(activities,'2026-10-30');
  assert.ok(brief.length<4000);assert.match(brief,/Additional repository activity/);
 });
+
+
+test('daily brief names scheduled loop outcomes separately from implementation runs',()=>{
+ const brief=formatBrief([{repo:'app',key:'app#loop:quality',kind:'loop_completed',detail:'quality'},
+  {repo:'app',key:'app#loop:observability',kind:'loop_paused',detail:'observability'}],'2026-10-30');
+ assert.match(brief,/scheduled passes completed/);assert.match(brief,/scheduled questions/);assert.match(brief,/quality: completed/);assert.match(brief,/observability: paused/);
+});

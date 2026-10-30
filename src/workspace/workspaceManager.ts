@@ -177,10 +177,10 @@ export class WorkspaceManager {
     return workspacePathForPoolSlot(this.config.root, highestReusableSlot + 1);
   }
 
-  async prepareCheckout(workspacePath: string, signal?: AbortSignal, branch?: string): Promise<void> {
+  async prepareCheckout(workspacePath: string, signal?: AbortSignal, branch?: string, preserveWork = false): Promise<void> {
     assertPathWithinRoot(this.config.root, workspacePath);
     const state = await readRunState(workspacePath);
-    const resume = state?.status === 'paused' || state?.status === 'retry-wait';
+    const resume = preserveWork || state?.status === 'paused' || state?.status === 'retry-wait';
     await ensureLinkedWorktree(this.config, workspacePath, signal, resume);
     if (branch) await releaseIdleTaskBranch(this.config, workspacePath, branch, signal);
   }

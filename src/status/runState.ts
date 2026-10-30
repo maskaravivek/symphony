@@ -33,6 +33,12 @@ export interface FinalizationContext {
 }
 
 export interface RunState {
+  loop_id?: string;
+  loop_run_id?: string;
+  loop_run_started_at?: string;
+  loop_coordinator_pid?: number | null;
+  loop_inputs?: Array<{marker:string;comment_id:number;text:string}>;
+  loop_resume_requested?: boolean;
   repo_id: string | null;
   owner: string | null;
   repo: string | null;
@@ -116,7 +122,7 @@ export async function writeRunState(workspacePath: string, runState: RunState): 
   const runPath = getRunStatePath(workspacePath);
   const tmpPath = `${runPath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await fs.writeFile(tmpPath, `${JSON.stringify(runState, null, 2)}\n`, 'utf8');
+    await fs.writeFile(tmpPath, `${JSON.stringify(runState, null, 2)}\n`, {encoding:'utf8',mode:0o600});
     await fs.rename(tmpPath, runPath);
     if (runState.session_artifact_dir) {
       const manifestPath = path.join(runState.session_artifact_dir, 'manifest.json');

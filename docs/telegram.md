@@ -90,3 +90,7 @@ Brief cursors and pending activity persist in the private Telegram state. Sympho
 Override the schedule with `--brief-hour 9 --brief-timezone America/Toronto` on the `telegram` command. The hour must be 0–23 and the time zone a valid IANA zone. This schedule runs inside the existing Telegram bridge; keep that service running.
 
 Successful replies that are saved on GitHub and requeued receive a 👍 reaction on your reply instead of a new acknowledgment message. Replies that cannot resume a task still receive the explanation, and follow-ups to an active worker still explain that the instruction has not reached the running agent yet. A failed reaction does not undo or repeat the successful resume.
+
+## Scheduled loop questions and outcomes
+
+Scheduled invocations appear as `<repo>#loop:<id>` in `/status` and `/questions`. A loop can pause with `SYMPHONY_PAUSE`; answer its Telegram message to queue the same invocation with your reply included in its next prompt. Successful resumes receive the same 👍 acknowledgment. Replies are stored privately on the Symphony host because a scheduled loop has no backing GitHub issue. Old questions cannot resume a newer session, and disabled loops cannot be requeued. Agent failures and setup failures retry with separate bounded budgets; exhausted failures ask for intervention. Ordinary retries stay silent and appear in the daily brief alongside loop completions, failures, questions and linked follow-ups.

@@ -71,7 +71,7 @@ export async function loadBridgeState(file: string): Promise<BridgeState> {
       || !/^\d{4}-\d{2}-\d{2}$/.test(state.notifications.lastBriefDate)
       || Object.values(state.notifications.cursors).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0)
       || Object.values(state.notifications.pending).some(activity => !activity || typeof activity.repo !== 'string' || typeof activity.key !== 'string'
-        || !['completed','merged','failed','cancelled','paused','followup','notice','retrying'].includes(activity.kind)
+        || !['completed','merged','failed','cancelled','paused','followup','notice','retrying','loop_completed','loop_failed','loop_paused','loop_retrying'].includes(activity.kind)
         || (activity.url !== undefined && typeof activity.url !== 'string')))) throw new Error('Invalid Telegram notification state');
     if (state.intakes !== undefined && (!state.intakes || Array.isArray(state.intakes) || typeof state.intakes !== 'object' ||
         Object.values(state.intakes).some(record => !record || typeof record.repoId !== 'string' ||
@@ -169,7 +169,7 @@ export class TelegramBridge {
         this.state.seen[actionKey] = actionFingerprint!;
       } else if (!action && ['agent-running','completed'].includes(task.state.status) && !task.state.preparation_incomplete) delete this.state.seen[actionKey];
       if (['preparing','agent-running','completed'].includes(task.state.status)) {
-        for (const kind of ['failed','paused','retrying']) delete notificationState.pending[`${repoFor(task.key)}:${kind}:${task.key}`];
+        for (const kind of ['failed','paused','retrying','loop_failed','loop_paused','loop_retrying']) delete notificationState.pending[`${repoFor(task.key)}:${kind}:${task.key}`];
       }
       this.state.seen[task.key] = fingerprint;
       await this.persist();
@@ -179,7 +179,7 @@ export class TelegramBridge {
       notificationState.cursors[batch.repo] = batch.cursor;
     }
     for (const task of tasks) if (['preparing','agent-running','completed'].includes(task.state.status)) {
-      for (const kind of ['failed','paused','retrying']) delete notificationState.pending[`${repoFor(task.key)}:${kind}:${task.key}`];
+      for (const kind of ['failed','paused','retrying','loop_failed','loop_paused','loop_retrying']) delete notificationState.pending[`${repoFor(task.key)}:${kind}:${task.key}`];
     }
     // Catch up once after a missed morning, using the Toronto calendar (including DST).
     if (schedule.date > notificationState.lastBriefDate && schedule.hour >= (this.notifications.hour ?? 9)) {
@@ -409,7 +409,7 @@ export class TelegramBridge {
     if (busy(task)) {
       this.state.pending[task.key] = { commentId };
       await this.persist();
-      await this.api.send('Saved on GitHub. The agent is running; I will queue your follow-up when this run finishes. It has not received this instruction yet.');
+      await this.api.send(`${task.state.loop_id ? 'Saved locally for this scheduled loop.' : 'Saved on GitHub.'} The agent is running; I will queue your follow-up when this run finishes. It has not received this instruction yet.`);
       return target;
     }
     const resumed = await this.backend.resume(task);
@@ -417,7 +417,7 @@ export class TelegramBridge {
       // A cosmetic acknowledgment failure must not replay the GitHub write or resume.
       if (messageId !== undefined) await this.api.react?.(messageId).catch(() => {});
     } else {
-      await this.api.send('Saved on GitHub. This task needs manual attention before it can resume (for example, it is closed, blocked, or an interactive handoff).');
+      await this.api.send(task.state.loop_id ? 'Saved locally. This scheduled loop cannot resume; check whether it is enabled and still waiting for input.' : 'Saved on GitHub. This task needs manual attention before it can resume (for example, it is closed, blocked, or an interactive handoff).');
     }
     return target;
   }

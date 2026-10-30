@@ -70,7 +70,9 @@ Issue prompt.
   }
 
   assert.equal((await fs.readFile(marker, 'utf8')).trim(), 'run');
-  assert.equal(await fs.readFile(observedLastMessagePath, 'utf8'), expectedLastMessagePath);
+  const retainedMessage = await fs.readFile(observedLastMessagePath,'utf8');
+  assert.ok(retainedMessage.startsWith(path.join(loopWorkspace,'.symphony','runs')));
+  assert.equal((await fs.readFile(retainedMessage,'utf8')).trim(),'done');
   assert.equal((await fs.readFile(expectedLastMessagePath, 'utf8')).trim(), 'done');
 });
 
