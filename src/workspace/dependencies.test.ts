@@ -19,7 +19,8 @@ test('dependency reuse is invalidated by manifests, toolchain inputs, missing mo
   await fs.writeFile(path.join(bin, 'npm'), '#!/bin/sh\nif [ "$1" = --version ]; then echo 10; exit 0; fi\necho install >> installs\n[ "$FAIL_INSTALL" = 1 ] && exit 1\nmkdir -p node_modules\ntouch node_modules/.package-lock.json\n', { mode: 0o755 });
   const run = (env: Record<string, string> = {}) => exec(process.execPath, [dependencyHelperPath(), '--', 'npm', 'ci'], { cwd: root, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ...env } });
   const count = async () => (await fs.readFile(path.join(root, 'installs'), 'utf8')).trim().split('\n').length;
-  await run(); await run(); assert.equal(await count(), 1);
+  assert.match((await run()).stdout, /cold workspace/);
+  assert.match((await run()).stdout, /Reusing dependencies/); assert.equal(await count(), 1);
   await fs.writeFile(path.join(root, 'package.json'), '{"name":"fixture","scripts":{"postinstall":"echo changed"}}');
   await run(); assert.equal(await count(), 2);
   await fs.rm(path.join(root, 'node_modules'), { recursive: true });

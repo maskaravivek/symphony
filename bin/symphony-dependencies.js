@@ -37,6 +37,9 @@ const integrity = await fs.readFile(integrityFile).then(bytes => createHash('sha
 if (process.env.SYMPHONY_FORCE_INSTALL !== '1' && previous?.fingerprint === fingerprint && modules?.isDirectory() && integrity && previous.integrity === integrity) {
   console.log('Reusing dependencies: manifests, lockfiles, install scripts, toolchain and install mode are unchanged.');
 } else {
+  const reason = process.env.SYMPHONY_FORCE_INSTALL === '1' ? 'forced' : !modules?.isDirectory() ? 'cold workspace (node_modules missing)' : !previous ? 'install stamp missing' : previous.fingerprint !== fingerprint ? 'dependency inputs or toolchain changed' : 'integrity marker changed or missing';
+  console.log(`Installing dependencies: ${reason}.`);
+  const startedAt = Date.now();
   await fs.mkdir(directory, { recursive: true });
   // Invalidate before installing: a failed install must never leave a valid old stamp.
   await fs.rm(stamp, { force: true });
@@ -50,4 +53,5 @@ if (process.env.SYMPHONY_FORCE_INSTALL !== '1' && previous?.fingerprint === fing
   const installedIntegrity = await fs.readFile(integrityFile).then(bytes => createHash('sha256').update(bytes).digest('hex'), () => null);
   await fs.writeFile(temporary, JSON.stringify({ fingerprint, integrity: installedIntegrity }), { mode: 0o600 });
   await fs.rename(temporary, stamp);
+  console.log(`Dependency installation completed in ${((Date.now() - startedAt) / 1000).toFixed(1)}s; matching subsequent runs reuse this workspace.`);
 }
