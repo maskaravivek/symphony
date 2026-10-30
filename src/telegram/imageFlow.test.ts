@@ -8,6 +8,7 @@ import { MAX_IMAGE_BYTES } from './media.js';
 function fixture() {
   const state: BridgeState = { offset: 0, seen: {}, messages: {}, pending: {} };
   const sent: string[] = [], downloads: string[] = [], resumes: string[] = [];
+  const reactions: number[] = [];
   const stored = new Map<string, string>(), comments = new Map<string, string>();
   const created: Array<{ repo: string; text: string; images?: string }> = [];
   const tasks: BridgeTask[] = [];
@@ -32,6 +33,7 @@ function fixture() {
     resume: async task => { resumes.push(task.key); return true; },
   };
   const api: TelegramApi = {
+    react: async id => {reactions.push(id);},
     updates: async () => [], send: async text => { if (sendFailure) throw new Error('send failed'); sent.push(text); return 1000 + sent.length; },
     downloadImage: async id => { downloads.push(id); return { bytes: Buffer.from([0xff, 0xd8, 0xff]), extension: 'jpg' }; },
   };
@@ -41,7 +43,7 @@ function fixture() {
     photo: [{ file_id: `file${id}`, file_unique_id: `unique${id}`, width: 500, height: 500 }],
     reply_to_message: replyId ? { message_id: replyId } : undefined, media_group_id: group,
   } });
-  return { state, sent, downloads, stored, comments, created, tasks, resumes, update, bridge: bridgeFor(state), bridgeFor,
+  return { state, sent, reactions, downloads, stored, comments, created, tasks, resumes, update, bridge: bridgeFor(state), bridgeFor,
     restored: () => JSON.parse(durable) as BridgeState,
     uploadFailure: (value: boolean) => { uploadFailure = value; }, sendFailure: (value: boolean) => { sendFailure = value; } };
 }
@@ -131,6 +133,7 @@ test('image replies to running tasks are deferred and paused questions resume th
   await f.bridge.receive(f.update(2, 'This is the target design', 98));
   assert.equal(f.comments.size, 2);
   assert.deepEqual(f.resumes, ['pdfkit.app#42']);
+  assert.deepEqual(f.reactions, [2]);
 });
 
 

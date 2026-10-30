@@ -126,3 +126,11 @@ test('daily activity reads durable events after cleanup and resumes an exact seq
   assert.equal((await backend.tasks()).length,0,'No workspace is needed for durable completion activity');
   assert.equal((await backend.activity!({default:batch!.cursor}))[0]!.activities.length,0);
 });
+
+
+test('Telegram acknowledgments set a normal thumbs-up reaction on the user message',async()=>{
+ const originalFetch=globalThis.fetch;let method='',body:unknown;
+ globalThis.fetch=async(input,init)=>{method=String(input).split('/').at(-1)!;body=JSON.parse(String(init?.body));return Response.json({ok:true,result:true});};
+ try{await new TelegramBotApi('123:private-secret',456).react(789);}finally{globalThis.fetch=originalFetch;}
+ assert.equal(method,'setMessageReaction');assert.deepEqual(body,{chat_id:456,message_id:789,reaction:[{type:'emoji',emoji:'👍'}],is_big:false});
+});

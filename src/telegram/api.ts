@@ -21,6 +21,7 @@ export interface TelegramApi {
   downloadImage?(fileId: string): Promise<DownloadedImage>;
   updates(offset: number): Promise<TelegramUpdate[]>;
   send(text: string): Promise<number>;
+  react?(messageId: number): Promise<void>;
 }
 
 export class TelegramBotApi implements TelegramApi {
@@ -85,6 +86,15 @@ export class TelegramBotApi implements TelegramApi {
 
   async updates(offset: number): Promise<TelegramUpdate[]> {
     return this.call('getUpdates', { offset, timeout: 30, allowed_updates: ['message'] });
+  }
+
+  async react(messageId: number): Promise<void> {
+    await this.call<boolean>('setMessageReaction', {
+      chat_id: this.chatId,
+      message_id: messageId,
+      reaction: [{ type: 'emoji', emoji: '👍' }],
+      is_big: false,
+    });
   }
 
   async send(text: string): Promise<number> {

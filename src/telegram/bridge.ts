@@ -221,7 +221,7 @@ export class TelegramBridge {
             updateId: update.update_id, text: '', messageIds: [], images: [], updatedAt: Date.now(),
           };
           if (group.target) {
-            await this.handleReply(text || 'Additional image context.', group.messageIds[0], update.update_id, [image]);
+            await this.handleReply(text || 'Additional image context.', group.messageIds[0], update.update_id, [image], message.message_id);
           } else if (!group.messageIds.includes(message.message_id)) {
             if (group.images.length >= 10) throw new TelegramMediaError('Send at most 10 images per album.');
             group.messageIds.push(message.message_id);
@@ -231,9 +231,9 @@ export class TelegramBridge {
             group.updatedAt = Date.now();
           }
         } else if (image) {
-          const target = await this.handleMedia(text, message.reply_to_message?.message_id, update.update_id, [image]);
+          const target = await this.handleMedia(text, message.reply_to_message?.message_id, update.update_id, [image], message.message_id);
           if (target) this.state.messages[String(message.message_id)] = target;
-        } else if (text) await this.handleText(text, message.reply_to_message?.message_id, update.update_id);
+        } else if (text) await this.handleText(text, message.reply_to_message?.message_id, update.update_id, message.message_id);
       } catch (error) {
         if (!(error instanceof TelegramMediaError)) throw error;
         await this.api.send(error.message);
@@ -248,7 +248,7 @@ export class TelegramBridge {
     for (const [id, group] of Object.entries(this.state.mediaGroups ?? {})) {
       if (group.target || Date.now() - group.updatedAt < 2000) continue;
       try {
-        const target = await this.handleMedia(group.text, group.replyId, group.updateId, group.images);
+        const target = await this.handleMedia(group.text, group.replyId, group.updateId, group.images, group.messageIds[0]);
         if (target) {
           group.target = target;
           for (const messageId of group.messageIds) this.state.messages[String(messageId)] = target;
@@ -263,9 +263,9 @@ export class TelegramBridge {
     }
   }
 
-  private async handleMedia(text: string, replyId: number | undefined, updateId: number, images: TelegramImage[]): Promise<Target | undefined> {
+  private async handleMedia(text: string, replyId: number | undefined, updateId: number, images: TelegramImage[], messageId?: number): Promise<Target | undefined> {
     if (/^\/new(?:@\w+)?(?:\s|$)/.test(text)) return this.intake(text, updateId, images);
-    return this.handleReply(text || 'Image context supplied through Telegram.', replyId, updateId, images);
+    return this.handleReply(text || 'Image context supplied through Telegram.', replyId, updateId, images, messageId);
   }
 
   private async imageMarkdown(repoId: string, updateId: number, images: TelegramImage[]): Promise<string> {
@@ -335,7 +335,7 @@ export class TelegramBridge {
     return target;
   }
 
-  private async handleText(text: string, replyId: number | undefined, updateId: number): Promise<void> {
+  private async handleText(text: string, replyId: number | undefined, updateId: number, messageId?: number): Promise<void> {
     if (/^\/repos(?:@\w+)?$/.test(text)) {
       const repos = await this.backend.repositories?.() ?? [];
       await this.api.send(repos.map(repo => `${repo.id}: ${repo.repository}${repo.aliases?.length ? ` (aliases: ${repo.aliases.join(", ")})` : ''}`).join('\n') || 'No repositories configured for intake.');
@@ -376,10 +376,10 @@ export class TelegramBridge {
       if (!questions.length) await this.api.send('No tasks waiting for input.');
       return;
     }
-    await this.handleReply(text, replyId, updateId);
+    await this.handleReply(text, replyId, updateId, [], messageId);
   }
 
-  private async handleReply(text: string, replyId: number | undefined, updateId: number, images: TelegramImage[] = []): Promise<Target | undefined> {
+  private async handleReply(text: string, replyId: number | undefined, updateId: number, images: TelegramImage[] = [], messageId?: number): Promise<Target | undefined> {
     const tasks = await this.backend.tasks();
     const target = replyId === undefined ? undefined : this.state.messages[String(replyId)];
     const task = target && tasks.find((entry) => entry.key === target.key);
@@ -413,7 +413,12 @@ export class TelegramBridge {
       return target;
     }
     const resumed = await this.backend.resume(task);
-    await this.api.send(resumed ? 'Saved on GitHub and queued for Symphony to resume.' : 'Saved on GitHub. This task needs manual attention before it can resume (for example, it is closed, blocked, or an interactive handoff).');
+    if (resumed) {
+      // A cosmetic acknowledgment failure must not replay the GitHub write or resume.
+      if (messageId !== undefined) await this.api.react?.(messageId).catch(() => {});
+    } else {
+      await this.api.send('Saved on GitHub. This task needs manual attention before it can resume (for example, it is closed, blocked, or an interactive handoff).');
+    }
     return target;
   }
 }

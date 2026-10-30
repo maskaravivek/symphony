@@ -20,9 +20,10 @@ function fixture(tasks = [task()], now = () => new Date('2026-10-28T12:00:00Z'))
   const sent: string[] = [];
   const comments = new Map<string, string>();
   const resumed: string[] = [];
+  const reactions: number[] = [];
   const state: BridgeState = { offset: 0, seen: {}, messages: {}, pending: {} };
   let saves = 0;
-  const bridge = new TelegramBridge({ updates: async () => [], send: async (text) => { sent.push(text); return sent.length; } }, {
+  const bridge = new TelegramBridge({ updates: async () => [], react: async id => {reactions.push(id);}, send: async (text) => { sent.push(text); return sent.length; } }, {
     tasks: async () => tasks,
     comment: async (entry, marker, text) => { comments.set(`${entry.key}:${marker}`, text); return 100; },
     resume: async (entry) => { resumed.push(entry.key); return true; },
@@ -30,7 +31,7 @@ function fixture(tasks = [task()], now = () => new Date('2026-10-28T12:00:00Z'))
   const reply = (id: number, replyId = 1): TelegramUpdate => ({ update_id: id, message: {
     message_id: 99, chat: { id: 123, type: 'private' }, from: { id: 456 }, text: 'Yes, include tablets.', reply_to_message: { message_id: replyId },
   } });
-  return { bridge, state, sent, comments, resumed, reply, tasks, saves: () => saves };
+  return { bridge, state, sent, comments, resumed, reactions, reply, tasks, saves: () => saves };
 }
 
 test('existing questions notify; a reply records context and resumes the exact repository', async () => {
@@ -45,7 +46,8 @@ test('existing questions notify; a reply records context and resumes the exact r
   await f.bridge.receive(f.reply(40, 2));
   assert.equal(f.resumed.length, 1);
   await f.bridge.notify();
-  assert.equal(f.sent.length, 3);
+  assert.equal(f.sent.length, 2);
+  assert.deepEqual(f.reactions, [99]);
 });
 
 test('unauthorized user, chat, group and bot cannot write or resume', async () => {
@@ -369,4 +371,32 @@ test('a new fast failure alerts even when first observed after its worker exits'
  let now=new Date('2026-10-28T12:00:00Z');const f=fixture([],()=>now);await f.bridge.notify();
  now=new Date('2026-10-28T12:05:00Z');const entry=task();Object.assign(entry.state,{status:'failed',pause_reason:null,updated_at:now.toISOString()});
  f.tasks.push(entry);await f.bridge.notify();assert.equal(f.sent.length,1);assert.match(f.sent[0]!,/stopped after automatic retries/);
+});
+
+
+test('successful replies react to the incoming message, while unauthorized and stale replies do not',async()=>{
+ const f=fixture();await f.bridge.notify();const reply=f.reply(501);reply.message!.message_id=987;
+ await f.bridge.receive(reply);await f.bridge.receive(reply);
+ assert.deepEqual(f.reactions,[987]);assert.equal(f.sent.length,1);assert.equal(f.resumed.length,1);
+ const unauthorized=f.reply(502);unauthorized.message!.from!.id=777;await f.bridge.receive(unauthorized);
+ f.tasks[0]!.state.session_id='new-session';await f.bridge.receive(f.reply(503));
+ assert.deepEqual(f.reactions,[987]);
+});
+
+test('reaction failures do not replay a successful resume or leave the update unacknowledged',async()=>{
+ const entry=task();let comments=0,resumes=0,reactions=0;
+ const state:BridgeState={offset:0,seen:{},messages:{'1':{key:entry.key,session:entry.state.session_id,question:true}},pending:{}};
+ const b=new TelegramBridge({send:async()=>1,updates:async()=>[],react:async()=>{reactions++;throw new Error('Telegram unavailable');}},
+ {tasks:async()=>[entry],comment:async()=>{comments++;return 100;},resume:async()=>{resumes++;return true;}},state,{chatId:123,userId:456},async()=>{});
+ const reply=fixture().reply(504);await b.receive(reply);await b.receive(reply);
+ assert.equal(state.offset,505);assert.equal(comments,1);assert.equal(resumes,1);assert.equal(reactions,1);
+});
+
+
+test('a reply that cannot resume keeps its explanation and receives no success reaction',async()=>{
+ const entry=task(),sent:string[]=[],reactions:number[]=[];
+ const state:BridgeState={offset:0,seen:{},messages:{'1':{key:entry.key,session:entry.state.session_id,question:true}},pending:{}};
+ const b=new TelegramBridge({send:async text=>{sent.push(text);return 2;},updates:async()=>[],react:async id=>{reactions.push(id);}},
+ {tasks:async()=>[entry],comment:async()=>100,resume:async()=>false},state,{chatId:123,userId:456},async()=>{});
+ await b.receive(fixture().reply(505));assert.equal(sent.length,1);assert.match(sent[0]!,/needs manual attention/);assert.deepEqual(reactions,[]);
 });
