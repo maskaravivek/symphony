@@ -24,7 +24,9 @@ const cwd = process.cwd();
 const managerVersion = execFileSync(command, ['--version'], { encoding: 'utf8' }).trim();
 const root = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
 const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).split('\0').filter(name =>
-  /(^|\/)(package.json|yarn.lock|package-lock.json|npm-shrinkwrap.json|\.npmrc|\.yarnrc|\.yarnrc.yml)$/.test(name) || /(^|\/)(scripts|\.yarn)\//.test(name));
+  // Symphony's native validation wrapper is never an installation input.
+  name !== 'scripts/symphony-native-check.mjs' && (
+    /(^|\/)(package.json|yarn.lock|package-lock.json|npm-shrinkwrap.json|\.npmrc|\.yarnrc|\.yarnrc.yml)$/.test(name) || /(^|\/)(scripts|\.yarn)\//.test(name)));
 const hash = createHash('sha256').update(JSON.stringify({ args, node: process.version, platform: process.platform, arch: process.arch,
   manager: managerVersion, cwd: path.relative(root, cwd), nodeEnv: process.env.NODE_ENV ?? '', installEnv: Object.fromEntries(['npm_config_omit', 'npm_config_production', 'npm_config_ignore_scripts', 'YARN_PRODUCTION', 'npm_config_arch', 'npm_config_platform'].map(key => [key, process.env[key] ?? ''])) }));
 for (const file of files.sort()) { hash.update(file); hash.update(await fs.readFile(path.join(root, file)).catch(() => Buffer.from('<missing>'))); }

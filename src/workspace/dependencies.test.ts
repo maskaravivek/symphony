@@ -21,6 +21,10 @@ test('dependency reuse is invalidated by manifests, toolchain inputs, missing mo
   const count = async () => (await fs.readFile(path.join(root, 'installs'), 'utf8')).trim().split('\n').length;
   assert.match((await run()).stdout, /cold workspace/);
   assert.match((await run()).stdout, /Reusing dependencies/); assert.equal(await count(), 1);
+  await fs.mkdir(path.join(root, 'scripts'));
+  await fs.writeFile(path.join(root, 'scripts/symphony-native-check.mjs'), '// validation-only helper');
+  assert.match((await run()).stdout, /Reusing dependencies/);
+  assert.equal(await count(), 1, 'Native validation policy changes must not reinstall dependencies');
   await fs.writeFile(path.join(root, 'package.json'), '{"name":"fixture","scripts":{"postinstall":"echo changed"}}');
   await run(); assert.equal(await count(), 2);
   await fs.rm(path.join(root, 'node_modules'), { recursive: true });
