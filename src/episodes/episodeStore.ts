@@ -18,6 +18,7 @@ export interface EpisodeEvent extends Required<EpisodeEventInput> {
 }
 
 export interface EpisodeEventFilter {
+  after_sequence?: number;
   repo_id?: string;
   episode_id?: string;
   event?: string;
@@ -172,6 +173,10 @@ export class EpisodeStore {
       clauses.push('event = ?');
       values.push(filter.event);
     }
+    if (filter.after_sequence !== undefined) {
+      clauses.push('sequence > ?');
+      values.push(filter.after_sequence);
+    }
     const limit = Math.max(1, Math.min(filter.limit ?? 500, 5_000));
     values.push(limit);
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
@@ -195,7 +200,7 @@ export class EpisodeStore {
 
   latest(filter: Omit<EpisodeEventFilter, 'limit'> = {}): EpisodeEvent | null {
     const clauses: string[] = [];
-    const values: string[] = [];
+    const values: Array<string | number> = [];
     if (filter.repo_id) {
       clauses.push('repo_id = ?');
       values.push(filter.repo_id);
@@ -207,6 +212,10 @@ export class EpisodeStore {
     if (filter.event) {
       clauses.push('event = ?');
       values.push(filter.event);
+    }
+    if (filter.after_sequence !== undefined) {
+      clauses.push('sequence > ?');
+      values.push(filter.after_sequence);
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
     const row = this.database

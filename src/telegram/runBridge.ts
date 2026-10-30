@@ -1,3 +1,5 @@
+import { EpisodeStore } from '../episodes/episodeStore.js';
+import type { ActivityBatch, Activity } from './notifications.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { GithubIssueTrackerClient } from '../github/githubClient.js';
@@ -21,6 +23,8 @@ export interface TelegramBridgeOptions {
   chatId?: string;
   userId?: string;
   stateDir: string;
+  briefHour?: string;
+  briefTimezone?: string;
 }
 
 function telegramId(raw: string, name: string): number {
@@ -49,6 +53,41 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
     return entry;
   }
   return {
+    async activity(cursors) {
+      return Promise.all(entries.map(async entry => {
+        const batch: ActivityBatch = {repo:entry.id,cursor:cursors[entry.id] ?? 0,activities:[]};
+        const file = path.join(entry.config.workspace.root,'.symphony','episodes.sqlite');
+        if (!(await fs.access(file).then(() => true, () => false))) return batch;
+        const store = new EpisodeStore(file);
+        try {
+          const repoIds = [entry.id,`${entry.config.tracker.owner}/${entry.config.tracker.repo}`];
+          // Old single-workflow installations use owner/repo while the multi-repo server uses id.
+          const events = store.list({after_sequence:batch.cursor,limit:1000});
+          if (cursors[entry.id] === undefined) {
+            batch.cursor = store.latest()?.sequence ?? 0;
+            return batch; // Baseline existing history when enabling briefs; never replay old notifications.
+          }
+          for (const event of events) {
+            batch.cursor = event.sequence;
+            if (!repoIds.includes(event.repo_id)) continue;
+            const payload = event.payload;
+            const number = event.event === 'merge.merged' ? payload.pr_number : payload.issue_number;
+            const kind: Activity['kind'] | null = event.event === 'merge.merged' ? 'merged'
+              : event.event === 'workflow.completed' ? 'completed' : event.event === 'workflow.failed' ? 'failed'
+              : event.event === 'workflow.paused' ? 'paused' : null;
+            if (!kind || typeof number !== 'number') continue;
+            batch.activities.push({repo:entry.id,key:`${entry.id}#${number}`,kind,
+              url:`https://github.com/${entry.config.tracker.owner}/${entry.config.tracker.repo}/${kind === 'merged' ? 'pull' : 'issues'}/${number}`});
+            if (kind === 'completed' && Array.isArray(payload.followup_urls)) {
+              for (const url of payload.followup_urls) if (typeof url === 'string' && /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/\d+$/.test(url)) {
+                batch.activities.push({repo:entry.id,key:url,kind:'followup',url});
+              }
+            }
+          }
+          return batch;
+        } finally {store.close();}
+      }));
+    },
     async repositories() {
       return entries.map(entry => ({ id: entry.id, repository: `${entry.config.tracker.owner}/${entry.config.tracker.repo}`, aliases: intakeAliases(entry.config.tracker.repo) }));
     },
@@ -150,7 +189,7 @@ export async function runTelegramBridge(options: TelegramBridgeOptions): Promise
     const state = await loadBridgeState(statePath);
     const backend = await createBridgeBackend({ ...options, attachmentConfig: options.attachmentConfig ?? path.join(stateDir, 'attachments.json') });
     const api = new TelegramBotApi(token, chatId);
-    const bridge = new TelegramBridge(api, backend, state, { chatId, userId }, () => saveBridgeState(statePath, state), identity);
+    const bridge = new TelegramBridge(api, backend, state, { chatId, userId }, () => saveBridgeState(statePath, state), identity, {hour:Number(options.briefHour ?? 9),timeZone:options.briefTimezone ?? 'America/Toronto'});
     console.log('Telegram bridge started. Only the configured private chat and user are authorized.');
     while (!stopped) {
       try {

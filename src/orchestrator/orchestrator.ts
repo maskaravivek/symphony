@@ -3209,7 +3209,8 @@ export class Orchestrator {
               : isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
           );
           await updateRunState(workspacePath, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
-          this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id });
+          this.appendEpisodeEvent(config, episodeId, 'workflow.completed', { issue_number: issue.number, session_id: agent.session_id,
+            followup_urls: await this.completedFollowupLinks(lastMessagePath) });
           return;
         }
 
@@ -4407,6 +4408,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
     await this.completeWorkflowState(state.workspace_path);
     this.appendEpisodeEvent(config, `pr-${review.pr_number}`, 'workflow.completed', {
       issue_number:issue.number, session_id:state.session_id, outcome:'followup-only',
+      followup_urls: await this.completedFollowupLinks(state.last_message_path),
     });
   }
 
@@ -4822,6 +4824,11 @@ ${runContext}`;
       lastMessage || `The planning agent completed successfully, but no final message was captured. Review the workspace artifacts in \`${workspacePath}\`.`,
     ].join('\n');
     await new GithubIssueTrackerClient(config.tracker).upsertStatusComment(issue.number, marker, body);
+  }
+
+  private async completedFollowupLinks(file: string | null): Promise<string[]> {
+    const message = await this.readLastMessage(file ?? '');
+    return /follow.up/i.test(message) ? [...new Set(message.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/issues\/\d+/g) ?? [])] : [];
   }
 
   private async readLastMessage(lastMessagePath: string): Promise<string> {

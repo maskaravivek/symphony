@@ -1,8 +1,8 @@
+import { requiredAction, questionText, short, repoFor, taskActivities, recordActivity, formatBrief, localSchedule, type ActivityBatch, type NotificationState, type NotificationOptions } from './notifications.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { RunState } from '../status/runState.js';
-import { parsePauseRequest, formatPauseComment } from '../orchestrator/pauseProtocol.js';
 import { resolveIntake, type IntakeRepository } from './intakeRouting.js';
 import { messageImage, MAX_IMAGE_BYTES, TelegramMediaError, type TelegramImage, type DownloadedImage } from './media.js';
 import type { TelegramApi, TelegramUpdate } from './api.js';
@@ -30,6 +30,7 @@ export interface BridgeBackend {
   storeImage?(repoId: string, key: string, image: DownloadedImage): Promise<string>;
   capturedComment?(repoId: string, number: number, marker: string, text: string): Promise<number>;
   tasks(): Promise<BridgeTask[]>;
+  activity?(cursors: Record<string, number>): Promise<ActivityBatch[]>;
   storageAlerts?(): Promise<Array<{ key: string; blocked: boolean; minimum_free_gib: number }>>;
   // Must be idempotent by marker. Never pass arbitrary Telegram text to a shell.
   comment(task: BridgeTask, marker: string, text: string): Promise<number>;
@@ -48,6 +49,7 @@ interface MediaGroup {
   target?: Target;
 }
 export interface BridgeState {
+  notifications?: NotificationState;
   mediaGroups?: Record<string, MediaGroup>;
   intakes?: Record<string, IntakeRecord>;
   offset: number;
@@ -62,6 +64,15 @@ export async function loadBridgeState(file: string): Promise<BridgeState> {
     if (!Number.isSafeInteger(state.offset) || !state.seen || !state.messages || !state.pending) {
       throw new Error('Invalid Telegram bridge state');
     }
+    if (state.notifications !== undefined && (!state.notifications || typeof state.notifications !== 'object'
+      || !state.notifications.cursors || Array.isArray(state.notifications.cursors) || !state.notifications.pending || Array.isArray(state.notifications.pending) || typeof state.notifications.lastBriefDate !== 'string'
+      || (state.notifications.observed !== undefined && (!state.notifications.observed || Array.isArray(state.notifications.observed)
+        || Object.values(state.notifications.observed).some(value => typeof value !== 'string' || !Number.isFinite(Date.parse(value)))))
+      || !/^\d{4}-\d{2}-\d{2}$/.test(state.notifications.lastBriefDate)
+      || Object.values(state.notifications.cursors).some(cursor => !Number.isSafeInteger(cursor) || cursor < 0)
+      || Object.values(state.notifications.pending).some(activity => !activity || typeof activity.repo !== 'string' || typeof activity.key !== 'string'
+        || !['completed','merged','failed','cancelled','paused','followup','notice','retrying'].includes(activity.kind)
+        || (activity.url !== undefined && typeof activity.url !== 'string')))) throw new Error('Invalid Telegram notification state');
     if (state.intakes !== undefined && (!state.intakes || Array.isArray(state.intakes) || typeof state.intakes !== 'object' ||
         Object.values(state.intakes).some(record => !record || typeof record.repoId !== 'string' ||
           (record.stage !== undefined && !['prepared', 'posting'].includes(record.stage)) ||
@@ -110,57 +121,75 @@ export class TelegramBridge {
     private authorized: { chatId: number; userId: number },
     private persist: () => Promise<void>,
     private namespace = 'telegram',
-  ) {}
+    private notifications: NotificationOptions = {},
+  ) {
+    if (!Number.isInteger(notifications.hour ?? 9) || (notifications.hour ?? 9) < 0 || (notifications.hour ?? 9) > 23) throw new Error('Daily brief hour must be between 0 and 23');
+    localSchedule(new Date(), notifications.timeZone); // Validate configuration before the polling loop starts.
+  }
 
   private async taskMessage(task: BridgeTask, text: string, question = false): Promise<void> {
-    const id = await this.api.send(`${task.key}: ${task.state.issue_title ?? task.state.issue_identifier}\n${task.state.issue_url ?? ''}\n\n${text}`);
+    const id = await this.api.send(`${short(task.key, 80)}: ${short(task.state.issue_title ?? task.state.issue_identifier, 100)}\n${task.state.issue_url ?? ''}\n\n${text}`);
     this.state.messages[String(id)] = { key: task.key, session: task.state.session_id, question };
   }
 
   async notify(): Promise<void> {
     await this.flushMediaGroups();
-    for (const alert of await this.backend.storageAlerts?.() ?? []) {
-      const key = `$storage:${alert.key}`;
-      const fingerprint = `${alert.blocked}:${alert.minimum_free_gib}`;
-      if (this.state.seen[key] === fingerprint) continue;
-      if (alert.blocked || this.state.seen[key]?.startsWith('true:')) {
-        await this.api.send(`${alert.key}: ${alert.blocked
-          ? `New Symphony work is paused: free disk space is below ${alert.minimum_free_gib} GiB or the workspace filesystem is unavailable. Active jobs continue. Free space to resume automatically.`
-          : 'Disk space has recovered. Symphony can dispatch new work again.'}`);
+    const schedule = localSchedule(this.notifications.now?.() ?? new Date(), this.notifications.timeZone);
+    const previousDay = new Date(`${schedule.date}T12:00:00Z`); previousDay.setUTCDate(previousDay.getUTCDate()-1);
+    const initializing = !this.state.notifications;
+    const notificationState = this.state.notifications ??= { cursors:{}, pending:{}, observed:{}, startedAt:(this.notifications.now?.() ?? new Date()).toISOString(),
+      lastBriefDate:schedule.hour >= (this.notifications.hour ?? 9) ? schedule.date : previousDay.toISOString().slice(0,10) };
+    const observed = notificationState.observed ??= {};
+    const storage = await this.backend.storageAlerts?.() ?? [];
+    const newlyBlocked = storage.filter(alert => alert.blocked && this.state.seen[`$storage:${alert.key}`] !== `${alert.blocked}:${alert.minimum_free_gib}`);
+    if (newlyBlocked.length) await this.api.send(`Storage needs attention (${newlyBlocked.map(a => short(a.key,40)).join(', ')}). Free disk space to resume new work; active jobs continue. Required minimum: ${Math.max(...newlyBlocked.map(a => a.minimum_free_gib))} GiB.`);
+    for (const alert of storage) {
+      const key = `$storage:${alert.key}`, fingerprint = `${alert.blocked}:${alert.minimum_free_gib}`;
+      if (this.state.seen[key] !== fingerprint && (alert.blocked || this.state.seen[key] !== undefined)) {
+        recordActivity(notificationState, {repo:alert.key,key:'storage',kind:'notice'});
       }
       this.state.seen[key] = fingerprint;
-      await this.persist();
     }
-    for (const task of await this.backend.tasks()) {
-      const setupKey = `$setup:${task.key}`;
-      if (task.state.status === 'retry-wait' && task.state.preparation_incomplete && (task.state.preparation_failure_count ?? 0) > 0) {
-        if (this.state.seen[setupKey] !== 'blocked') {
-          await this.taskMessage(task, `Setup is blocked; Symphony will retry automatically without consuming an implementation attempt.\n\n${(task.state.last_error ?? task.state.retry_reason ?? '').slice(0, 1800)}`);
-          this.state.seen[setupKey] = 'blocked';
-          await this.persist();
-        }
-      } else if (task.state.status === 'agent-running' && !task.state.preparation_incomplete && this.state.seen[setupKey] === 'blocked') {
-        await this.taskMessage(task, 'Setup recovered. The coding agent has started.');
-        delete this.state.seen[setupKey];
-        await this.persist();
-      }
+    const tasks = await this.backend.tasks();
+    for (const task of tasks) {
       const fingerprint = `${task.state.session_id}:${task.state.attempt}:${task.state.status}:${task.state.finished_at}`;
       const previous = this.state.seen[task.key];
-      if (previous === fingerprint) continue;
-      const question = task.state.status === 'paused' && task.state.pause_reason === 'needs-info';
-      // Baseline historical successes/failures on first observation; surface existing questions.
-      if (previous !== undefined || question) {
-        const pause = question ? parsePauseRequest(task.lastMessage) : null;
-        if (question) {
-          await this.taskMessage(task, `${pause ? formatPauseComment(pause) : 'The agent needs input. See the issue for its question.'}\n\nReply to this message to answer and resume.`, true);
-        } else if (['completed', 'failed', 'cancelled', 'paused'].includes(task.state.status)) {
-          const detail = task.state.status === 'completed' ? task.lastMessage : task.state.last_error;
-          await this.taskMessage(task, `${task.state.status}\n${(detail ?? '').slice(0, 2600)}\n\nReply with follow-up instructions. Interactive handoffs still need to be handled in Symphony.`);
-        }
+      const timestamp = task.state.updated_at ?? task.state.finished_at ?? '';
+      const previousTime = observed[task.key] ?? previous?.match(/:(?:completed|failed|cancelled|paused):(.+)$/)?.[1];
+      if (previousTime && timestamp && Date.parse(timestamp) < Date.parse(previousTime)) continue;
+      if (timestamp) observed[task.key] = timestamp;
+      const fresh = !initializing && notificationState.startedAt && timestamp && Date.parse(timestamp) >= Date.parse(notificationState.startedAt);
+      if (previous !== fingerprint && (previous !== undefined || fresh)) {
+        for (const activity of taskActivities(task)) recordActivity(notificationState, activity);
+      }
+      const action = requiredAction(task), actionKey = `$action:${task.key}`;
+      const actionFingerprint = action ? createHash('sha256').update(action.key).digest('hex') : null;
+      if (action && (previous !== undefined || fresh || task.state.status === 'paused' || task.state.status === 'retry-wait') && actionFingerprint !== this.state.seen[actionKey]) {
+        await this.taskMessage(task, action.text, action.question);
+        this.state.seen[actionKey] = actionFingerprint!;
+      } else if (!action && ['agent-running','completed'].includes(task.state.status) && !task.state.preparation_incomplete) delete this.state.seen[actionKey];
+      if (['preparing','agent-running','completed'].includes(task.state.status)) {
+        for (const kind of ['failed','paused','retrying']) delete notificationState.pending[`${repoFor(task.key)}:${kind}:${task.key}`];
       }
       this.state.seen[task.key] = fingerprint;
       await this.persist();
     }
+    for (const batch of await this.backend.activity?.(notificationState.cursors) ?? []) {
+      for (const activity of batch.activities) recordActivity(notificationState, activity);
+      notificationState.cursors[batch.repo] = batch.cursor;
+    }
+    for (const task of tasks) if (['preparing','agent-running','completed'].includes(task.state.status)) {
+      for (const kind of ['failed','paused','retrying']) delete notificationState.pending[`${repoFor(task.key)}:${kind}:${task.key}`];
+    }
+    // Catch up once after a missed morning, using the Toronto calendar (including DST).
+    if (schedule.date > notificationState.lastBriefDate && schedule.hour >= (this.notifications.hour ?? 9)) {
+      if (Object.keys(notificationState.pending).length) {
+        await this.api.send(formatBrief(Object.values(notificationState.pending), schedule.date));
+      }
+      notificationState.pending = {};
+      notificationState.lastBriefDate = schedule.date;
+    }
+    await this.persist();
     await this.flushPending();
   }
 
@@ -341,8 +370,7 @@ export class TelegramBridge {
     if (/^\/questions(?:@\w+)?$/.test(text)) {
       const questions = tasks.filter((task) => task.state.status === 'paused' && task.state.pause_reason === 'needs-info');
       for (const task of questions) {
-        const pause = parsePauseRequest(task.lastMessage);
-        await this.taskMessage(task, `${pause ? formatPauseComment(pause) : 'See the issue for the agent question.'}\n\nReply here to answer and resume.`, true);
+        await this.taskMessage(task, `${questionText(task)}`, true);
         await this.persist();
       }
       if (!questions.length) await this.api.send('No tasks waiting for input.');

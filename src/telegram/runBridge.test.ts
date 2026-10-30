@@ -105,3 +105,24 @@ test('Telegram transport redacts token-bearing network errors', async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test('daily activity reads durable events after cleanup and resumes an exact sequence cursor', async t => {
+  const {EpisodeStore}=await import('../episodes/episodeStore.js');
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'telegram-activity-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const workflow=path.join(root,'WORKFLOW.md'),workspace=path.join(root,'workspaces');
+  await fs.writeFile(workflow,`---\ntracker:\n  owner: example\n  repo: app\n  token: token\nworkspace:\n  root: ${workspace}\nagents:\n  providers:\n    codex:\n      command: echo unused\n---\nPrompt.\n`);
+  const store=new EpisodeStore(path.join(workspace,'.symphony','episodes.sqlite'));
+  t.after(()=>store.close());
+  store.append({repo_id:'example/app',episode_id:'old',event:'workflow.failed',payload:{issue_number:1}});
+  const backend=await createBridgeBackend({workflow});
+  const baseline=(await backend.activity!({}))[0]!;
+  assert.equal(baseline.activities.length,0);
+  store.append({repo_id:'example/app',episode_id:'new',event:'workflow.completed',payload:{issue_number:12,followup_urls:['https://github.com/example/app/issues/14']}});
+  store.append({repo_id:'example/app',episode_id:'merge',event:'merge.merged',payload:{pr_number:13}});
+  const [batch]=await backend.activity!({default:baseline.cursor});
+  assert.deepEqual(batch!.activities.map(a=>a.kind),['completed','followup','merged']);
+  assert.match(batch!.activities[2]!.url!,/pull\/13$/);
+  assert.equal((await backend.tasks()).length,0,'No workspace is needed for durable completion activity');
+  assert.equal((await backend.activity!({default:batch!.cursor}))[0]!.activities.length,0);
+});

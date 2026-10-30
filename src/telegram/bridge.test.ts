@@ -16,7 +16,7 @@ function task(key = 'repo#12'): BridgeTask {
   } as RunState, lastMessage: 'SYMPHONY_PAUSE\nreason: needs-info\nquestion: Include tablets?\noptions:\n- Yes\n- No\nEND_SYMPHONY_PAUSE' };
 }
 
-function fixture(tasks = [task()]) {
+function fixture(tasks = [task()], now = () => new Date('2026-10-28T12:00:00Z')) {
   const sent: string[] = [];
   const comments = new Map<string, string>();
   const resumed: string[] = [];
@@ -26,7 +26,7 @@ function fixture(tasks = [task()]) {
     tasks: async () => tasks,
     comment: async (entry, marker, text) => { comments.set(`${entry.key}:${marker}`, text); return 100; },
     resume: async (entry) => { resumed.push(entry.key); return true; },
-  }, state, { chatId: 123, userId: 456 }, async () => { saves += 1; });
+  }, state, { chatId: 123, userId: 456 }, async () => { saves += 1; }, 'telegram', {now});
   const reply = (id: number, replyId = 1): TelegramUpdate => ({ update_id: id, message: {
     message_id: 99, chat: { id: 123, type: 'private' }, from: { id: 456 }, text: 'Yes, include tablets.', reply_to_message: { message_id: replyId },
   } });
@@ -110,7 +110,7 @@ test('first observation baselines past outcomes and later transitions notify', a
   await f.bridge.notify();
   f.tasks[0]!.state.status = 'failed';
   await f.bridge.notify();
-  assert.match(f.sent[0]!, /failed/);
+  assert.match(f.sent[0]!, /stopped after automatic retries/);
 });
 
 test('durable state survives restart with private permissions; corrupt state fails closed', async () => {
@@ -139,7 +139,7 @@ test('failed side effects leave the update cursor unacknowledged for retry', asy
   assert.equal(state.offset, 0);
 });
 
-test('storage alerts notify on low space and recovery without repeating unchanged state', async () => {
+test('storage alerts notify only when action is needed; recovery is quiet', async () => {
   const sent: string[] = [];
   let blocked = true;
   const state: BridgeState = { offset: 0, seen: {}, messages: {}, pending: {} };
@@ -152,11 +152,11 @@ test('storage alerts notify on low space and recovery without repeating unchange
     backend, state, { chatId: 123, userId: 456 }, async () => {});
   await bridge.notify(); await bridge.notify();
   assert.equal(sent.length, 1);
-  assert.match(sent[0]!, /paused/);
+  assert.match(sent[0]!, /Storage needs attention/);
   blocked = false;
   await bridge.notify(); await bridge.notify();
-  assert.equal(sent.length, 2);
-  assert.match(sent[1]!, /recovered/);
+  assert.equal(sent.length, 1);
+  assert.ok(state.notifications?.pending['app:notice:storage']);
 });
 
 function intakeFixture(repositories: IntakeRepository[] = [{ id: 'taskdrop', repository: 'owner/taskdrop' }]) {
@@ -289,19 +289,84 @@ test('multiword aliases and substrings create in the resolved repo; ambiguous co
 });
 
 
-test('setup recovery alerts once across retries and clears when the agent starts', async () => {
+test('automatic setup retries and recovery remain silent', async () => {
   const entry = task();
   Object.assign(entry.state, {status:'retry-wait', pause_reason:null, preparation_incomplete:true, preparation_failure_count:1, last_error:'Setup download failed'});
   const f = fixture([entry]);
   await f.bridge.notify();
-  assert.equal(f.sent.length, 1); assert.match(f.sent[0]!, /retry automatically/);
+  assert.equal(f.sent.length, 0);
   entry.state.session_id = 'retry-session'; entry.state.preparation_failure_count = 2;
   await f.bridge.notify();
-  assert.equal(f.sent.length, 1);
+  assert.equal(f.sent.length, 0);
   Object.assign(entry.state, {status:'agent-running', preparation_incomplete:false, preparation_failure_count:0});
   await f.bridge.notify(); await f.bridge.notify();
-  assert.equal(f.sent.length, 2); assert.match(f.sent[1]!, /Setup recovered/);
+  assert.equal(f.sent.length, 0);
   Object.assign(entry.state, {status:'retry-wait', preparation_incomplete:true, preparation_failure_count:1});
   await f.bridge.notify();
-  assert.equal(f.sent.length, 3);
+  assert.equal(f.sent.length, 0);
+});
+
+
+test('routine outcomes wait for one changed-repository brief at 9am Toronto and survive restart', async () => {
+  let now = new Date('2026-10-28T12:30:00Z'); // 8:30 Toronto
+  const entry=task('mdedit#12'); Object.assign(entry.state,{status:'agent-running',pause_reason:null});
+  const f=fixture([entry],()=>now);
+  await f.bridge.notify();
+  entry.state.status='completed'; entry.lastMessage='Long agent output '.repeat(300);
+  await f.bridge.notify(); assert.equal(f.sent.length,0);
+  now=new Date('2026-10-28T12:59:00Z');await f.bridge.notify();assert.equal(f.sent.length,0);
+  now=new Date('2026-10-28T13:00:00Z');await f.bridge.notify();
+  assert.equal(f.sent.length,1);assert.match(f.sent[0]!,/daily brief.*2026-10-28/);assert.match(f.sent[0]!,/mdedit/);
+  assert.match(f.sent[0]!,/1 runs completed/);assert.doesNotMatch(f.sent[0]!,/Long agent output/);
+  const restored=JSON.parse(JSON.stringify(f.state)) as BridgeState;
+  const bridge=new TelegramBridge({send:async text=>{f.sent.push(text);return f.sent.length;}} as TelegramApi,
+    {tasks:async()=>[entry],comment:async()=>1,resume:async()=>true},restored,{chatId:123,userId:456},async()=>{},'telegram',{now:()=>now});
+  await bridge.notify();assert.equal(f.sent.length,1);
+  now=new Date('2026-10-29T13:00:00Z');await bridge.notify();assert.equal(f.sent.length,1,'No brief on a quiet day');
+});
+
+test('a failed daily send retains the pending brief and catches up after a missed morning',async()=>{
+ let now=new Date('2026-10-28T14:00:00Z');const entry=task();Object.assign(entry.state,{status:'agent-running',pause_reason:null});
+ const f=fixture([entry],()=>now);await f.bridge.notify();entry.state.status='completed';await f.bridge.notify();
+ now=new Date('2026-10-29T19:00:00Z');let failing=true;const sent:string[]=[];
+ const b=new TelegramBridge({send:async text=>{if(failing)throw new Error('offline');sent.push(text);return 1;}} as TelegramApi,
+ {tasks:async()=>[entry],comment:async()=>1,resume:async()=>true},f.state,{chatId:123,userId:456},async()=>{},'telegram',{now:()=>now});
+ await assert.rejects(b.notify(),/offline/);assert.ok(Object.keys(f.state.notifications!.pending).length);
+ failing=false;await b.notify();await b.notify();assert.equal(sent.length,1);assert.deepEqual(f.state.notifications!.pending,{});
+});
+
+test('questions are short and credentials alert once across automatic retry sessions',async()=>{
+ const entry=task();entry.lastMessage='SYMPHONY_PAUSE\nquestion: '+ 'A very long question '.repeat(100)+'\noptions:\n- Yes\n- No\nEND_SYMPHONY_PAUSE';
+ const f=fixture([entry]);await f.bridge.notify();assert.ok(f.sent[0]!.length<850);assert.match(f.sent[0]!,/Reply here/);
+ Object.assign(entry.state,{status:'retry-wait',pause_reason:null,last_error:'Invalid API key'});entry.lastMessage='';
+ await f.bridge.notify();assert.equal(f.sent.length,2);assert.match(f.sent[1]!,/authentication needs attention/);
+ entry.state.session_id='retry2';await f.bridge.notify();assert.equal(f.sent.length,2);
+ Object.assign(entry.state,{status:'agent-running',last_error:null});await f.bridge.notify();assert.equal(f.sent.length,2);
+});
+
+test('durable activity feeds merge summaries even after workspace removal; multiple repos share one message',async()=>{
+ let now=new Date('2026-10-28T12:00:00Z');const sent:string[]=[];let cursor=0;
+ const state:BridgeState={offset:0,seen:{},messages:{},pending:{}};
+ const b=new TelegramBridge({send:async text=>{sent.push(text);return sent.length;}} as TelegramApi,{
+  tasks:async()=>[],comment:async()=>1,resume:async()=>true,
+  activity:async cursors=>{if(cursors.mdedit===undefined)return [{repo:'mdedit',cursor:10,activities:[]}];
+   cursor++;return cursor===1?[{repo:'mdedit',cursor:11,activities:[{repo:'mdedit',key:'mdedit#1727',kind:'merged',url:'https://github.com/example/app/pull/1727'}]},
+    {repo:'taskdrop',cursor:1,activities:[{repo:'taskdrop',key:'taskdrop#1',kind:'completed'}]}]:[];},
+ },state,{chatId:123,userId:456},async()=>{},'telegram',{now:()=>now});
+ await b.notify();await b.notify();assert.equal(sent.length,0);
+ now=new Date('2026-10-28T13:00:00Z');await b.notify();assert.equal(sent.length,1);assert.match(sent[0]!,/PRs merged/);assert.match(sent[0]!,/taskdrop/);
+});
+
+test('old failed workspace metadata cannot replace a newer completed run or trigger an alert',async()=>{
+ const entry=task();Object.assign(entry.state,{status:'completed',pause_reason:null,updated_at:'2026-10-28T12:00:00Z'});
+ const f=fixture([entry]);await f.bridge.notify();
+ Object.assign(entry.state,{status:'failed',session_id:'old-session',updated_at:'2026-10-27T12:00:00Z',last_error:'Invalid API key'});
+ await f.bridge.notify();assert.equal(f.sent.length,0);assert.deepEqual(f.state.notifications?.pending,{});
+});
+
+
+test('a new fast failure alerts even when first observed after its worker exits',async()=>{
+ let now=new Date('2026-10-28T12:00:00Z');const f=fixture([],()=>now);await f.bridge.notify();
+ now=new Date('2026-10-28T12:05:00Z');const entry=task();Object.assign(entry.state,{status:'failed',pause_reason:null,updated_at:now.toISOString()});
+ f.tasks.push(entry);await f.bridge.notify();assert.equal(f.sent.length,1);assert.match(f.sent[0]!,/stopped after automatic retries/);
 });

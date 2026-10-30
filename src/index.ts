@@ -510,6 +510,8 @@ async function main(): Promise<void> {
     .option('--token-file <path>', 'Local file containing the bot token (or use SYMPHONY_TELEGRAM_BOT_TOKEN)')
     .option('--chat-id <id>', 'Authorized private Telegram chat ID (otherwise use saved pairing)')
     .option('--user-id <id>', 'Authorized Telegram user ID (otherwise use saved pairing)')
+    .option('--brief-hour <hour>', 'Daily brief hour (0–23)', '9')
+    .option('--brief-timezone <zone>', 'Daily brief IANA time zone', 'America/Toronto')
     .requiredOption('--state-dir <path>', 'Private durable state directory, unique to this bot and configuration')
     .action(async (options: TelegramBridgeOptions) => { await runTelegramBridge(options); });
 

@@ -1,6 +1,6 @@
 # Telegram communication bridge
 
-TaskDrop creates GitHub captures with `requires-grooming`. Symphony grooms them before implementation. Telegram can also create captures with `/new <repo> <task>`. This optional bridge forwards Symphony questions and outcomes to a private Telegram chat. Replies become GitHub issue comments and eligible tasks are requeued. It runs alongside Symphony on the **same host**, using the same workflows and workspace roots; it does not start coding agents itself.
+TaskDrop creates GitHub captures with `requires-grooming`. Symphony grooms them before implementation. Telegram can also create captures with `/new <repo> <task>`. This optional bridge sends action-required alerts and a concise daily activity brief to a private Telegram chat. Replies become GitHub issue comments and eligible tasks are requeued. It runs alongside Symphony on the **same host**, using the same workflows and workspace roots; it does not start coding agents itself.
 
 ## Setup
 
@@ -42,13 +42,13 @@ For macOS background operation, adapt [`ops/com.mangoappstudio.symphony-telegram
 - Reply directly to a question to record your answer and requeue the paused issue.
 - Reply to an outcome with follow-up instructions to request another run of an open, eligible issue.
 - `/status` lists known task statuses. `/help` explains the available commands.
-- The bridge forwards new completion, failure, cancellation, and pause transitions. Historical outcomes are baselined on first observation, avoiding a backlog of old alerts. Existing questions are sent immediately. Completion messages include the agent's final output, which may contain a PR link; completion alone does not mean a PR was merged.
+- Questions and intervention-required failures notify immediately. Routine completions, cancellations, automatic retries, and recovery are collected for the daily brief. Existing historical outcomes are baselined on first observation. Completed runs and merged PRs are reported separately; completing a run does not imply its PR merged.
 
 The repository ID and issue number are attached to every task message. Replies use persisted message IDs, so identical issue numbers in different repositories cannot be confused. Unknown replies and stale question replies are rejected. Only the explicit `/new` command creates issues; ordinary unthreaded messages do not.
 
 Instructions sent while an agent runs are saved immediately and queued after the active run finishes. They are **not live steering**. The bridge checks the agent's last-consumed GitHub comment ID before requesting another run. Closed, blocked, ignored, and interactive tasks are not automatically resumed. Existing workflow concurrency, dependencies, retry limits, and review policies still apply. A queued task may therefore wait or require manual attention.
 
-Questions raised during intake grooming use the same reply flow. The `requires-grooming` gate is retained while awaiting clarification; answering requeues grooming, and only successful grooming can queue implementation. A grooming completion notification contains the enriched brief and is distinct from implementation completion.
+Questions raised during intake grooming use the same reply flow. The `requires-grooming` gate is retained while awaiting clarification; answering requeues grooming, and only successful grooming can queue implementation. Grooming completion appears in the daily brief; the enriched issue remains available on GitHub.
 
 ## Images
 
@@ -77,3 +77,14 @@ The bridge persists Telegram update cursors, message-to-task mappings, outcome f
 Run only one bridge per bot and state directory; a local process lock prevents duplicate instances using the same directory. Telegram sends and local state writes are not transactional: a crash after sending but before saving can duplicate a notification. Use `/questions` to recover question routing. Do not delete state to fix connectivity problems, since doing so loses routing and replay protection. GitHub/Telegram outage cycles retry after ten seconds without logging private message bodies or token-bearing URLs.
 
 Telegram receives the task titles, links, questions, and final summaries sent through this bridge. Keep it limited to a bot and private account you control.
+
+
+## Notification policy
+
+The bridge sends immediate, concise messages only when you need to act: agent questions, interactive handoffs/decisions, credential failures, exhausted agent retries, and low/unavailable storage. Questions include a GitHub link and up to three short choices; reply as before to answer and resume. Credential alerts are deduplicated across automatic retries. Automatic setup retries, setup recovery, ordinary completions, cancellations, and storage recovery no longer generate individual messages. Commands and intake/reply acknowledgments still respond immediately to your requests.
+
+At **9 a.m. America/Toronto** the bridge sends one brief grouped by repository, containing only repositories with new activity since the previous brief: merged PRs, completed runs, linked follow-ups, new failures or questions, setup retries, and storage updates. Quiet days produce no message. The message contains counts and a small number of GitHub links, never full agent output or logs. Use `/status` and `/questions` for on-demand detail.
+
+Brief cursors and pending activity persist in the private Telegram state. Symphony's durable episode history preserves completion/merge activity even after workspace cleanup. Existing history is baselined when this policy is first enabled, rather than replayed as a backlog. If the bridge is offline at the scheduled hour, it sends one catch-up brief when it returns; Toronto calendar handling follows daylight saving changes. A failed send keeps the pending brief for retry. As with Telegram updates generally, a crash after Telegram accepts a message but before the state write can duplicate that message.
+
+Override the schedule with `--brief-hour 9 --brief-timezone America/Toronto` on the `telegram` command. The hour must be 0–23 and the time zone a valid IANA zone. This schedule runs inside the existing Telegram bridge; keep that service running.
