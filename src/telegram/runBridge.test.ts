@@ -71,8 +71,8 @@ test('GitHub adapter records idempotent comments and rechecks lifecycle before e
     assert.equal(mutations.filter((entry) => entry.method === 'POST' && entry.url.endsWith('/comments')).length, 1);
     assert.equal(await backend.resume(task), true);
     const labelWrites = mutations.filter((entry) => entry.url.includes('/issues/12/labels'));
-    assert.equal(labelWrites[0]!.method, 'DELETE');
-    assert.match(labelWrites.at(-1)!.body!, /ready-for-agent/);
+    assert.equal(labelWrites[0]!.method, 'POST');
+    assert.match(labelWrites[0]!.body!, /ready-for-agent/);
     const count = mutations.length;
     issueState = 'closed';
     assert.equal(await backend.resume(task), false);
@@ -87,6 +87,15 @@ test('GitHub adapter records idempotent comments and rechecks lifecycle before e
     await fs.writeFile(runFile, JSON.stringify({ ...run, status: 'agent-running' }));
     assert.equal(await backend.resume(task), false);
     assert.equal(mutations.length, count);
+
+    labels = ['ready-for-human', 'planning', 'task:spec'];
+    await fs.writeFile(runFile, JSON.stringify({ ...run, status: 'completed', agent_mode: 'planning' }));
+    assert.equal(await backend.resume(task, { handoff: true, approvePlan: true }), true);
+    const approval = mutations.slice(count);
+    assert.deepEqual(approval.slice(0, 3).map(entry => [entry.method, entry.url.split('/').at(-1)]),
+      [['DELETE', 'planning'], ['DELETE', 'task%3Aspec'], ['POST', 'labels']]);
+    labels = ['ready-for-agent'];
+    assert.equal(await backend.resume(task, { handoff: true, approvePlan: true }), false);
   } finally {
     globalThis.fetch = originalFetch;
     await fs.rm(dir, { recursive: true, force: true });
@@ -125,6 +134,23 @@ test('daily activity reads durable events after cleanup and resumes an exact seq
   assert.match(batch!.activities[2]!.url!,/pull\/13$/);
   assert.equal((await backend.tasks()).length,0,'No workspace is needed for durable completion activity');
   assert.equal((await backend.activity!({default:batch!.cursor}))[0]!.activities.length,0);
+  store.append({repo_id:'example/app',episode_id:'epic-20',event:'epic.ready_for_human',payload:{issue_number:20}});
+  store.append({repo_id:'example/app',episode_id:'pr-21',event:'pr.feedback_exhausted',payload:{pr_number:21}});
+  store.append({repo_id:'example/app',episode_id:'pr-22',event:'pr.feedback_exhausted',payload:{pr_number:22}});
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const number = Number(String(url).split('/').at(-1));
+    return Response.json({ id:number, number, title: 'Review needed', state:number === 22 ? 'closed' : 'open',
+      labels:[{name:'ready-for-human'}, {name:'symphony-review:blocking'}] });
+  };
+  try {
+    const [handoffs] = await backend.activity!({ default: batch!.cursor });
+    assert.equal(handoffs!.handoffs?.length, 2);
+    assert.match(handoffs!.handoffs![0]!.text, /issues\/20/);
+    assert.match(handoffs!.handoffs![1]!.text, /pull\/21/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 

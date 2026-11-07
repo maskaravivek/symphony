@@ -38,17 +38,17 @@ For macOS background operation, adapt [`ops/com.mangoappstudio.symphony-telegram
 - Captures receive only `requires-grooming`. When the orchestrator runs, it gathers context, asks clarification questions if necessary, and adds readiness/routing labels through the existing grooming flow. The bridge itself does not launch agents. Reply to the capture confirmation with more text or images, even before grooming starts.
 - `/intakes` shows the last ten Telegram captures and checks any unconfirmed creations again.
 
-- `/questions` sends current questions again, including any that existed before the bridge started.
+- `/questions` shows current questions and issue handoffs.
 - Reply directly to a question to record your answer and requeue the paused issue.
 - Reply to an outcome with follow-up instructions to request another run of an open, eligible issue.
 - `/status` lists known task statuses. `/help` explains the available commands.
-- Questions and intervention-required failures notify immediately. Routine completions, cancellations, automatic retries, and recovery are collected for the daily brief. Existing historical outcomes are baselined on first observation. Completed runs and merged PRs are reported separately; completing a run does not imply its PR merged.
+- Questions, human handoffs, and failures that need intervention notify promptly. Completed epics and exhausted PR feedback rounds link to GitHub for review. Routine completions, cancellations, automatic retries, and recovery are collected for the daily brief. Existing historical outcomes are baselined on first observation. Completed runs and merged PRs are reported separately.
 
 The repository ID and issue number are attached to every task message. Replies use persisted message IDs, so identical issue numbers in different repositories cannot be confused. Unknown replies and stale question replies are rejected. Only the explicit `/new` command creates issues; ordinary unthreaded messages do not.
 
 Instructions sent while an agent runs are saved immediately and queued after the active run finishes. They are **not live steering**. The bridge checks the agent's last-consumed GitHub comment ID before requesting another run. Closed, blocked, ignored, and interactive tasks are not automatically resumed. Existing workflow concurrency, dependencies, retry limits, and review policies still apply. A queued task may therefore wait or require manual attention.
 
-Questions raised during intake grooming use the same reply flow. The `requires-grooming` gate is retained while awaiting clarification; answering requeues grooming, and only successful grooming can queue implementation. Grooming completion appears in the daily brief; the enriched issue remains available on GitHub.
+Grooming automatically queues bounded work once the brief is ready. When grooming needs a decision, reply to the Telegram alert to send the decision back through grooming. If you explicitly requested a planning pass, Symphony posts the plan and alerts you. Reply `implement` to approve implementation, or send feedback to request a revised plan.
 
 ## Images
 

@@ -78,6 +78,7 @@ export interface RunState {
   retry_not_before?: string | null;
   finalization_context?: FinalizationContext | null;
   finalization_step?: 'pending' | 'hook-running' | 'hook-completed' | 'effects-applied' | null;
+  review_waiting_for_human?: boolean;
 
   followup_worktree_status?: string;
   preparation_incomplete?: boolean;

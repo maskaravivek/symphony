@@ -8,6 +8,7 @@ import { loadServerConfigFromFile } from '../server/loadServerConfig.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import { scanRunStates } from '../status/scanRunStates.js';
 import { readRunState } from '../status/runState.js';
+import { GROOMING_LABEL } from '../grooming/grooming.js';
 import { acquireWorkflowLock } from '../orchestrator/workflowLock.js';
 import { sleep } from '../utils/sleep.js';
 import { loadAttachmentStorage } from './attachmentStorage.js';
@@ -72,6 +73,20 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
             batch.cursor = event.sequence;
             if (!repoIds.includes(event.repo_id)) continue;
             const payload = event.payload;
+            const isEpicHandoff = event.event === 'epic.ready_for_human';
+            if (isEpicHandoff || event.event === 'pr.feedback_exhausted') {
+              const number = isEpicHandoff ? payload.issue_number : payload.pr_number;
+              if (typeof number !== 'number') continue;
+              const issue = await new GithubIssueTrackerClient(entry.config.tracker).fetchIssueOrPullRequestByNumber(number);
+              if (!issue || issue.state !== 'open' || !issue.labels.includes('ready-for-human')) continue;
+              if (!isEpicHandoff && !issue.labels.includes('symphony-review:blocking')) continue;
+              const url = `https://github.com/${entry.config.tracker.owner}/${entry.config.tracker.repo}/${isEpicHandoff ? 'issues' : 'pull'}/${number}`;
+              const detail = isEpicHandoff
+                ? 'The epic is ready for human review. Open GitHub to review the child issue outcomes.'
+                : 'Automatic PR feedback rounds are exhausted. Open GitHub to review the remaining blockers.';
+              (batch.handoffs ??= []).push({ key: String(event.sequence), text: `${entry.id}#${number}\n${url}\n\n${detail}` });
+              continue;
+            }
             if (event.event.startsWith('loop.') && typeof payload.loop_id==='string') {
               const kind:Activity['kind']|undefined = ({'loop.completed':'loop_completed','loop.failed':'loop_failed','loop.paused':'loop_paused','loop.retry_scheduled':'loop_retrying'} as Record<string,Activity['kind']>)[event.event];
               if (kind) batch.activities.push({repo:entry.id,key:`${entry.id}#loop:${payload.loop_id}`,kind,detail:payload.loop_id});
@@ -131,6 +146,7 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
           (!state.repo || state.repo === entry.config.tracker.repo)).map(async (state) => ({
           key: `${entry.id}#${state.loop_id ? `loop:${state.loop_id}` : state.issue_number}`,
           state,
+          automaticMerge: entry.config.merge.enabled && !entry.config.merge.dry_run,
           lastMessage: state.last_message_path
             ? await fs.readFile(state.last_message_path, 'utf8').catch(() => '') : '',
         })));
@@ -145,7 +161,13 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
       if (task.state.loop_id) return recordLoopInput(entryFor(task).config,task.state.loop_id,task.state.session_id,marker,text);
       return (await entryFor(task).github.upsertStatusComment(task.state.issue_number!, marker, `${marker}\n${text}`)).id;
     },
-    async resume(task) {
+    async awaitingHuman(task) {
+      const entry = entryFor(task);
+      const issue = await new GithubIssueTrackerClient(entry.config.tracker).fetchIssueOrPullRequestByNumber(task.state.issue_number!);
+      return Boolean(issue && entry.config.tracker.active_states.includes(issue.state) &&
+        issue.labels.includes('ready-for-human') && !issue.labels.includes('agent-running'));
+    },
+    async resume(task, options) {
       const entry = entryFor(task);
       if (task.state.loop_id) return requestLoopResume((await loadWorkflowFromFile(entry.workflow)).config,task.state.loop_id,task.state.session_id);
       const current = await readRunState(task.state.workspace_path);
@@ -158,12 +180,19 @@ export async function createBridgeBackend(options: { config?: string; workflow?:
       const issue = await github.fetchIssueOrPullRequestByNumber(task.state.issue_number!);
       if (!issue || !entry.config.tracker.active_states.includes(issue.state) ||
           issue.labels.some((label) => ['interactive', 'blocked', 'wontfix', 'agent-running'].includes(label))) return false;
+      if (options?.handoff && (current.status !== 'completed' || !issue.labels.includes('ready-for-human'))) return false;
       const removable = ['needs-info', 'ready-for-human', 'symphony-failed'];
       if (issue.labels.some((label) => entry.config.tracker.ignored_labels.includes(label) && !removable.includes(label))) return false;
-      // Remove blocking lifecycle labels before adding the queue label.
-      await github.transitionLabels(issue.number!, { remove: removable });
-      await github.addLabels(issue.number!, ['ready-for-agent', ...entry.config.tracker.required_labels,
-        ...(entry.config.tracker.any_required_labels?.slice(0, 1) ?? [])]);
+      if (options?.approvePlan && current.agent_mode === 'planning') {
+        await github.transitionLabels(issue.number!, { remove: ['planning', 'task:spec'] });
+      }
+      if (current.agent_mode === 'grooming' && current.grooming_result?.outcome === 'human' && issue.labels.includes('ready-for-human')) {
+        await github.addLabels(issue.number!, [GROOMING_LABEL]);
+      }
+      await github.transitionLabels(issue.number!, {
+        add: ['ready-for-agent', ...entry.config.tracker.required_labels, ...(entry.config.tracker.any_required_labels?.slice(0, 1) ?? [])],
+        remove: removable,
+      });
       return true;
     },
   };

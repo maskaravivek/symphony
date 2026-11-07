@@ -20,18 +20,19 @@ function fixture(tasks = [task()], now = () => new Date('2026-10-28T12:00:00Z'))
   const sent: string[] = [];
   const comments = new Map<string, string>();
   const resumed: string[] = [];
+  const approved: string[] = [];
   const reactions: number[] = [];
   const state: BridgeState = { offset: 0, seen: {}, messages: {}, pending: {} };
   let saves = 0;
   const bridge = new TelegramBridge({ updates: async () => [], react: async id => {reactions.push(id);}, send: async (text) => { sent.push(text); return sent.length; } }, {
     tasks: async () => tasks,
     comment: async (entry, marker, text) => { comments.set(`${entry.key}:${marker}`, text); return 100; },
-    resume: async (entry) => { resumed.push(entry.key); return true; },
+    resume: async (entry, options) => { resumed.push(entry.key); if (options?.approvePlan) approved.push(entry.key); return true; },
   }, state, { chatId: 123, userId: 456 }, async () => { saves += 1; }, 'telegram', {now});
   const reply = (id: number, replyId = 1): TelegramUpdate => ({ update_id: id, message: {
     message_id: 99, chat: { id: 123, type: 'private' }, from: { id: 456 }, text: 'Yes, include tablets.', reply_to_message: { message_id: replyId },
   } });
-  return { bridge, state, sent, comments, resumed, reactions, reply, tasks, saves: () => saves };
+  return { bridge, state, sent, comments, resumed, approved, reactions, reply, tasks, saves: () => saves };
 }
 
 test('existing questions notify; a reply records context and resumes the exact repository', async () => {
@@ -113,6 +114,31 @@ test('first observation baselines past outcomes and later transitions notify', a
   f.tasks[0]!.state.status = 'failed';
   await f.bridge.notify();
   assert.match(f.sent[0]!, /stopped after automatic retries/);
+});
+
+test('completed grooming and planning handoffs alert once while ready grooming stays quiet', async () => {
+  const f = fixture(['human', 'planning', 'ready'].map((key) => {
+    const entry = task(`repo#${key}`);
+    Object.assign(entry.state, { status: 'agent-running', pause_reason: null, agent_mode: key === 'planning' ? 'planning' : 'grooming' });
+    return entry;
+  }));
+  await f.bridge.notify();
+  for (const [index, entry] of f.tasks.entries()) {
+    entry.state.status = 'completed';
+    entry.state.workflow_state = index === 2 ? 'ready-for-agent' : 'ready-for-human';
+  }
+  await f.bridge.notify();
+  await f.bridge.notify();
+  assert.equal(f.sent.length, 2);
+  assert.match(f.sent[0]!, /grooming/i);
+  assert.match(f.sent[1]!, /implement/i);
+  const approval = f.reply(1, 2);
+  approval.message!.text = 'Implement';
+  await f.bridge.receive(approval);
+  assert.deepEqual(f.approved, ['repo#planning']);
+  f.tasks[1]!.state.session_id = 'new-session';
+  await f.bridge.receive(f.reply(2, 2));
+  assert.deepEqual(f.resumed, ['repo#planning']);
 });
 
 test('durable state survives restart with private permissions; corrupt state fails closed', async () => {

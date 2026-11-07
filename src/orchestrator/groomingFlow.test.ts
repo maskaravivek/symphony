@@ -168,4 +168,15 @@ test('human grooming without a priority preserves existing classification and pu
   assert(!f.labels().includes('requires-grooming'));
   assert(f.comments.some(c => c.body.includes('Human attention required')));
   assert.equal((await scanRunStates(f.workspace))[0]?.status, 'completed');
+  const backend = await createBridgeBackend({ workflow: f.workflowPath });
+  const task = (await backend.tasks())[0]!;
+  assert.equal(await backend.awaitingHuman!(task), true);
+  await backend.comment(task, '<!-- decision -->', 'Proceed with the bounded reminder storage change.');
+  assert.equal(await backend.resume(task, { handoff: true }), true);
+  assert(f.labels().includes('requires-grooming'));
+  assert(!f.labels().includes('ready-for-human'));
+  await fs.writeFile(f.outputPath, result());
+  await f.orchestrator.tickOnce(); await f.finish();
+  assert(!f.labels().includes('requires-grooming'));
+  assert(f.labels().includes('ready-for-agent'));
 });

@@ -8,7 +8,12 @@ export interface Activity {
   url?: string;
   detail?: string;
 }
-export interface ActivityBatch { repo: string; cursor: number; activities: Activity[] }
+export interface ActivityBatch {
+  repo: string;
+  cursor: number;
+  activities: Activity[];
+  handoffs?: Array<{ key: string; text: string }>;
+}
 export interface NotificationState {
   cursors: Record<string, number>;
   observed?: Record<string, string>;
@@ -31,10 +36,25 @@ export function questionText(task: BridgeTask): string {
   return `${pause ? short(pause.question, 400) : 'The agent needs input. See the GitHub issue for the question.'}${pause?.options.length
     ? '\n' + pause.options.slice(0, 3).map(option => `• ${short(option, 90)}`).join('\n') : ''}\nReply here to answer and resume.${(pause?.options.length ?? 0) > 3 ? ' More choices are on GitHub.' : ''}`;
 }
-export function requiredAction(task: BridgeTask): { key: string; text: string; question: boolean } | null {
+export function requiredAction(task: BridgeTask): { key: string; text: string; question: boolean; handoff?: boolean } | null {
   if (task.state.status === 'paused') {
     if (task.state.pause_reason === 'needs-info') return { key:`question:${task.state.session_id}:${task.lastMessage}`, text:questionText(task), question:true };
     return { key:`paused:${task.state.session_id}`, text:'Human attention needed. Open the GitHub issue to handle the handoff or decision.', question:false };
+  }
+  if (task.state.status === 'completed' && task.state.workflow_state === 'ready-for-human') {
+    const key = `handoff:${task.state.session_id}`;
+    if (task.state.agent_mode === 'grooming') return {
+      key, text: 'Grooming needs your input. Open the brief on GitHub and reply here with your decision or next step.', question: false, handoff: true,
+    };
+    if (task.state.agent_mode === 'planning') return {
+      key, text: 'The plan is ready on GitHub. Reply “implement” to approve implementation, or reply with feedback to revise the plan.', question: false, handoff: true,
+    };
+    const review = task.state.finalization_context?.review_pr;
+    const needsReview = task.state.review_waiting_for_human ??
+      (!task.automaticMerge || !review || task.state.labels?.includes('symphony-review:blocking'));
+    if (needsReview) return {
+      key, text: 'The run needs human review. Open GitHub for details, or reply here with follow-up instructions.', question: false, handoff: true,
+    };
   }
   const credentialFailure = /invalid api key|bad credentials|authentication failed|not authenticated|token (?:has )?expired|(?:please|must) (?:log|sign) in/i.test(
     `${task.state.last_error ?? ''}\n${task.state.retry_reason ?? ''}\n${task.lastMessage}`);

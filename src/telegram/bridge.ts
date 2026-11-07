@@ -1,4 +1,4 @@
-import { requiredAction, questionText, short, repoFor, taskActivities, recordActivity, formatBrief, localSchedule, type ActivityBatch, type NotificationState, type NotificationOptions } from './notifications.js';
+import { requiredAction, short, repoFor, taskActivities, recordActivity, formatBrief, localSchedule, type ActivityBatch, type NotificationState, type NotificationOptions } from './notifications.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
@@ -11,6 +11,7 @@ export interface BridgeTask {
   key: string;
   state: RunState;
   lastMessage: string;
+  automaticMerge?: boolean;
 }
 
 export interface IntakeIssue { number: number; title: string; url: string }
@@ -30,15 +31,16 @@ export interface BridgeBackend {
   storeImage?(repoId: string, key: string, image: DownloadedImage): Promise<string>;
   capturedComment?(repoId: string, number: number, marker: string, text: string): Promise<number>;
   tasks(): Promise<BridgeTask[]>;
+  awaitingHuman?(task: BridgeTask): Promise<boolean>;
   activity?(cursors: Record<string, number>): Promise<ActivityBatch[]>;
   storageAlerts?(): Promise<Array<{ key: string; blocked: boolean; minimum_free_gib: number }>>;
   // Must be idempotent by marker. Never pass arbitrary Telegram text to a shell.
   comment(task: BridgeTask, marker: string, text: string): Promise<number>;
   // Recheck GitHub state and labels before changing lifecycle labels.
-  resume(task: BridgeTask): Promise<boolean>;
+  resume(task: BridgeTask, options?: { approvePlan?: boolean; handoff?: boolean }): Promise<boolean>;
 }
 
-interface Target { key: string; session: string | null; question: boolean }
+interface Target { key: string; session: string | null; question: boolean; handoff?: boolean }
 interface MediaGroup {
   updateId: number;
   text: string;
@@ -127,9 +129,9 @@ export class TelegramBridge {
     localSchedule(new Date(), notifications.timeZone); // Validate configuration before the polling loop starts.
   }
 
-  private async taskMessage(task: BridgeTask, text: string, question = false): Promise<void> {
+  private async taskMessage(task: BridgeTask, text: string, question = false, handoff?: boolean): Promise<void> {
     const id = await this.api.send(`${short(task.key, 80)}: ${short(task.state.issue_title ?? task.state.issue_identifier, 100)}\n${task.state.issue_url ?? ''}\n\n${text}`);
-    this.state.messages[String(id)] = { key: task.key, session: task.state.session_id, question };
+    this.state.messages[String(id)] = { key: task.key, session: task.state.session_id, question, ...(handoff ? { handoff } : {}) };
   }
 
   async notify(): Promise<void> {
@@ -165,7 +167,9 @@ export class TelegramBridge {
       const action = requiredAction(task), actionKey = `$action:${task.key}`;
       const actionFingerprint = action ? createHash('sha256').update(action.key).digest('hex') : null;
       if (action && (previous !== undefined || fresh || task.state.status === 'paused' || task.state.status === 'retry-wait') && actionFingerprint !== this.state.seen[actionKey]) {
-        await this.taskMessage(task, action.text, action.question);
+        if (!action.handoff || await this.backend.awaitingHuman?.(task) !== false) {
+          await this.taskMessage(task, action.text, action.question, action.handoff);
+        }
         this.state.seen[actionKey] = actionFingerprint!;
       } else if (!action && ['agent-running','completed'].includes(task.state.status) && !task.state.preparation_incomplete) delete this.state.seen[actionKey];
       if (['preparing','agent-running','completed'].includes(task.state.status)) {
@@ -175,6 +179,13 @@ export class TelegramBridge {
       await this.persist();
     }
     for (const batch of await this.backend.activity?.(notificationState.cursors) ?? []) {
+      for (const handoff of batch.handoffs ?? []) {
+        const key = `$event-handoff:${batch.repo}:${handoff.key}`;
+        if (this.state.seen[key]) continue;
+        await this.api.send(handoff.text);
+        this.state.seen[key] = 'sent';
+        await this.persist();
+      }
       for (const activity of batch.activities) recordActivity(notificationState, activity);
       notificationState.cursors[batch.repo] = batch.cursor;
     }
@@ -368,12 +379,16 @@ export class TelegramBridge {
       return;
     }
     if (/^\/questions(?:@\w+)?$/.test(text)) {
-      const questions = tasks.filter((task) => task.state.status === 'paused' && task.state.pause_reason === 'needs-info');
-      for (const task of questions) {
-        await this.taskMessage(task, `${questionText(task)}`, true);
+      let sent = false;
+      for (const task of tasks) {
+        const action = requiredAction(task);
+        if (!action || (!action.question && !action.handoff)) continue;
+        if (action.handoff && await this.backend.awaitingHuman?.(task) === false) continue;
+        await this.taskMessage(task, action.text, action.question, action.handoff);
+        sent = true;
         await this.persist();
       }
-      if (!questions.length) await this.api.send('No tasks waiting for input.');
+      if (!sent) await this.api.send('No tasks waiting for input.');
       return;
     }
     await this.handleReply(text, replyId, updateId, [], messageId);
@@ -389,6 +404,11 @@ export class TelegramBridge {
     }
     if (target.question && (!task || target.session !== task.state.session_id || task.state.status !== 'paused' || task.state.pause_reason !== 'needs-info')) {
       await this.api.send('That question belongs to an earlier run or has already been answered. Use /questions for current questions.');
+      return;
+    }
+    if (target.handoff && (!task || target.session !== task.state.session_id || !requiredAction(task)?.handoff ||
+        await this.backend.awaitingHuman?.(task) === false)) {
+      await this.api.send('That handoff is no longer waiting for input. Use /questions for current handoffs.');
       return;
     }
     const capture = Object.values(this.state.intakes ?? {}).find(record => record.issue && `${record.repoId}#${record.issue.number}` === target.key);
@@ -412,7 +432,10 @@ export class TelegramBridge {
       await this.api.send(`${task.state.loop_id ? 'Saved locally for this scheduled loop.' : 'Saved on GitHub.'} The agent is running; I will queue your follow-up when this run finishes. It has not received this instruction yet.`);
       return target;
     }
-    const resumed = await this.backend.resume(task);
+    const resumed = await this.backend.resume(task, {
+      handoff: target.handoff,
+      approvePlan: target.handoff && task.state.agent_mode === 'planning' && /^implement$/i.test(text),
+    });
     if (resumed) {
       // A cosmetic acknowledgment failure must not replay the GitHub write or resume.
       if (messageId !== undefined) await this.api.react?.(messageId).catch(() => {});

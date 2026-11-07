@@ -1384,7 +1384,10 @@ export class Orchestrator {
           await this.recordLocalValidation(config, issue, reviewPr, state.workspace_path);
         }
 
-        if (!reviewPr || !config.review.enabled) await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+        if (!reviewPr || !config.review.enabled) {
+          await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING] });
+          await this.updateLifecycleState(state.workspace_path, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_READY, LABEL_RUNNING], workflowState: LABEL_READY_FOR_HUMAN });
+        }
         await updateRunState(state.workspace_path, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
         this.appendEpisodeEvent(config, `${issue.identifier}:attempt:${state.attempt}`, 'workflow.completed', { issue_number: issue.number, session_id: state.session_id, recovered: true });
       } catch (err) {
@@ -1865,6 +1868,9 @@ export class Orchestrator {
     const result = await tracker.upsertStatusComment(issue.number, epicStatusMarker(issue), formatEpicStatusComment({ issue, config, repoId: this.repoId, state, message }), state.status_comment_id);
 
     await upsertEpicState(config.workspace.root, { ...state, status_comment_id: result.id, updated_at: new Date().toISOString() });
+    if (isComplete && existingEpic?.status !== 'completed') {
+      this.appendEpisodeEvent(config, `epic-${issue.number}`, 'epic.ready_for_human', { issue_number: issue.number });
+    }
   }
 
   private buildEpicStackPlan(config: WorkflowConfig, tree: EpicTreeNode, executionMode: EpicExecutionMode): Map<string, EpicStackPlanEntry> {
@@ -4341,6 +4347,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
           : [LABEL_READY, LABEL_RUNNING],
       workflowState: issue.number === pr.number && canAutoFix ? LABEL_READY : LABEL_READY_FOR_HUMAN,
     });
+    await updateRunState(workspacePath, (cur) => cur ? { ...cur, review_waiting_for_human: !canAutoFix } : null);
 
     let status: string;
     if (needsHuman) {
