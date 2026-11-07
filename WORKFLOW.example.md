@@ -231,7 +231,28 @@ agents:
     claude-fable:
       provider_group: claude
       provider_kind: claude
-      command: bash -lc 'set -o pipefail; claude -p --model fable < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log .symphony/last_message.md'
+      command: >-
+        bash -lc 'set -o pipefail;
+        CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5 CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 CLAUDE_CODE_FORK_SUBAGENT=0
+        claude -p --model fable --agent symphony-fable-lead --agents "$1" --strict-mcp-config
+        < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log "$SYMPHONY_LAST_MESSAGE_PATH"' --
+        '{
+          "symphony-fable-lead": {
+            "description": "Plans and reviews Symphony tasks and delegates implementation.",
+            "tools": ["Read", "Glob", "Grep", "Agent(symphony-opus-implementer)"],
+            "prompt": "Analyze the task and decide the approach. For tasks requiring changes, delegate all file edits, shell commands, tests, commits, pushes, and GitHub writes to symphony-opus-implementer. Pass the full task, constraints, and delivery requirements. Wait for its result, review it, and delegate any fixes before reporting completion. Honor planning-only requests. If the worker reports a SYMPHONY_PAUSE block, preserve it verbatim in your final answer."
+          },
+          "symphony-opus-implementer": {
+            "description": "Implements, verifies, and delivers changes assigned by the Symphony coordinator.",
+            "model": "claude-opus-5-5",
+            "tools": ["Read", "Glob", "Grep", "Bash", "Edit", "Write"],
+            "prompt": "Execute the assigned Symphony task in the current workspace. Follow the supplied repository, verification, and delivery requirements. Report the changes, checks, and any blocker or required SYMPHONY_PAUSE block to the coordinator."
+          }
+        }'
+      handoff_command: >-
+        bash -lc 'set -o pipefail;
+        claude -p --model fable --permission-mode dontAsk --tools Read,Glob,Grep --allowedTools Read,Glob,Grep --setting-sources "" --strict-mcp-config
+        < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log "$SYMPHONY_LAST_MESSAGE_PATH"'
       output_log: .symphony/claude-fable.log
       turn_timeout_ms: 3600000
       max_concurrent: 1
