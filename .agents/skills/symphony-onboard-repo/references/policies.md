@@ -27,7 +27,7 @@ The advanced route order in mdedit and Symphony's current example is:
 5. Other UX/UI/design work, including low/medium complexity → Claude.
 6. Default → regular Codex.
 
-Explicit override labels must not be defeated by task labels. Use the installed workflow's supported providers; do not hardcode a model alias from these notes. Ordinary side projects need none of this advanced routing.
+Explicit override labels must not be defeated by task labels. Use the installed workflow's supported providers; do not hardcode a model alias from these notes. The seven configured side projects use a simpler two-provider policy: `agent:codex`, then `agent:claude`, then `user-experience` / `ui` / `ux` / `design` to Claude, then Codex as the default. Preserve this policy when reconciling those repositories. Claude planning and handoffs use a separate command restricted to read-only file tools.
 
 ## Workspace and storage settings
 

@@ -140,7 +140,7 @@ Use [`$symphony-plan-issues`](.agents/skills/symphony-plan-issues/SKILL.md) to t
 
 Routes use the first matching rule. In the example workflow, explicit `agent:codex` comes first (and wins if both overrides are present). `agent:claude` selects Claude, or `claude-fable` for high/critical complexity, before any task-based rule. High/critical UX work selects `claude-fable`; tiny/docs/chore tasks use regular Codex; other UX work, including low/medium complexity, uses Claude. Everything else uses Codex. No Spark provider is configured.
 
-All execution modes still require `ready-for-agent` and respect blocking/human-attention labels. `planning` or `task:spec` requests a planning-only run. Epic coordination uses native GitHub sub-issues; provider/complexity labels do not inherit from the parent. With `auto_label_children: false`, label each child `ready-for-agent` explicitly. Legacy aliases such as `agent-ready` do not queue work. The seven configured side projects intentionally use a single default Codex route.
+All execution modes still require `ready-for-agent` and respect blocking/human-attention labels. `planning` or `task:spec` requests a planning-only run. Epic coordination uses native GitHub sub-issues; provider/complexity labels do not inherit from the parent. With `auto_label_children: false`, label each child `ready-for-agent` explicitly. Legacy aliases such as `agent-ready` do not queue work. The seven configured side projects route `ui`, `ux`, `design`, and `user-experience` to Claude and default to Codex. The `agent:codex` and `agent:claude` labels take precedence, with Codex winning if both are present. Intake grooming uses the repository default.
 
 ## Daily storage maintenance
 
