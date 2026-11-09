@@ -4,10 +4,20 @@ Symphony is a self-hosted harness that runs coding agents from a GitHub Issues q
 
 ```mermaid
 flowchart TD
-    queue["GitHub Issues<br/>Labeled work"] --> harness["Symphony<br/>Schedules and routes work"]
-    policy["WORKFLOW.md<br/>Repository policy"] --> harness
-    harness --> run["Coding agent<br/>Isolated workspace"]
-    run --> outcome["GitHub<br/>Pull requests and issue updates"]
+    issues["GitHub Issues"] --> queue
+    workflow["WORKFLOW.md<br/>Labels, routes, hooks, and checks"] -.-> queue
+
+    queue["Symphony polls and prioritizes work<br/>Checks readiness labels and dependencies"]
+    queue --> route["Choose a provider<br/>First matching label rule, then the default"]
+    route --> workspace["Prepare an isolated workspace<br/>Check out code and run setup hooks"]
+    workspace --> agent["Run Codex or Claude Code<br/>Implement and verify the change"]
+
+    agent -->|Needs input| pause["Pause and ask for input<br/>GitHub or optional Telegram"]
+    pause -.->|Resume after requeue| agent
+    agent -->|Changes ready| pr["Create or update a pull request<br/>Record the result on the issue"]
+    pr --> gates["Apply configured checks and reviews"]
+    gates -->|Auto-merge allowed| merge["Merge PR"]
+    gates -->|Otherwise| review["PR stays open"]
 ```
 
 Symphony can run Codex and Claude Code in parallel, retry interrupted work, and track runs in a local read-only dashboard. Workflows can also enable PR review handling and automatic merging.
