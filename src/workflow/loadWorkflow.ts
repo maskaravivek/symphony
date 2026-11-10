@@ -473,6 +473,14 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
   const workspaceRoot = expandHomeDir(asString(workspaceRaw.root, 'workspace.root') ?? defaultWorkspaceRoot);
   const cleanOnTerminal = asBoolean(workspaceRaw.clean_on_terminal, 'workspace.clean_on_terminal') ?? false;
   const workspaceStrategy = normalizeWorkspaceStrategy(workspaceRaw.strategy);
+  const generatedOutputs = asStringArray(workspaceRaw.generated_outputs, 'workspace.generated_outputs');
+  for (const output of generatedOutputs ?? []) {
+    const parts = output.replace(/\/$/, '').split('/');
+    if (!/^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*\/?$/.test(output)
+      || parts.some(part => part === '.' || part === '..' || part.toLowerCase() === '.git')) {
+      throw new SymphonyConfigError('workspace.generated_outputs must contain literal relative paths');
+    }
+  }
   let checkout: WorkflowConfig['workspace']['checkout'];
   if (workspaceRaw.checkout !== undefined) {
     const value = workspaceRaw.checkout;
@@ -589,7 +597,7 @@ function normalizeWorkflowConfig(raw: unknown): WorkflowConfig {
       request_timeout_ms: requestTimeoutMs,
     },
     polling: { interval_ms: pollingInterval },
-    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy, checkout, storage_maintenance: storage },
+    workspace: { root: workspaceRoot, clean_on_terminal: cleanOnTerminal, strategy: workspaceStrategy, checkout, generated_outputs: generatedOutputs ?? undefined, storage_maintenance: storage },
     hooks: {
       after_create: afterCreate ?? null,
       before_run: beforeRun ?? null,

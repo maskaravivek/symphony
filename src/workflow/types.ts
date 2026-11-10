@@ -35,6 +35,7 @@ export interface PollingConfig {
 export interface WorkspaceConfig {
   root: string;
   clean_on_terminal: boolean;
+  generated_outputs?: string[];
   checkout?: { kind: 'linked_worktree'; source: string; base_branch: string };
   strategy: WorkspaceStrategyConfig;
   storage_maintenance?: Partial<StorageMaintenanceConfig>;

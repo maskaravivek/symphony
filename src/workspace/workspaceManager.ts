@@ -99,7 +99,7 @@ export class WorkspaceManager {
     if (await hasLivePreparation(workspacePath)) throw new DispatchDeferredError('Workspace is being prepared by a live coordinator');
     const previous = await readRunState(workspacePath);
     if (strategy === 'pooled_isolated' && previous && ['completed', 'failed', 'cancelled'].includes(previous.status)
-      && await ownsLinkedWorktree(this.config.root, workspacePath) && await disposableCheckout(workspacePath, {linkedRoot:this.config.root})) {
+      && await ownsLinkedWorktree(this.config.root, workspacePath) && await disposableCheckout(workspacePath, this.config)) {
       await this.cleanWorkspace(workspacePath, {retainCheckout:true});
     }
     this.allocations.set(issue.id, workspacePath);
@@ -129,7 +129,7 @@ export class WorkspaceManager {
       if (!resume && state && ['paused','retry-wait'].includes(state.status)) {
         throw new DispatchDeferredError('Original PR worktree is reserved for unfinished work');
       }
-      if (!resume && !(await disposableCheckout(workspace, {linkedRoot:this.config.root}))) continue;
+      if (!resume && !(await disposableCheckout(workspace, this.config))) continue;
       candidates.push({workspace, priority:resume ? 0 : sameReview ? 1 : original ? 2 : 3});
     }
     candidates.sort((a,b) => a.priority-b.priority);
@@ -169,7 +169,7 @@ export class WorkspaceManager {
       });
       // Reusing a slot runs destructive checkout hooks: apply the same local-work protections as deletion.
       const owned = await ownsLinkedWorktree(this.config.root, workspacePath);
-      const reusable = await disposableCheckout(workspacePath, { linkedRoot: this.config.root });
+      const reusable = await disposableCheckout(workspacePath, this.config);
       if (entries.length === 0 || (reusable && (owned || Boolean(state)))) return workspacePath;
     }
 
@@ -234,7 +234,7 @@ export class WorkspaceManager {
     const linked = await ownsLinkedWorktree(this.config.root, workspacePath);
     const pooled = options.retainCheckout || /^_pool_[1-9][0-9]*$/.test(path.basename(workspacePath))
       || (linked && (await readRunState(workspacePath))?.workspace_strategy === 'pooled_isolated');
-    if (linked && !(await disposableCheckout(workspacePath, { linkedRoot: this.config.root }))) throw new DispatchDeferredError('Preserving protected linked workspace');
+    if (linked && !(await disposableCheckout(workspacePath, this.config))) throw new DispatchDeferredError('Preserving protected linked workspace');
     const stamp = linked && pooled ? await fs.readFile(path.join(workspacePath, '.symphony', 'dependencies.json')).catch(() => null) : null;
     const trackedArtifacts = linked
       ? (await execFileAsync('git', ['ls-files', '-z', '--', '.symphony'], { cwd: workspacePath })).stdout
@@ -251,7 +251,7 @@ export class WorkspaceManager {
       return; // Warm slots retain source, dependency installations and build caches.
     }
     try {
-      if (linked) await removeLinkedWorktree(this.config.root, workspacePath);
+      if (linked) await removeLinkedWorktree(this.config, workspacePath);
       else await fs.rm(workspacePath, { recursive: true, force: true });
     } catch (error) {
       if (archive) {

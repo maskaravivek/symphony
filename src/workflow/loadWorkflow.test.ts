@@ -839,3 +839,14 @@ agents:
   await fs.writeFile(file, text.replace('max_pool_slots: 4', 'max_pool_slots: 1'));
   await assert.rejects(loadWorkflowFromFile(file), /warm_pool_slots/);
 });
+
+test('workspace generated outputs accept literal relative file and directory paths only', async () => {
+  const base = `tracker:\n  owner: test\n  repo: app\n  token: test\nagents:\n  providers:\n    codex:\n      command: codex exec -\nworkspace:\n`;
+  const outputs = ['apps/web/out/', 'apps/web/public/sw.js'];
+  const workflow = await writeWorkflow(`${base}  generated_outputs: ${JSON.stringify(outputs)}\n`);
+  assert.deepEqual((await loadWorkflowFromFile(workflow)).config.workspace.generated_outputs, outputs);
+  for (const invalid of ['/tmp/', '../output', 'apps/../out', 'apps/*/out', './', '.git/']) {
+    const file = await writeWorkflow(`${base}  generated_outputs: ${JSON.stringify([invalid])}\n`);
+    await assert.rejects(loadWorkflowFromFile(file), /workspace.generated_outputs/);
+  }
+});

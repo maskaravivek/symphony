@@ -68,11 +68,11 @@ export async function storageAvailable(root: string, minFreeGiB: number): Promis
 
 
 /** Reclaim ignored generated output, keeping installed dependencies in warm slots. */
-async function pruneWorkspaceCaches(workspace: string, cutoff: number, budget: number): Promise<number> {
+async function pruneWorkspaceCaches(workspace: string, cutoff: number, budget: number, generatedOutputs?: readonly string[]): Promise<number> {
   const { stdout } = await promisify(execFile)('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: workspace, timeout: 15_000 });
   const candidates = [];
   for (const name of stdout.split('\0').filter(Boolean)) {
-    if (!generatedOutput(name)) continue;
+    if (!generatedOutput(name, generatedOutputs)) continue;
     const file = path.resolve(workspace, name);
     if (!file.startsWith(`${path.resolve(workspace)}${path.sep}`) || !(await safeStoragePath(file))) continue;
     const tracked = await promisify(execFile)('git', ['ls-files', '--', name], { cwd: workspace, timeout: 15_000 });
@@ -124,9 +124,9 @@ export async function maintainStorage(config: WorkspaceConfig, busy: boolean, no
       const state = await readRunState(workspace);
       if (/^_pool_[1-9][0-9]*$/.test(entry.name) && await ownsLinkedWorktree(config.root, workspace)) {
         if (state && !['completed', 'failed', 'cancelled'].includes(state.status)) continue;
-        if (!(await disposableCheckout(workspace, { linkedRoot: config.root }))) continue;
+        if (!(await disposableCheckout(workspace, config))) continue;
         if (warmSlots++ < policy.warm_pool_slots) {
-          reclaimed += await pruneWorkspaceCaches(workspace, cutoff, policy.max_cache_gib * GIB);
+          reclaimed += await pruneWorkspaceCaches(workspace, cutoff, policy.max_cache_gib * GIB, config.generated_outputs);
         } else if ((await fs.stat(workspace)).mtimeMs < now - policy.idle_days * DAY) {
           await manager.cleanWorkspace(workspace, { evict: true }); workspacesRemoved++;
         }

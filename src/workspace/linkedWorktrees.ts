@@ -53,7 +53,7 @@ async function prepare(config: WorkspaceConfig, workspace: string, signal?: Abor
     if (!(await ownsLinkedWorktree(config.root, workspace))) throw new DispatchDeferredError('Preserving an unowned linked worktree');
     const record = JSON.parse(await fs.readFile(path.join(root, '.symphony', 'repository.json'), 'utf8'));
     if (record.source !== source) throw new DispatchDeferredError('Shared repository belongs to a different source checkout');
-    if (!preserveWork && !(await disposableCheckout(workspace, { linkedRoot: config.root }))) throw new DispatchDeferredError('Linked workspace contains protected work');
+    if (!preserveWork && !(await disposableCheckout(workspace, config))) throw new DispatchDeferredError('Linked workspace contains protected work');
     return; // before_run fetches the task base; never reset a resumed workspace here.
   }
   if (gitEntry) {
@@ -85,7 +85,7 @@ async function prepare(config: WorkspaceConfig, workspace: string, signal?: Abor
           await fs.rename(path.join(workspace, name), path.join(backup, name));
         }
         if (await ownsLinkedWorktree(config.root, workspace)) {
-          await removeLinkedWorktree(config.root, workspace);
+          await removeLinkedWorktree(config, workspace);
           await fs.rename(backup, workspace);
         }
         throw error;
@@ -143,10 +143,10 @@ async function prepare(config: WorkspaceConfig, workspace: string, signal?: Abor
 }
 
 /** Managed worktree removal must unregister it, never recursively remove its .git file. */
-export async function removeLinkedWorktree(root: string, workspace: string): Promise<void> {
-  if (!(await ownsLinkedWorktree(root, workspace)) || !(await disposableCheckout(workspace, { linkedRoot: root }))) throw new DispatchDeferredError('Linked workspace contains protected work');
+export async function removeLinkedWorktree(config: WorkspaceConfig, workspace: string): Promise<void> {
+  if (!(await ownsLinkedWorktree(config.root, workspace)) || !(await disposableCheckout(workspace, config))) throw new DispatchDeferredError('Linked workspace contains protected work');
   // Ignored build artifacts are intentionally evicted only after the safety check.
-  await git(mirrorFor(root), ['worktree', 'remove', '--force', workspace]);
+  await git(mirrorFor(config.root), ['worktree', 'remove', '--force', workspace]);
 }
 
 
@@ -165,7 +165,7 @@ export async function releaseIdleTaskBranch(config: WorkspaceConfig, workspace: 
       const state = await readRunState(other);
       const reserved = state && ['preparing', 'agent-running', 'finalizing', 'paused', 'retry-wait'].includes(state.status);
       if (reserved || await hasLivePreparation(other) || !(await ownsLinkedWorktree(config.root, other)) ||
-          !(await disposableCheckout(other, { linkedRoot: config.root }))) {
+          !(await disposableCheckout(other, config))) {
         throw new DispatchDeferredError(`Task branch ${branch} belongs to a protected workspace`);
       }
       // Detaching at HEAD preserves every commit, source file, dependency and cache.

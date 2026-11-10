@@ -14,13 +14,18 @@ import type { WorkspaceConfig } from '../workflow/types.js';
 
 const exec = promisify(execFile);
 const git = async (cwd: string, ...args: string[]) => (await exec('git', args, { cwd })).stdout.trim();
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, trackedFiles: string[] = []) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-linked-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const source = path.join(root, 'source'), remote = path.join(root, 'remote.git');
   await fs.mkdir(source); await git(source, 'init', '-q', '-b', 'main');
   await git(source, 'config', 'user.email', 'test@example.com'); await git(source, 'config', 'user.name', 'Test');
   await fs.writeFile(path.join(source, 'source.txt'), 'source');
+  for (const name of trackedFiles) {
+    const file = path.join(source, name);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'source');
+  }
   await fs.writeFile(path.join(source, '.gitignore'), 'node_modules/\n.next/\n.symphony/\n');
   await git(source, 'add', '.'); await git(source, 'commit', '-qm', 'initial');
   // Real repositories can track verification configuration inside the otherwise ignored artifact directory.
@@ -45,7 +50,7 @@ test('parallel linked slots share Git objects and isolate edits without touching
   assert.equal(await fs.readFile(path.join(second, 'source.txt'), 'utf8'), 'source');
   assert.equal(await fs.readFile(path.join(source, 'source.txt'), 'utf8'), 'source');
   assert.equal(await ownsLinkedWorktree(config.root, slot), true);
-  await assert.rejects(removeLinkedWorktree(config.root, slot), /protected/);
+  await assert.rejects(removeLinkedWorktree(config, slot), /protected/);
   await assert.rejects(ensureLinkedWorktree(config, slot), /protected/);
   await ensureLinkedWorktree(config, slot, undefined, true);
   assert.equal(await fs.readFile(path.join(slot, 'source.txt'), 'utf8'), 'agent edit');
@@ -58,7 +63,7 @@ test('terminal release preserves a warm linked slot, dependencies and install st
   await fs.writeFile(path.join(slot, '.symphony', 'state.json'), 'old state');
   const manager = new WorkspaceManager(config);
   await manager.cleanWorkspace(slot);
-  assert.equal(await disposableCheckout(slot, { linkedRoot: config.root }), true);
+  assert.equal(await disposableCheckout(slot, config), true);
   assert.equal(await fs.readFile(path.join(slot, '.symphony', 'verification.json'), 'utf8'), '{}');
   assert.equal(await fs.readFile(path.join(slot, 'node_modules', 'cached'), 'utf8'), 'keep');
   assert.equal(JSON.parse(await fs.readFile(path.join(slot, '.symphony', 'dependencies.json'), 'utf8')).fingerprint, 'valid');
@@ -71,14 +76,51 @@ test('terminal release preserves a warm linked slot, dependencies and install st
   assert.ok(!(await git(path.join(config.root, '.symphony', 'repository.git'), 'worktree', 'list', '--porcelain')).includes(slot));
 });
 
+test('configured ignored outputs let a failed pooled checkout be cleaned and reused', async t => {
+  const { config, slot } = await fixture(t, ['apps/expo-app/App.tsx', 'apps/next/public/favicon.ico']);
+  await ensureLinkedWorktree(config, slot);
+  const outputs = ['apps/expo-app/.expo/', 'apps/expo-app/expo-env.d.ts', 'apps/next/out/', 'apps/next/public/sw.js'];
+  const exclude = path.join(config.root, '.symphony', 'repository.git', 'info', 'exclude');
+  await fs.appendFile(exclude, '\n' + outputs.map(name => `/${name}`).join('\n') + '\n/apps/next/public/private.env\n');
+  for (const name of outputs) {
+    const file = path.join(slot, name, name.endsWith('/') ? 'generated' : '');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, 'generated');
+  }
+  await fs.writeFile(path.join(slot, '.symphony', 'run.json'), JSON.stringify({ status: 'failed', workspace_path: slot }));
+  const manager = new WorkspaceManager(config);
+  await assert.rejects(manager.cleanWorkspace(slot), /protected/);
+
+  config.generated_outputs = outputs;
+  const privateFile = path.join(slot, 'apps/next/public/private.env');
+  await fs.writeFile(privateFile, 'local settings');
+  await assert.rejects(manager.cleanWorkspace(slot), /protected/);
+  await fs.rm(privateFile);
+
+  const next: Issue = { id: '2', identifier: 'example/app#2', number: 2, title: 'Next task', description: '', priority: null, url: null,
+    state: 'open', labels: [], assignees: [], milestone: null, blocked_by: [], pull_requests: [], workflow_state: null,
+    branch_name: 'symphony-2', created_at: null, updated_at: null, ready_for_agent_labeled_at: null };
+  await manager.cleanWorkspace(slot);
+  assert.equal((await manager.ensureWorkspace(next, { strategy: 'pooled_isolated' })).workspace_path, slot);
+  await manager.prepareCheckout(slot);
+
+  const serviceWorker = path.join(slot, 'apps/next/public/sw.js');
+  await git(slot, 'add', '-f', 'apps/next/public/sw.js');
+  await assert.rejects(manager.cleanWorkspace(slot, { evict: true }), /protected/);
+  assert.equal(await fs.readFile(serviceWorker, 'utf8'), 'generated');
+  await git(slot, 'reset', '--', 'apps/next/public/sw.js');
+  await manager.cleanWorkspace(slot, { evict: true });
+  await assert.rejects(fs.access(slot));
+});
+
 test('unpublished work and foreign linked worktrees never become disposable', async t => {
   const { config, slot, source, root } = await fixture(t); await ensureLinkedWorktree(config, slot);
   await git(slot, 'config', 'user.email', 'test@example.com'); await git(slot, 'config', 'user.name', 'Test');
   await fs.writeFile(path.join(slot, 'new.txt'), 'unpublished'); await git(slot, 'add', '.'); await git(slot, 'commit', '-qm', 'local only');
-  assert.equal(await disposableCheckout(slot, { linkedRoot: config.root }), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   const foreign = path.join(root, 'foreign'); await git(source, 'worktree', 'add', '--detach', foreign, 'HEAD');
   assert.equal(await ownsLinkedWorktree(config.root, foreign), false);
-  assert.equal(await disposableCheckout(foreign, { linkedRoot: config.root }), false);
+  assert.equal(await disposableCheckout(foreign, config), false);
 });
 
 test('maintenance retains warm dependencies, prunes stale output and unregisters only excess idle slots', async t => {
@@ -165,15 +207,15 @@ test('terminal evidence and ignored build outputs release a warm slot without di
   await fs.writeFile(path.join(slot, '.symphony', 'verification.json'), evidence);
   await fs.writeFile(path.join(artifacts, 'verification.json'), evidence);
   await fs.writeFile(path.join(slot, '.symphony', 'run.json'), JSON.stringify({status:'completed', workspace_path:slot, session_artifact_dir:artifacts}));
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), true);
+  assert.equal(await disposableCheckout(slot, config), true);
   await fs.writeFile(path.join(slot, 'source.txt'), 'unfinished edit');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   await git(slot, 'restore', '--', 'source.txt');
   await fs.writeFile(path.join(slot, 'private-backup.txt'), 'preserve');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   await fs.rm(path.join(slot, 'private-backup.txt'));
   await fs.writeFile(path.join(slot, '.symphony', 'verification.json'), 'unarchived evidence');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   await fs.writeFile(path.join(slot, '.symphony', 'verification.json'), evidence);
   await new WorkspaceManager(config).cleanWorkspace(slot);
   assert.equal(await git(slot, 'status', '--porcelain'), '');
@@ -193,15 +235,15 @@ test('ignored cache files and unstaged tracked build caches do not block cleanup
   await fs.appendFile(exclude, '\n*.tsbuildinfo\n.eslintcache\n.stylelintcache\n.DS_Store\nnpm-debug.log\n.env.local\n');
   for (const name of ['extra.tsbuildinfo', '.eslintcache', '.stylelintcache', '.DS_Store', 'npm-debug.log']) await fs.writeFile(path.join(slot, name), 'generated');
   await fs.writeFile(path.join(slot, 'tsconfig.tsbuildinfo'), 'rebuilt');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), true);
+  assert.equal(await disposableCheckout(slot, config), true);
   await git(slot, 'add', 'tsconfig.tsbuildinfo');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   await git(slot, 'restore', '--staged', 'tsconfig.tsbuildinfo');
   await fs.writeFile(path.join(slot, '.env.local'), 'CUSTOM_SETTING=preserve');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   await fs.rm(path.join(slot, '.env.local'));
   await fs.writeFile(path.join(slot, 'source.txt'), 'source edit');
-  assert.equal(await disposableCheckout(slot, {linkedRoot:config.root}), false);
+  assert.equal(await disposableCheckout(slot, config), false);
   await git(slot, 'restore', 'source.txt');
   await new WorkspaceManager(config).cleanWorkspace(slot);
   assert.equal(await git(slot, 'status', '--porcelain'), '');

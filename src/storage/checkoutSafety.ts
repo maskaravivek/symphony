@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import type { WorkspaceConfig } from '../workflow/types.js';
 import { safeStoragePath } from './paths.js';
 
 const exec = promisify(execFile);
@@ -12,11 +13,11 @@ const git = async (cwd: string, ...args: string[]) => (await exec('git', args, {
 const exists = (file: string) => fs.lstat(file).then(() => true, () => false);
 
 /** All local branches must be represented in remote-tracking refs. Never fetch or reset here. */
-export async function disposableCheckout(workspace: string, options: { linkedRoot?: string } = {}): Promise<boolean> {
+export async function disposableCheckout(workspace: string, config?: Pick<WorkspaceConfig, 'root' | 'generated_outputs'>): Promise<boolean> {
   try {
     if (!(await safeStoragePath(workspace))) return false;
     const gitDir = await fs.lstat(path.join(workspace, '.git'));
-    const linked = Boolean(options.linkedRoot && await ownsLinkedWorktree(options.linkedRoot, workspace));
+    const linked = Boolean(config && await ownsLinkedWorktree(config.root, workspace));
     if ((!gitDir.isDirectory() && !linked) || gitDir.isSymbolicLink()) return false;
     const dirty = (await exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: workspace, timeout: 15_000 })).stdout;
     if (dirty) {
@@ -34,10 +35,10 @@ export async function disposableCheckout(workspace: string, options: { linkedRoo
     }
     if (await git(workspace, 'rev-list', 'HEAD', ...(linked ? [] : ['--branches', '--tags']), '--not', '--remotes')) return false;
     // Only known generated ignored directories may disappear with the checkout.
-    const ignored = await git(workspace, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory');
-    for (const name of ignored.split('\n').filter(Boolean)) {
+    const { stdout: ignored } = await exec('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], { cwd: workspace, timeout: 15_000 });
+    for (const name of ignored.split('\0').filter(Boolean)) {
       // Tracked configuration within .symphony makes Git enumerate ignored artifacts individually.
-      if (name.startsWith('.symphony/') || generatedOutput(name)) continue;
+      if (name.startsWith('.symphony/') || generatedOutput(name, linked ? config?.generated_outputs : undefined)) continue;
       if (/(^|\/)(\.symphony|node_modules|\.next|\.turbo|\.gradle|\.kotlin|\.cxx|\.build|\.swiftpm|DerivedData|dist|build|coverage)\/$/.test(name)) continue;
       // Android setup may generate this file. Credentials/custom settings remain protected.
       if (/(^|\/)local.properties$/.test(name)) {

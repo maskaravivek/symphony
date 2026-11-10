@@ -5,8 +5,9 @@ export function disposableCacheFile(name: string): boolean {
 }
 
 /** Only ignored, known tool output is eligible; caller still checks ownership and tracked files. */
-export function generatedOutput(name: string): boolean {
-  return disposableCacheFile(name)
+export function generatedOutput(name: string, configured?: readonly string[]): boolean {
+  return configured?.includes(name) === true
+    || disposableCacheFile(name)
     || /(^|\/)(\.next|\.open-next|\.turbo|\.gradle|dist|build|coverage|test-results|playwright-report|blob-report|\.parcel-cache|\.vite|\.vitest|\.svelte-kit|\.nuxt|\.output|\.astro|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache)(\/|$)/.test(name)
     || /(^|\/)(\.angular|\.nx|\.expo)\/cache(\/|$)/.test(name)
     || /(^|\/)\.wrangler\/tmp(\/|$)/.test(name)

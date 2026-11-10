@@ -73,6 +73,8 @@ loops:
 workspace:
   root: ~/.symphony/workspaces/mdedit
   clean_on_terminal: true
+  # Optional literal ignored outputs relative to the checkout. End directory paths with /.
+  # generated_outputs: [apps/web/out/, apps/web/public/sw.js]
   checkout:
     kind: linked_worktree
     source: . # Resolve relative to this workflow; keep the primary checkout outside workspace.root.
