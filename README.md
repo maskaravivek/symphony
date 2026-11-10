@@ -40,7 +40,7 @@ yarn cli doctor --workflow ../your-repo/WORKFLOW.md
 yarn dev run --workflow ../your-repo/WORKFLOW.md
 ```
 
-Once Symphony is running, add `ready-for-agent` (or your configured readiness label) to a GitHub issue. The dev command opens the dashboard. Use `yarn cli --help` for commands such as `status`, `tail`, and `history`.
+Once Symphony is running, add `ready-for-agent` (or your configured readiness label) to a GitHub issue. The dev command opens the dashboard, which refreshes every five minutes by default. Select **Refresh now** for an immediate update. If Symphony is already running in the background, start just the dashboard with `yarn cli dashboard --config symphony.config.yml`. Use `yarn cli --help` for commands such as `status`, `tail`, and `history`.
 
 ## Further setup
 

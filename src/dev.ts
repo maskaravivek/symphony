@@ -1,7 +1,7 @@
 import { execFile, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 
-import { startDashboardServer, type StartedDashboardServer } from './dashboard/server.js';
+import { DEFAULT_DASHBOARD_REFRESH_MS, startDashboardServer, type StartedDashboardServer } from './dashboard/server.js';
 import { signalRunProcess, spawnRunProcess } from './devProcess.js';
 
 interface DevRunConfig {
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     ...config.dashboard,
     host: process.env.SYMPHONY_DASHBOARD_HOST ?? '127.0.0.1',
     port: parseNonNegativeIntegerEnv('SYMPHONY_DASHBOARD_PORT', 3766),
-    refreshMs: parsePositiveIntegerEnv('SYMPHONY_DASHBOARD_REFRESH_MS', 5000),
+    refreshMs: parsePositiveIntegerEnv('SYMPHONY_DASHBOARD_REFRESH_MS', DEFAULT_DASHBOARD_REFRESH_MS),
   });
 
   // eslint-disable-next-line no-console

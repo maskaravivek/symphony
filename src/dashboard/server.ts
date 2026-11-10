@@ -3,6 +3,8 @@ import { URL } from 'node:url';
 
 import { loadBoardState, type LoadBoardStateOptions } from '../status/boardState.js';
 
+export const DEFAULT_DASHBOARD_REFRESH_MS = 300_000;
+
 export interface DashboardServerOptions {
   config?: string;
   workflow?: string;
@@ -264,6 +266,7 @@ function renderDashboardHtml(refreshMs: number): string {
     .quiet-button { min-height: 34px; padding: 5px 10px; font-size: 12px; font-weight: 600; }
     .quiet-button:hover, .copy-button:hover, .card-toggle:hover { background: var(--surface-hover); border-color: var(--muted); color: var(--ink); }
     .quiet-button:focus-visible, .copy-button:focus-visible, .card-toggle:focus-visible, a:focus-visible { box-shadow: var(--focus); outline: none; }
+    .quiet-button:disabled { opacity: 0.6; cursor: default; }
     .refresh-error {
       padding: 8px 10px;
       border: 1px solid color-mix(in oklch, var(--bad) 25%, var(--line));
@@ -543,6 +546,7 @@ function renderDashboardHtml(refreshMs: number): string {
           <span class="status-dot" aria-hidden="true"></span>
           <span id="updated">Refreshing</span>
         </span>
+        <button id="refreshButton" class="quiet-button" type="button">Refresh now</button>
       </div>
     </div>
     <form class="filters" aria-label="Dashboard filters" role="search" onsubmit="return false">
@@ -595,6 +599,7 @@ function renderDashboardHtml(refreshMs: number): string {
     const totalContextEl = document.getElementById('totalContext');
     const staleEl = document.getElementById('stale');
     const updatedEl = document.getElementById('updated');
+    const refreshButton = document.getElementById('refreshButton');
     const refreshStatusEl = document.getElementById('refreshStatus');
     const refreshErrorEl = document.getElementById('refreshError');
     const searchFilter = document.getElementById('searchFilter');
@@ -605,6 +610,7 @@ function renderDashboardHtml(refreshMs: number): string {
     const staleFilter = document.getElementById('staleFilter');
     const clearFilters = document.getElementById('clearFilters');
     let currentBoard = null;
+    let refreshTimer;
     const expandedCards = new Set();
 
     function text(value) {
@@ -922,6 +928,9 @@ function renderDashboardHtml(refreshMs: number): string {
     }
 
     async function refresh() {
+      if (refreshButton.disabled) return;
+      clearTimeout(refreshTimer);
+      refreshButton.disabled = true;
       refreshStatusEl.className = 'refresh-status refreshing';
       if (!currentBoard) updatedEl.textContent = 'Loading';
       refreshErrorEl.hidden = true;
@@ -939,6 +948,9 @@ function renderDashboardHtml(refreshMs: number): string {
         refreshErrorEl.textContent = error instanceof Error ? error.message : String(error);
         refreshErrorEl.hidden = false;
         boardEl.setAttribute('aria-busy', 'false');
+      } finally {
+        refreshButton.disabled = false;
+        refreshTimer = setTimeout(refresh, refreshMs);
       }
     }
 
@@ -948,6 +960,7 @@ function renderDashboardHtml(refreshMs: number): string {
       });
     }
     clearFilters.addEventListener('click', resetFilters);
+    refreshButton.addEventListener('click', refresh);
     searchFilter.addEventListener('keydown', (event) => {
       if (event.key === 'Escape' && searchFilter.value) {
         searchFilter.value = '';
@@ -956,7 +969,6 @@ function renderDashboardHtml(refreshMs: number): string {
     });
 
     refresh();
-    setInterval(refresh, refreshMs);
     setInterval(() => {
       if (currentBoard && refreshStatusEl.classList.contains('ready')) {
         updatedEl.textContent = formatRelativeDate(currentBoard.generated_at);

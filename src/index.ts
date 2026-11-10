@@ -16,7 +16,7 @@ import { loadServerConfigFromFile } from './server/loadServerConfig.js';
 import { selectRunState } from './status/selectRunState.js';
 import type { RunState } from './status/runState.js';
 import type { LoadedWorkflow } from './workflow/types.js';
-import { startDashboardServer } from './dashboard/server.js';
+import { DEFAULT_DASHBOARD_REFRESH_MS, startDashboardServer } from './dashboard/server.js';
 import { SymphonyConfigError } from './utils/errors.js';
 import { requiredToolsForWorkflow } from './doctor/requiredTools.js';
 import { labelsForWorkflow, routingProblems } from './doctor/labels.js';
@@ -476,7 +476,7 @@ async function main(): Promise<void> {
     .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
     .option('--host <host>', 'Host to bind', '127.0.0.1')
     .option('--port <port>', 'Port to bind; the next free port is used if occupied', '3766')
-    .option('--refresh-ms <ms>', 'Browser refresh interval in milliseconds', '5000')
+    .option('--refresh-ms <ms>', 'Browser refresh interval in milliseconds', String(DEFAULT_DASHBOARD_REFRESH_MS))
     .action(async (options: { config?: string; workflow: string; host: string; port: string; refreshMs: string }) => {
       const port = parseNonNegativeInteger(options.port, '--port');
       const refreshMs = parsePositiveInteger(options.refreshMs, '--refresh-ms');

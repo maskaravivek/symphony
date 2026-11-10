@@ -102,6 +102,7 @@ test('serves readonly dashboard HTML and board JSON', async () => {
     assert.doesNotMatch(html, /prefers-color-scheme: dark/);
     assert.match(html, /aria-label="Dashboard filters"/);
     assert.match(html, /id="clearFilters"/);
+    assert.match(html, /<button id="refreshButton"[^>]*type="button">Refresh now<\/button>/);
     assert.match(html, /id="refreshStatus"[^>]*role="status"/);
     assert.match(html, /Loading orchestration state/);
 
