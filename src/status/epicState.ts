@@ -39,7 +39,7 @@ export interface EpicState {
   updated_at: string;
 }
 
-export function reconcileEpicStateWithIssue(state: EpicState, issue: Issue, terminalStates: string[]): EpicState {
+export function reconcileEpicStateWithIssue(state: EpicState, issue: Pick<Issue, 'id' | 'number' | 'identifier' | 'url' | 'title' | 'labels' | 'state' | 'updated_at'>, terminalStates: string[]): EpicState {
   const parentIsTerminal = terminalStates.includes(issue.state);
   return {
     ...state,

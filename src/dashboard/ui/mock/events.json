@@ -1,0 +1,351 @@
+{
+  "generated_at": "2026-11-10T15:00:00.000Z",
+  "events": [
+    {
+      "sequence": 9197,
+      "repo_id": "atlas-api",
+      "episode_id": "mangoappstudio/atlas-api#79:attempt:1",
+      "event": "agent.started",
+      "created_at": "2026-11-10T14:51:00.000Z",
+      "level": "ok",
+      "summary": "codex started PR review of #81",
+      "issue_number": 79,
+      "pr_number": 81,
+      "task_key": "atlas-api/79",
+      "payload": {
+        "issue_number": 79,
+        "pr_number": 81
+      }
+    },
+    {
+      "sequence": 9194,
+      "repo_id": "symphony",
+      "episode_id": "mangoappstudio/symphony#205:attempt:1",
+      "event": "agent.started",
+      "created_at": "2026-11-10T14:18:00.000Z",
+      "level": "ok",
+      "summary": "claude started autonomous attempt 2 on #205",
+      "issue_number": 205,
+      "pr_number": null,
+      "task_key": "symphony/205",
+      "payload": {
+        "issue_number": 205
+      }
+    },
+    {
+      "sequence": 9191,
+      "repo_id": "pantry",
+      "episode_id": "mangoappstudio/pantry#311:attempt:1",
+      "event": "workflow.paused",
+      "created_at": "2026-11-10T13:56:00.000Z",
+      "level": "warn",
+      "summary": "#311 paused: agent asked a question (needs-info)",
+      "issue_number": 311,
+      "pr_number": null,
+      "task_key": "pantry/311",
+      "payload": {
+        "issue_number": 311
+      }
+    },
+    {
+      "sequence": 9188,
+      "repo_id": "mdedit-web",
+      "episode_id": "mangoappstudio/mdedit-web#405:attempt:1",
+      "event": "merge.blocked",
+      "created_at": "2026-11-10T14:05:00.000Z",
+      "level": "warn",
+      "summary": "Merge blocked for PR #412: required check 'e2e (chromium)' failing",
+      "issue_number": 405,
+      "pr_number": 412,
+      "task_key": "mdedit-web/405",
+      "payload": {
+        "issue_number": 405,
+        "pr_number": 412,
+        "reasons": [
+          "checks_failing",
+          "unresolved_threads"
+        ]
+      }
+    },
+    {
+      "sequence": 9185,
+      "repo_id": "ledger",
+      "episode_id": "ledger-repair.scheduled",
+      "event": "repair.scheduled",
+      "created_at": "2026-11-10T13:25:00.000Z",
+      "level": "warn",
+      "summary": "Storage below minimum; dispatch paused",
+      "issue_number": null,
+      "pr_number": null,
+      "task_key": null,
+      "payload": {}
+    },
+    {
+      "sequence": 9182,
+      "repo_id": "atlas-api",
+      "episode_id": "mangoappstudio/atlas-api#77:attempt:1",
+      "event": "pr.feedback_queued",
+      "created_at": "2026-11-10T12:58:00.000Z",
+      "level": "ok",
+      "summary": "Queued feedback round 2 of 3 for PR #82",
+      "issue_number": 77,
+      "pr_number": 82,
+      "task_key": "atlas-api/77",
+      "payload": {
+        "issue_number": 77,
+        "pr_number": 82
+      }
+    },
+    {
+      "sequence": 9179,
+      "repo_id": "symphony",
+      "episode_id": "mangoappstudio/symphony#203:attempt:1",
+      "event": "workflow.completed",
+      "created_at": "2026-11-10T11:00:00.000Z",
+      "level": "ok",
+      "summary": "#203 completed; interactive handoff waiting",
+      "issue_number": 203,
+      "pr_number": 209,
+      "task_key": "symphony/203",
+      "payload": {
+        "issue_number": 203,
+        "pr_number": 209
+      }
+    },
+    {
+      "sequence": 9176,
+      "repo_id": "docs-site",
+      "episode_id": "docs-site-loop.completed",
+      "event": "loop.completed",
+      "created_at": "2026-11-10T08:40:00.000Z",
+      "level": "warn",
+      "summary": "weekly-link-check paused with a question",
+      "issue_number": null,
+      "pr_number": null,
+      "task_key": null,
+      "payload": {}
+    },
+    {
+      "sequence": 9173,
+      "repo_id": "mdedit-web",
+      "episode_id": "mangoappstudio/mdedit-web#401:attempt:1",
+      "event": "merge.merged",
+      "created_at": "2026-11-10T08:00:00.000Z",
+      "level": "ok",
+      "summary": "Merged PR #409 (Sync status indicator)",
+      "issue_number": 401,
+      "pr_number": 409,
+      "task_key": "mdedit-web/401",
+      "payload": {
+        "issue_number": 401,
+        "pr_number": 409
+      }
+    },
+    {
+      "sequence": 9170,
+      "repo_id": "atlas-api",
+      "episode_id": "mangoappstudio/atlas-api#74:attempt:1",
+      "event": "workflow.retry_scheduled",
+      "created_at": "2026-11-10T07:00:00.000Z",
+      "level": "warn",
+      "summary": "Retry scheduled for #74 in 5m (verification failed)",
+      "issue_number": 74,
+      "pr_number": null,
+      "task_key": "atlas-api/74",
+      "payload": {
+        "issue_number": 74
+      }
+    },
+    {
+      "sequence": 9167,
+      "repo_id": "symphony",
+      "episode_id": "mangoappstudio/symphony#198:attempt:1",
+      "event": "issue.closed",
+      "created_at": "2026-11-10T05:00:00.000Z",
+      "level": "ok",
+      "summary": "#198 closed after merge",
+      "issue_number": 198,
+      "pr_number": 204,
+      "task_key": "symphony/198",
+      "payload": {
+        "issue_number": 198,
+        "pr_number": 204
+      }
+    },
+    {
+      "sequence": 9164,
+      "repo_id": "pantry",
+      "episode_id": "mangoappstudio/pantry#308:attempt:1",
+      "event": "agent.failed",
+      "created_at": "2026-11-10T03:20:00.000Z",
+      "level": "bad",
+      "summary": "codex exited 1 on #308 (usage limit)",
+      "issue_number": 308,
+      "pr_number": null,
+      "task_key": "pantry/308",
+      "payload": {
+        "issue_number": 308
+      }
+    },
+    {
+      "sequence": 9120,
+      "repo_id": "mdedit",
+      "episode_id": "mangoappstudio/mdedit#1162:attempt:1",
+      "event": "agent.started",
+      "created_at": "2026-11-10T14:42:00.000Z",
+      "level": "ok",
+      "summary": "codex started autonomous attempt 1 on #1162",
+      "issue_number": 1162,
+      "pr_number": null,
+      "task_key": "mdedit/1162",
+      "payload": {
+        "issue_number": 1162,
+        "session_id": "019a7c2e",
+        "provider": "codex",
+        "mode": "autonomous"
+      }
+    },
+    {
+      "sequence": 9118,
+      "repo_id": "mdedit",
+      "episode_id": "pr-1167",
+      "event": "pr.codex_approval_received",
+      "created_at": "2026-11-10T14:56:00.000Z",
+      "level": "ok",
+      "summary": "Codex approved PR #1167",
+      "issue_number": 1149,
+      "pr_number": 1167,
+      "task_key": "mdedit/1149",
+      "payload": {
+        "pr_number": 1167,
+        "issue_number": 1149
+      }
+    },
+    {
+      "sequence": 9117,
+      "repo_id": "mdedit",
+      "episode_id": "pr-1165",
+      "event": "merge.blocked",
+      "created_at": "2026-11-10T14:44:00.000Z",
+      "level": "warn",
+      "summary": "Merge blocked for PR #1165: review blocking, checks pending",
+      "issue_number": 1140,
+      "pr_number": 1165,
+      "task_key": "mdedit/1140",
+      "payload": {
+        "pr_number": 1165,
+        "issue_number": 1140,
+        "reasons": [
+          "review_blocking",
+          "checks_pending"
+        ]
+      }
+    },
+    {
+      "sequence": 9115,
+      "repo_id": "mdedit",
+      "episode_id": "mangoappstudio/mdedit#1151:attempt:1",
+      "event": "workflow.retry_scheduled",
+      "created_at": "2026-11-10T14:53:00.000Z",
+      "level": "warn",
+      "summary": "Retry scheduled for #1151 in 11m (runner_error: Command failed: git merge-base --is-ancestor eaefe93c... HEAD)",
+      "issue_number": 1151,
+      "pr_number": null,
+      "task_key": "mdedit/1151",
+      "payload": {
+        "issue_number": 1151,
+        "reason": "runner_error: Command failed: git merge-base --is-ancestor eaefe93c... HEAD",
+        "delay_ms": 660000,
+        "next_run_at": "2026-11-10T15:04:00.000Z",
+        "exit_code": 1
+      },
+      "repeat_count": 4,
+      "first_at": "2026-11-10T13:24:00.000Z"
+    },
+    {
+      "sequence": 9110,
+      "repo_id": "mdedit",
+      "episode_id": "mangoappstudio/mdedit#1144:attempt:2",
+      "event": "workflow.failed",
+      "created_at": "2026-11-10T14:22:00.000Z",
+      "level": "bad",
+      "summary": "#1144 failed: retries exhausted after verification failure",
+      "issue_number": 1144,
+      "pr_number": null,
+      "task_key": "mdedit/1144",
+      "payload": {
+        "issue_number": 1144,
+        "reason": "verification_failed",
+        "attempt": 2
+      }
+    },
+    {
+      "sequence": 9109,
+      "repo_id": "mdedit",
+      "episode_id": "mangoappstudio/mdedit#1144:attempt:2",
+      "event": "verification.received",
+      "created_at": "2026-11-10T14:21:00.000Z",
+      "level": "bad",
+      "summary": "Verification failed: 2 of 148 tests failing",
+      "issue_number": 1144,
+      "pr_number": null,
+      "task_key": "mdedit/1144",
+      "payload": {
+        "issue_number": 1144,
+        "passed": false,
+        "failing": 2,
+        "total": 148
+      }
+    },
+    {
+      "sequence": 9101,
+      "repo_id": "mdedit",
+      "episode_id": "pr-1165",
+      "event": "pr.feedback_queued",
+      "created_at": "2026-11-10T13:50:00.000Z",
+      "level": "ok",
+      "summary": "Queued feedback round 2 of 3 for PR #1165",
+      "issue_number": 1140,
+      "pr_number": 1165,
+      "task_key": "mdedit/1140",
+      "payload": {
+        "pr_number": 1165,
+        "round": 2,
+        "max_rounds": 3
+      }
+    },
+    {
+      "sequence": 9094,
+      "repo_id": "mdedit",
+      "episode_id": "loop-daily-steward",
+      "event": "loop.failed",
+      "created_at": "2026-11-10T10:04:00.000Z",
+      "level": "bad",
+      "summary": "Loop daily-steward failed (exit 1)",
+      "issue_number": null,
+      "pr_number": null,
+      "task_key": "mdedit/loop/daily-steward",
+      "payload": {
+        "loop_id": "daily-steward",
+        "exit_code": 1
+      }
+    },
+    {
+      "sequence": 9090,
+      "repo_id": "mdedit",
+      "episode_id": "pr-1142",
+      "event": "merge.merged",
+      "created_at": "2026-11-08T15:00:00.000Z",
+      "level": "ok",
+      "summary": "Merged PR #1142 (EPUB exporter)",
+      "issue_number": 1134,
+      "pr_number": 1142,
+      "task_key": "mdedit/1134",
+      "payload": {
+        "pr_number": 1142,
+        "issue_number": 1134
+      }
+    }
+  ],
+  "next_before": 9090
+}

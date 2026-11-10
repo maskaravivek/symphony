@@ -1,0 +1,10 @@
+{
+  "path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/last_message.md",
+  "size": 762,
+  "offset": 0,
+  "next_offset": 762,
+  "content": "# Export to PDF: images still missing\n\nI could not get the PDF image tests to pass, so I am stopping here.\n\n## What changed\n\n- `fetchAsset` now decodes `data:` URIs instead of returning `null`.\n- Relative image paths resolve against the document directory.\n- Added three tests in `src/export/pdf.test.ts`.\n\n## Why it still fails\n\nThe PDF renderer runs in a **worker** that cannot reach the fixture server:\n\n```\nAssertionError: expected 4 embedded images, received 0\n  at src/export/pdf.test.ts:88:31\n```\n\nOptions:\n\n1. Inline every asset as bytes before posting the document to the worker.\n2. Give the worker its own fetch shim.\n\nSee https://github.com/mangoappstudio/mdedit/issues/1144 for the original report. <script>alert('this must render as text')</script>\n",
+  "truncated": false,
+  "kind": "markdown",
+  "mtime": "2026-11-10T14:20:00.000Z"
+}

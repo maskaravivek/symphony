@@ -1,0 +1,10 @@
+{
+  "path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/verification.json",
+  "size": 313,
+  "offset": 0,
+  "next_offset": 313,
+  "content": "{\"passed\": false, \"command\": \"yarn test --reporter=json\", \"exit_code\": 1, \"failing\": 2, \"total\": 148, \"failures\": [{\"name\": \"export/pdf embeds remote images\", \"message\": \"expected 4 embedded images, received 0\"}, {\"name\": \"export/pdf embeds data-uri images\", \"message\": \"expected 2 embedded images, received 0\"}]}",
+  "truncated": false,
+  "kind": "json",
+  "mtime": "2026-11-10T14:21:00.000Z"
+}

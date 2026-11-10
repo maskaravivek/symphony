@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import { readEpicStates, reconcileEpicStateWithIssue, type EpicState } from './epicState.js';
 import { scanRunStates } from './scanRunStates.js';
+import type { DashboardGithubCache } from './dashboard/githubCache.js';
 import type { RunState } from './runState.js';
 import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubClient.js';
 import { loadServerConfigFromFile } from '../server/loadServerConfig.js';
@@ -107,6 +108,7 @@ export interface LoadBoardStateOptions {
   workflow?: string;
   refreshMs: number;
   liveRefresh?: boolean;
+  githubCache?: DashboardGithubCache;
   staleAfterMs?: number;
   now?: Date;
 }
@@ -380,18 +382,24 @@ async function refreshRepoFromGithub(
   config: WorkflowConfig,
   runs: RunState[],
   epics: EpicState[],
+  repoId: string,
+  cache?: DashboardGithubCache,
 ): Promise<{ runs: RunState[]; epics: EpicState[]; pullRequests: PullRequestRef[] }> {
-  const client = new GithubIssueTrackerClient(config.tracker);
+  const snapshot = cache ? await cache.ensure(repoId, config, [
+    ...runs.map(state => state.issue_number),
+    ...epics.filter(state => state.status !== 'completed').map(state => state.issue_number),
+  ].filter((number): number is number => number !== null)) : null;
+  const client = snapshot ? null : new GithubIssueTrackerClient(config.tracker);
   const [pullRequests, refreshedRuns, refreshedEpics] = await Promise.all([
-    client.listOpenPullRequests().catch(() => []),
+    snapshot?.pull_requests ?? client?.listOpenPullRequests().catch(() => []) ?? [],
     Promise.all(
       runs.map(async (state) => {
         if (!state.issue_number) return state;
-        const issue = await client.fetchIssueOrPullRequestByNumber(state.issue_number).catch(() => null);
+        const issue = snapshot ? snapshot.issues.get(state.issue_number) : await client!.fetchIssueOrPullRequestByNumber(state.issue_number).catch(() => null);
         if (!issue) return state;
         return {
           ...state,
-          issue_id: issue.id,
+          issue_id: issue.id ?? state.issue_id,
           issue_identifier: issue.identifier,
           issue_url: issue.url,
           issue_title: issue.title,
@@ -405,18 +413,18 @@ async function refreshRepoFromGithub(
     Promise.all(
       epics.map(async (state) => {
         if (state.status === 'completed' || !state.issue_number) return state;
-        const issue = await client.fetchIssueByNumber(state.issue_number).catch(() => null);
-        return issue ? reconcileEpicStateWithIssue(state, issue, config.tracker.terminal_states) : state;
+        const issue = snapshot ? snapshot.issues.get(state.issue_number) : await client!.fetchIssueByNumber(state.issue_number).catch(() => null);
+        return issue ? reconcileEpicStateWithIssue(state, { ...issue, id: issue.id ?? state.issue_id }, config.tracker.terminal_states) : state;
       }),
     ),
   ]);
   return { runs: refreshedRuns, epics: refreshedEpics, pullRequests };
 }
 
-async function loadRepoSource(repoId: string | null, workflowPath: string, liveRefresh: boolean): Promise<BoardRepoSource> {
+async function loadRepoSource(repoId: string | null, workflowPath: string, options: LoadBoardStateOptions): Promise<BoardRepoSource> {
   const loaded = await loadWorkflowFromFile(workflowPath);
   const [runs, epics] = await Promise.all([scanRunStates(loaded.config.workspace.root), readEpicStates(loaded.config.workspace.root)]);
-  const refreshed = liveRefresh ? await refreshRepoFromGithub(loaded.config, runs, epics) : { runs, epics, pullRequests: [] };
+  const refreshed = options.liveRefresh ? await refreshRepoFromGithub(loaded.config, runs, epics, repoId ?? 'default', options.githubCache) : { runs, epics, pullRequests: [] };
   return {
     repoId,
     workflowPath,
@@ -432,7 +440,7 @@ export async function loadBoardState(options: LoadBoardStateOptions): Promise<Bo
     const configPath = path.resolve(options.config);
     const serverConfig = await loadServerConfigFromFile(configPath);
     const repos = await Promise.all(
-      serverConfig.repos.filter((repo) => repo.enabled).map((repo) => loadRepoSource(repo.id, repo.workflow, options.liveRefresh ?? false)),
+      serverConfig.repos.filter((repo) => repo.enabled).map((repo) => loadRepoSource(repo.id, repo.workflow, options)),
     );
     return buildBoardState({
       source: { kind: 'config', path: configPath },
@@ -444,7 +452,7 @@ export async function loadBoardState(options: LoadBoardStateOptions): Promise<Bo
   }
 
   const workflowPath = await resolveWorkflowPath(options.workflow ?? 'WORKFLOW.md');
-  const source = await loadRepoSource(null, workflowPath, options.liveRefresh ?? false);
+  const source = await loadRepoSource(null, workflowPath, options);
   return buildBoardState({
     source: { kind: 'workflow', path: workflowPath },
     repos: [source],

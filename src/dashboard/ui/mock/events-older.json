@@ -1,0 +1,49 @@
+{
+  "generated_at": "2026-11-10T15:00:00.000Z",
+  "events": [
+    {
+      "sequence": 9050,
+      "repo_id": "mdedit",
+      "episode_id": "mangoappstudio/mdedit#1134:attempt:1",
+      "event": "workflow.completed",
+      "created_at": "2026-11-08T14:30:00.000Z",
+      "level": "ok",
+      "summary": "#1134 completed; PR #1142 opened",
+      "issue_number": 1134,
+      "pr_number": 1142,
+      "task_key": "mdedit/1134",
+      "payload": {}
+    },
+    {
+      "sequence": 9044,
+      "repo_id": "symphony",
+      "episode_id": "loop-daily-steward",
+      "event": "loop.completed",
+      "created_at": "2026-11-08T13:30:00.000Z",
+      "level": "ok",
+      "summary": "daily-steward completed (no changes)",
+      "issue_number": null,
+      "pr_number": null,
+      "task_key": "symphony/loop/daily-steward",
+      "payload": {
+        "loop_id": "daily-steward"
+      }
+    },
+    {
+      "sequence": 9031,
+      "repo_id": "atlas-api",
+      "episode_id": "repair-orphan",
+      "event": "repair.orphan_recovered",
+      "created_at": "2026-11-07T15:00:00.000Z",
+      "level": "warn",
+      "summary": "Recovered orphaned run for #73 (worker pid gone)",
+      "issue_number": 73,
+      "pr_number": null,
+      "task_key": "atlas-api/73",
+      "payload": {
+        "issue_number": 73
+      }
+    }
+  ],
+  "next_before": null
+}

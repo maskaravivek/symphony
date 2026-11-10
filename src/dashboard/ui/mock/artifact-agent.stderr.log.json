@@ -1,0 +1,10 @@
+{
+  "path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/agent.stderr.log",
+  "size": 9311,
+  "offset": 8955,
+  "next_offset": 9311,
+  "content": "2026-11-10T13:14:02Z WARN codex_core::exec: command exceeded soft timeout (300s): yarn vitest run src/export --no-threads\n2026-11-10T14:16:11Z ERROR codex_core::exec: command timed out after 600s; sent SIGTERM\n(node:51022) ExperimentalWarning: Worker threads with --no-threads is deprecated\nnpm WARN deprecated inflight@1.0.6: This module is not supported\n",
+  "truncated": true,
+  "kind": "text",
+  "mtime": "2026-11-10T14:20:00.000Z"
+}

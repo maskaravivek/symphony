@@ -1,0 +1,10 @@
+{
+  "path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/prompt.md",
+  "size": 564,
+  "offset": 0,
+  "next_offset": 564,
+  "content": "# Task: mangoappstudio/mdedit#1144 \u2014 Export to PDF drops embedded images\n\nYou are working in `/Users/vivek/.symphony/workspaces/mdedit/_pool_2` on branch `symphony/1144-pdf-images`.\n\n## Issue\n\nExporting a document with embedded images to PDF produces a file with blank image boxes.\n\n## Grooming notes\n\n- Scope: small\n- Likely files: `src/export/assets.ts`, `src/export/pdf.ts`, `src/export/pdf.test.ts`\n\n## Rules\n\n1. Keep the change focused on the issue.\n2. Run `yarn test` before finishing.\n3. End with a short summary of what changed and anything left undone.\n",
+  "truncated": false,
+  "kind": "markdown",
+  "mtime": "2026-11-10T13:14:00.000Z"
+}

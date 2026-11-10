@@ -2,6 +2,16 @@
 
 Start with the [README](../README.md) to set up a repository. See the [Telegram bridge guide](telegram.md) to configure issue intake, private replies, and notifications.
 
+## Dashboard
+
+`yarn cli dashboard --config symphony.config.yml` serves the read-only dashboard on `127.0.0.1` as a standalone process. `yarn dev` starts both the dashboard and the orchestrator. The dashboard reads local state:
+
+- each slot's `.symphony/run.json` and `.symphony/runs/*/` session artifacts, preparation leases in `.symphony/preparations/`, and loop state under `_loops/`;
+- `.symphony/epics.json`, `.symphony/episodes.sqlite` (opened read-only, bounded queries), `.symphony/storage-status.json`, and `.symphony/storage-maintenance.json` in each workspace root;
+- heartbeats: `<workspace.root>/.symphony/heartbeat.json`, written by each repository tick (poll counts, capacity, deferrals, protected workspaces, backoffs), and `.symphony/heartbeat.json` beside `symphony.config.yml` (or `WORKFLOW.md` in single-workflow mode), written by the orchestrator process. The orchestrator is shown as down when that file is missing or older than twice the polling interval. Without a repository heartbeat (older orchestrators), poll time and protected workspaces fall back to today's structured log.
+
+GitHub is used only to enrich titles, labels, and open PRs; results are cached per repository for five minutes and refreshed in the background, so a slow or rate-limited GitHub never blocks the page (it appears as a GitHub backoff flag instead). The page updates through `/api/stream`, which watches those directories with `fs.watch`. Artifact and agent-log views read only recognized Symphony files inside configured workspace roots. The legacy `/api/board` JSON remains available.
+
 ## Primary checkout sync
 
 In multi-repository mode, optional primary-checkout sync keeps local workflows and other files current with remote `main`.

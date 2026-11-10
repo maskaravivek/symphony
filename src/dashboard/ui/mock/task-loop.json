@@ -1,0 +1,135 @@
+{
+  "generated_at": "2026-11-10T15:00:00.000Z",
+  "task": {
+    "task_key": "docs-site/loop/weekly-link-check",
+    "kind": "loop",
+    "lifecycle": "needs-info",
+    "repo_id": "docs-site",
+    "issue_number": null,
+    "issue_identifier": "loop-weekly-link-check",
+    "issue_url": null,
+    "loop_id": "weekly-link-check",
+    "title": "Weekly link check",
+    "status": "paused",
+    "labels": [],
+    "feature_labels": [],
+    "agent_provider": "claude",
+    "agent_mode": "autonomous",
+    "attempt": 1,
+    "pr_number": null,
+    "pr_url": null,
+    "updated_at": "2026-11-10T08:40:00.000Z",
+    "last_error": null,
+    "retry_not_before": null,
+    "retry_reason": null,
+    "pause_reason": "needs-info",
+    "workspace_path": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check",
+    "stale": false,
+    "epic_progress": null
+  },
+  "run_state": null,
+  "timeline": [
+    {
+      "at": "2026-11-10T08:20:00.000Z",
+      "event": "loop.triggered",
+      "kind": "loop",
+      "level": "ok",
+      "summary": "weekly-link-check triggered (schedule)",
+      "payload": {
+        "loop_id": "weekly-link-check"
+      }
+    },
+    {
+      "at": "2026-11-10T08:21:00.000Z",
+      "event": "agent.started",
+      "kind": "agent",
+      "level": "ok",
+      "summary": "claude started loop run",
+      "payload": {
+        "loop_id": "weekly-link-check",
+        "provider": "claude"
+      }
+    },
+    {
+      "at": "2026-11-10T08:40:00.000Z",
+      "event": "workflow.paused",
+      "kind": "workflow",
+      "level": "warn",
+      "summary": "Paused: question posted (14 broken links)",
+      "payload": {
+        "loop_id": "weekly-link-check",
+        "reason": "needs-info"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "session_id": "019a79c0",
+      "attempt": 1,
+      "mode": "autonomous",
+      "provider": "claude",
+      "created_at": "2026-11-10T08:21:00.000Z",
+      "finished_at": "2026-11-10T08:40:00.000Z",
+      "phase": "finished",
+      "agent_outcome": "completed",
+      "workflow_outcome": "paused",
+      "artifact_dir": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0",
+      "artifacts": {
+        "prompt": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/prompt.md",
+        "agent_log": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/agent.stdout.log",
+        "agent_stderr": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/agent.stderr.log",
+        "last_message": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/last_message.md",
+        "verification": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/verification.json",
+        "manifest": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/manifest.json"
+      },
+      "usage": {
+        "input_tokens": 312000,
+        "cached_input_tokens": 280100,
+        "output_tokens": 4100,
+        "turns": 9
+      }
+    }
+  ],
+  "artifacts": {
+    "prompt": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/prompt.md",
+    "agent_log": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/agent.stdout.log",
+    "agent_stderr": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/agent.stderr.log",
+    "last_message": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/last_message.md",
+    "verification": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/verification.json",
+    "manifest": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/manifest.json"
+  },
+  "grooming": null,
+  "verification": null,
+  "pull_request": null,
+  "epic": null,
+  "loop": {
+    "task_key": "docs-site/loop/weekly-link-check",
+    "repo_id": "docs-site",
+    "loop_id": "weekly-link-check",
+    "status": "paused",
+    "enabled": true,
+    "interval_ms": 604800000,
+    "last_started_at": "2026-11-10T08:20:00.000Z",
+    "last_finished_at": "2026-11-10T08:40:00.000Z",
+    "next_due_at": null,
+    "last_outcome": "paused",
+    "attempt": 1,
+    "pause_reason": "needs-info: question posted on the loop issue",
+    "last_error": null,
+    "workspace_path": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check",
+    "artifacts": {
+      "prompt": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/prompt.md",
+      "agent_log": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/agent.stdout.log",
+      "agent_stderr": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/agent.stderr.log",
+      "last_message": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/last_message.md",
+      "verification": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/verification.json",
+      "manifest": "/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check/.symphony/runs/20261110T084000-1-019a79c0/manifest.json"
+    }
+  },
+  "commands": {
+    "cd": "cd /Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check",
+    "resume": "cd /Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check && claude --resume 019a79c0",
+    "exec": null,
+    "editor_url": "vscode://file/Users/vivek/.symphony/workspaces/docs-site/_loops/weekly-link-check"
+  }
+}

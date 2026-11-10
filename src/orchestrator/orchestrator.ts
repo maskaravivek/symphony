@@ -45,6 +45,8 @@ import fs from 'node:fs/promises';
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { pruneSessionArtifacts, sessionArtifactDirectory } from '../artifacts/sessionArtifacts.js';
+import { writeRepoHeartbeat } from '../status/heartbeat.js';
+import type { RepoHeartbeat } from '../status/dashboardTypes.js';
 
 interface DispatchCapacity {
   remaining: number | null;
@@ -60,6 +62,35 @@ interface IssueDispatchOptions {
 }
 
 type DispatchBlockReason = 'global_capacity' | 'state_capacity' | 'provider_capacity' | 'usage_limit';
+
+/** Observations collected for the repo heartbeat; drained each time a heartbeat is written. */
+interface HeartbeatObservations {
+  dispatch_deferrals: RepoHeartbeat['dispatch_deferrals'];
+  dispatch_blocks: Map<DispatchBlockReason, number>;
+  protected_workspaces: RepoHeartbeat['protected_workspaces'];
+}
+
+/** Per-tick outcome state, filled in by the tick body and read once in `tickOnce`'s finally block. */
+interface TickHeartbeatState {
+  config: WorkflowConfig | null;
+  outcome: RepoHeartbeat['tick_outcome'];
+  skip_reason: string | null;
+  error: string | null;
+  poll: RepoHeartbeat['poll'];
+  /** Set when the lock belongs to another process; that process owns the heartbeat file. */
+  suppress_write: boolean;
+}
+
+const MAX_HEARTBEAT_LIST_ENTRIES = 50;
+
+function emptyHeartbeatObservations(): HeartbeatObservations {
+  return { dispatch_deferrals: [], dispatch_blocks: new Map(), protected_workspaces: [] };
+}
+
+function pushBounded<T>(list: T[], item: T): void {
+  list.push(item);
+  if (list.length > MAX_HEARTBEAT_LIST_ENTRIES) list.splice(0, list.length - MAX_HEARTBEAT_LIST_ENTRIES);
+}
 type UsageLimitCheckDecision = 'allowed' | 'blocked' | 'unknown';
 type UsageLimitCheckResult = {
   decision: UsageLimitCheckDecision;
@@ -711,6 +742,9 @@ export class Orchestrator {
   private providerUsageLimitBackoffUntil = new Map<string, number>();
   private providerUsageLimitCheckBlocked = new Set<string>();
   private githubRateLimitBackoffUntilMs = 0;
+  private heartbeatObservations: HeartbeatObservations = emptyHeartbeatObservations();
+  private lastWorkflowLoadError: string | null = null;
+  private lastStorageStatus: { blocked: boolean; minimum_free_gib: number } | null = null;
   private workflowLock: WorkflowLock | null = null;
   private liveOrphanClaims = new Map<string, LiveOrphanClaim>();
   private recoveringFinalizations = new Set<string>();
@@ -857,16 +891,124 @@ export class Orchestrator {
   }
 
   async tickOnce(options: { maxNewDispatches?: number | null } = {}): Promise<void> {
-    const loaded = await this.loadWorkflowSafe();
-    if (!loaded) return;
-    const { config } = loaded;
+    const startedAt = new Date().toISOString();
+    const tick: TickHeartbeatState = { config: null, outcome: 'ok', skip_reason: null, error: null, poll: null, suppress_write: false };
+    try {
+      await this.runTick(options, tick);
+    } catch (err) {
+      tick.outcome = 'error';
+      tick.error = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      await this.writeTickHeartbeat(tick, startedAt);
+    }
+  }
 
-    if (!(await this.ensureWorkflowLock(config))) return;
+  /** Read-only summary used by the process-level orchestrator heartbeat. */
+  getHeartbeatSummary(): { polling_interval_ms: number | null; max_concurrent_agents: number | null } {
+    const config = this.lastGoodWorkflow?.config;
+    return {
+      polling_interval_ms: config?.polling.interval_ms ?? null,
+      max_concurrent_agents: this.maxConcurrentAgentsOverride ?? config?.agent.max_concurrent_agents ?? null,
+    };
+  }
+
+  private recordDispatchDeferral(reason: string, issueNumber: number | null): void {
+    pushBounded(this.heartbeatObservations.dispatch_deferrals, { at: new Date().toISOString(), reason, issue_number: issueNumber });
+  }
+
+  /** Builds the repo heartbeat from tick state and already-tracked orchestrator fields; drains observations. */
+  buildRepoHeartbeat(tick: TickHeartbeatState & { config: WorkflowConfig }, startedAt: string, freeGib: number | null): RepoHeartbeat {
+    const { config } = tick;
+    const now = nowMs();
+    const observations = this.heartbeatObservations;
+    this.heartbeatObservations = emptyHeartbeatObservations();
+    const providersByLimitKey = new Map<string, string[]>();
+    for (const provider of Object.values(config.agents.providers)) {
+      const key = providerLimitKey(provider);
+      providersByLimitKey.set(key, [...(providersByLimitKey.get(key) ?? []), provider.id]);
+    }
+    const providerBackoff: RepoHeartbeat['provider_backoff'] = [];
+    for (const [limitKey, until] of this.providerUsageLimitBackoffUntil) {
+      if (until <= now) continue;
+      providerBackoff.push({ provider: (providersByLimitKey.get(limitKey) ?? [limitKey]).join(','), limit_key: limitKey, until: new Date(until).toISOString() });
+    }
+    const minimum = this.lastStorageStatus?.minimum_free_gib ?? storagePolicy(config.workspace.storage_maintenance).min_free_gib;
+    return {
+      version: 1,
+      repo_id: this.repoId,
+      owner: config.tracker.owner,
+      repo: config.tracker.repo,
+      pid: process.pid,
+      tick_started_at: startedAt,
+      tick_finished_at: new Date().toISOString(),
+      tick_outcome: tick.outcome,
+      tick_skip_reason: tick.skip_reason,
+      tick_error: tick.error,
+      workflow_load_error: this.lastWorkflowLoadError,
+      poll: tick.poll,
+      capacity: {
+        max_concurrent_agents: this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents,
+        running: this.getRunningCount(),
+      },
+      storage: {
+        blocked: this.lastStorageStatus?.blocked ?? this.storageBlocked,
+        minimum_free_gib: minimum,
+        free_gib: freeGib,
+      },
+      github_rate_limit_backoff_until: this.githubRateLimitBackoffUntilMs > now ? new Date(this.githubRateLimitBackoffUntilMs).toISOString() : null,
+      provider_backoff: providerBackoff,
+      dispatch_deferrals: observations.dispatch_deferrals,
+      dispatch_blocks: [...observations.dispatch_blocks].map(([reason, count]) => ({ reason, count })),
+      protected_workspaces: observations.protected_workspaces,
+    };
+  }
+
+  private async writeTickHeartbeat(tick: TickHeartbeatState, startedAt: string): Promise<void> {
+    try {
+      const config = tick.config;
+      if (!config || tick.suppress_write) return;
+      const freeGib = await fs.statfs(config.workspace.root)
+        .then(stat => Math.round((stat.bavail * stat.bsize / (1024 ** 3)) * 10) / 10)
+        .catch(() => null);
+      await writeRepoHeartbeat(config.workspace.root, this.buildRepoHeartbeat({ ...tick, config }, startedAt, freeGib));
+    } catch (err) {
+      log('warn', 'heartbeat_write_failed', {
+        event: 'heartbeat_write_failed',
+        repo_id: this.repoId ?? undefined,
+        heartbeat_kind: 'repo',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private async runTick(options: { maxNewDispatches?: number | null }, tick: TickHeartbeatState): Promise<void> {
+    const skip = (reason: string, error: string | null = null): void => {
+      tick.outcome = 'skipped';
+      tick.skip_reason = reason;
+      tick.error = error;
+    };
+    const loaded = await this.loadWorkflowSafe();
+    if (!loaded) {
+      skip('workflow_load_failed', this.lastWorkflowLoadError);
+      return;
+    }
+    const { config } = loaded;
+    tick.config = config;
+
+    if (!(await this.ensureWorkflowLock(config))) {
+      skip('workflow_lock_unavailable');
+      tick.suppress_write = true;
+      return;
+    }
 
     // Maintenance is independent of GitHub availability and holds the workflow lock.
     await maintainStorage(config.workspace, this.getRunningCount() > 0);
     const hasStorage = await this.hasStorageCapacity(config);
-    if (this.isGithubRateLimitBackoffActive(config)) return;
+    if (this.isGithubRateLimitBackoffActive(config)) {
+      skip('github_rate_limit_backoff');
+      return;
+    }
 
     const trackerClient = new GithubIssueTrackerClient(config.tracker);
     const workspaceManager = new WorkspaceManager(config.workspace, this.maxConcurrentAgentsOverride ?? config.agent.max_concurrent_agents);
@@ -898,7 +1040,11 @@ export class Orchestrator {
           return [];
         });
       } catch (err) {
-        if (this.handleGithubRateLimit(config, err, 'github_candidate_fetch_rate_limited')) return;
+        if (this.handleGithubRateLimit(config, err, 'github_candidate_fetch_rate_limited')) {
+          skip('github_rate_limit_backoff', err instanceof Error ? err.message : String(err));
+          return;
+        }
+        skip('github_candidate_fetch_failed', err instanceof Error ? err.message : String(err));
         log('error', 'github_candidate_fetch_failed', {
           repo_id: this.repoId ?? undefined,
           tracker_kind: config.tracker.kind,
@@ -920,6 +1066,13 @@ export class Orchestrator {
         retry_count: this.retries.size,
         capacity_remaining: capacity.remaining,
       });
+      tick.poll = {
+        candidate_count: candidates.length,
+        grooming_count: groomingCandidates.length,
+        active_count: this.getRunningCount(),
+        retry_count: this.retries.size,
+        capacity_remaining: capacity.remaining,
+      };
 
       if (config.tracker.epics.enabled) await this.reconcileClosedEpicParents(config, trackerClient, candidates);
       const epicParentIds = config.tracker.epics.enabled ? await this.processEpicCandidates(config, trackerClient, candidates) : new Set<string>();
@@ -929,7 +1082,10 @@ export class Orchestrator {
       await this.dispatchGroomingIssues(config, groomingCandidates, workspaceManager, capacity);
       await this.dispatchNewIssues(config, trackerClient, eligibleCandidates, workspaceManager, capacity);
     } catch (err) {
-      if (this.handleGithubRateLimit(config, err, 'github_rate_limited')) return;
+      if (this.handleGithubRateLimit(config, err, 'github_rate_limited')) {
+        skip('github_rate_limit_backoff', err instanceof Error ? err.message : String(err));
+        return;
+      }
       throw err;
     }
   }
@@ -951,6 +1107,7 @@ export class Orchestrator {
       });
     }
     this.storageBlocked = !available;
+    this.lastStorageStatus = { blocked: !available, minimum_free_gib: minimum };
     return available;
   }
 
@@ -1039,8 +1196,10 @@ export class Orchestrator {
       const loaded = await loadWorkflowFromFile(this.workflowPath);
       this.validateWorkflow(loaded.config);
       this.lastGoodWorkflow = loaded;
+      this.lastWorkflowLoadError = null;
       return loaded;
     } catch (err) {
+      this.lastWorkflowLoadError = err instanceof Error ? err.message : String(err);
       log('error', 'workflow_load_failed', {
         event: 'workflow_load_failed',
         repo_id: this.repoId ?? undefined,
@@ -1476,6 +1635,11 @@ export class Orchestrator {
           run_status: state.status,
         });
       } catch (err) {
+        pushBounded(this.heartbeatObservations.protected_workspaces, {
+          path: state.workspace_path,
+          issue_number: issue.number ?? state.issue_number ?? null,
+          reason: err instanceof Error ? err.message : String(err),
+        });
         log('error', 'terminal_workspace_clean_failed', {
           ...getIssueLogFields(config, issue, this.repoId),
           workspace_path: state.workspace_path,
@@ -1726,6 +1890,7 @@ export class Orchestrator {
           failedStore.close();
         }
         if (err instanceof DispatchDeferredError) {
+          this.recordDispatchDeferral(err.message, issue.number);
           log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: err.message });
           continue;
         }
@@ -2093,6 +2258,7 @@ export class Orchestrator {
           }
         }
         if (err instanceof DispatchDeferredError) {
+          this.recordDispatchDeferral(err.message, candidate.number);
           log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: err.message });
           continue;
         }
@@ -2191,6 +2357,7 @@ export class Orchestrator {
         if (provider.usage_limit_exit_codes?.length) return;
       } catch (err) {
         if (err instanceof DispatchDeferredError) {
+          this.recordDispatchDeferral(err.message, issue.number);
           log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: err.message });
           continue;
         }
@@ -2292,7 +2459,10 @@ export class Orchestrator {
         try { store.completeReviewClaim(this.durableRepoId(config), opts.prReview.review_key, 'error'); } finally { store.close(); }
       }
       const deferred = error instanceof DispatchDeferredError;
-      if (deferred) log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: error.message });
+      if (deferred) {
+        this.recordDispatchDeferral(error.message, issue.number);
+        log('warn', 'dispatch_deferred', { event: 'dispatch_deferred', repo_id: this.repoId ?? undefined, reason: error.message });
+      }
       let setupFailures = 0;
       const interrupted = controller.signal.aborted;
       if (!interrupted) controller.abort('preparation_failed');
@@ -5258,6 +5428,7 @@ ${runContext}`;
     capacity: DispatchCapacity,
   ): DispatchBlockReason | null {
     const blocked = (reason: DispatchBlockReason): DispatchBlockReason => {
+      this.heartbeatObservations.dispatch_blocks.set(reason, (this.heartbeatObservations.dispatch_blocks.get(reason) ?? 0) + 1);
       log('info', 'dispatch_capacity_blocked', {
         ...getIssueLogFields(config, issue, this.repoId),
         reason,

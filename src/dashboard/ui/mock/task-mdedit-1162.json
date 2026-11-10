@@ -1,0 +1,242 @@
+{
+  "generated_at": "2026-11-10T15:00:00.000Z",
+  "task": {
+    "task_key": "mdedit/1162",
+    "kind": "issue",
+    "lifecycle": "running",
+    "repo_id": "mdedit",
+    "issue_number": 1162,
+    "issue_identifier": "mangoappstudio/mdedit#1162",
+    "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1162",
+    "loop_id": null,
+    "title": "Table editor loses column alignment after paste",
+    "status": "agent-running",
+    "labels": [
+      "symphony"
+    ],
+    "feature_labels": [],
+    "agent_provider": "codex",
+    "agent_mode": "autonomous",
+    "attempt": 1,
+    "pr_number": null,
+    "pr_url": null,
+    "updated_at": "2026-11-10T15:00:00.000Z",
+    "last_error": null,
+    "retry_not_before": null,
+    "retry_reason": null,
+    "pause_reason": null,
+    "workspace_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1",
+    "stale": false,
+    "epic_progress": null
+  },
+  "run_state": {
+    "repo_id": "mdedit",
+    "owner": "mangoappstudio",
+    "repo": "mdedit",
+    "issue_id": "I_kwDOMdEd1144",
+    "issue_number": 1162,
+    "issue_identifier": "mangoappstudio/mdedit#1162",
+    "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1144",
+    "issue_title": "Table editor loses column alignment after paste",
+    "issue_state": "open",
+    "labels": [
+      "symphony"
+    ],
+    "workflow_state": "running",
+    "workspace_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1",
+    "workspace_strategy": "pool",
+    "attempt": 1,
+    "session_id": "019a7c2e",
+    "agent_provider": "codex",
+    "agent_mode": "autonomous",
+    "codex_thread_id": "019a7b90-thread",
+    "codex_mode": "autonomous",
+    "pause_reason": null,
+    "worker_pid": 51877,
+    "session_artifact_dir": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90",
+    "agent_finished_at": "2026-11-10T14:20:00.000Z",
+    "agent_outcome": null,
+    "workflow_outcome": null,
+    "retry_reason": null,
+    "retry_not_before": null,
+    "status": "agent-running",
+    "updated_at": "2026-11-10T14:22:00.000Z",
+    "last_error": null,
+    "started_at": "2026-11-10T13:14:00.000Z",
+    "finished_at": "2026-11-10T14:22:00.000Z",
+    "last_exit_code": 0,
+    "last_signal": null,
+    "prompt_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/prompt.md",
+    "codex_jsonl_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/agent.jsonl",
+    "last_message_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2/.symphony/runs/20261110T135400-2-019a7b90/last_message.md",
+    "last_seen_comment_id": 2468813377,
+    "status_comment_id": 2468790012,
+    "last_handoff_at": null
+  },
+  "timeline": [
+    {
+      "at": "2026-11-10T14:41:00.000Z",
+      "event": "workflow.started",
+      "kind": "workflow",
+      "level": "ok",
+      "summary": "Picked up #1162",
+      "payload": {
+        "issue_number": 1162
+      }
+    },
+    {
+      "at": "2026-11-10T14:42:00.000Z",
+      "event": "run.started",
+      "kind": "run",
+      "level": "ok",
+      "summary": "Attempt 1 started in _pool_1",
+      "payload": {
+        "attempt": 1,
+        "workspace": "_pool_1"
+      }
+    },
+    {
+      "at": "2026-11-10T14:41:56.000Z",
+      "event": "agent.started",
+      "kind": "agent",
+      "level": "ok",
+      "summary": "codex started autonomous attempt 1",
+      "payload": {
+        "session_id": "019a7c2e",
+        "provider": "codex",
+        "mode": "autonomous"
+      }
+    }
+  ],
+  "sessions": [
+    {
+      "session_id": "019a7c2e",
+      "attempt": 1,
+      "mode": "autonomous",
+      "provider": "codex",
+      "created_at": "2026-11-10T14:41:56.000Z",
+      "finished_at": null,
+      "phase": "agent-running",
+      "agent_outcome": null,
+      "workflow_outcome": null,
+      "artifact_dir": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e",
+      "artifacts": {
+        "prompt": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/prompt.md",
+        "agent_log": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/agent.jsonl",
+        "agent_stderr": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/agent.stderr.log",
+        "last_message": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/last_message.md",
+        "verification": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/verification.json",
+        "manifest": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/manifest.json"
+      },
+      "usage": {
+        "input_tokens": 259312,
+        "cached_input_tokens": 218400,
+        "output_tokens": 1834,
+        "turns": 7
+      }
+    }
+  ],
+  "artifacts": {
+    "prompt": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/prompt.md",
+    "agent_log": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/agent.jsonl",
+    "agent_stderr": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/agent.stderr.log",
+    "last_message": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/last_message.md",
+    "verification": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/verification.json",
+    "manifest": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/manifest.json"
+  },
+  "grooming": null,
+  "verification": null,
+  "pull_request": null,
+  "epic": {
+    "task_key": "mdedit/1100",
+    "repo_id": "mdedit",
+    "issue_number": 1100,
+    "issue_identifier": "mangoappstudio/mdedit#1100",
+    "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1100",
+    "title": "Collaborative editing v2",
+    "status": "coordinating",
+    "open_children": 4,
+    "terminal_children": 3,
+    "total_children": 7,
+    "updated_at": "2026-11-10T14:54:00.000Z",
+    "children": [
+      {
+        "issue_number": 1101,
+        "issue_identifier": "mangoappstudio/mdedit#1101",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1101",
+        "title": "CRDT document model",
+        "state": "closed",
+        "queued": false,
+        "skipped_reason": null,
+        "lifecycle": "closed"
+      },
+      {
+        "issue_number": 1102,
+        "issue_identifier": "mangoappstudio/mdedit#1102",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1102",
+        "title": "Presence cursors",
+        "state": "closed",
+        "queued": false,
+        "skipped_reason": null,
+        "lifecycle": "closed"
+      },
+      {
+        "issue_number": 1103,
+        "issue_identifier": "mangoappstudio/mdedit#1103",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1103",
+        "title": "Sync merge conflicts UI",
+        "state": "closed",
+        "queued": false,
+        "skipped_reason": null,
+        "lifecycle": "closed"
+      },
+      {
+        "issue_number": 1098,
+        "issue_identifier": "mangoappstudio/mdedit#1098",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1098",
+        "title": "Three-way merge for offline edits",
+        "state": "open",
+        "queued": false,
+        "skipped_reason": null,
+        "lifecycle": "failed"
+      },
+      {
+        "issue_number": 1162,
+        "issue_identifier": "mangoappstudio/mdedit#1162",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1162",
+        "title": "Table editor loses column alignment after paste",
+        "state": "open",
+        "queued": false,
+        "skipped_reason": null,
+        "lifecycle": "running"
+      },
+      {
+        "issue_number": 1170,
+        "issue_identifier": "mangoappstudio/mdedit#1170",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1170",
+        "title": "Comment threads on selections",
+        "state": "open",
+        "queued": true,
+        "skipped_reason": null,
+        "lifecycle": "queued"
+      },
+      {
+        "issue_number": 1171,
+        "issue_identifier": "mangoappstudio/mdedit#1171",
+        "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1171",
+        "title": "Permissions for shared docs",
+        "state": "open",
+        "queued": false,
+        "skipped_reason": "Blocked by #1170",
+        "lifecycle": null
+      }
+    ]
+  },
+  "loop": null,
+  "commands": {
+    "cd": "cd /Users/vivek/.symphony/workspaces/mdedit/_pool_1",
+    "resume": null,
+    "exec": null,
+    "editor_url": "vscode://file/Users/vivek/.symphony/workspaces/mdedit/_pool_1"
+  }
+}

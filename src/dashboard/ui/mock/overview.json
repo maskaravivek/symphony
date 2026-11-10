@@ -1,0 +1,935 @@
+{
+  "generated_at": "2026-11-10T15:00:00.000Z",
+  "source": {
+    "kind": "config",
+    "path": "/Users/vivek/code/symphony-ops/symphony.config.yml"
+  },
+  "orchestrator": {
+    "alive": true,
+    "level": "ok",
+    "pid": 48211,
+    "started_at": "2026-11-09T12:46:00.000Z",
+    "last_heartbeat_at": "2026-11-10T14:59:48.000Z",
+    "heartbeat_age_ms": 12000,
+    "polling_interval_ms": 30000,
+    "max_concurrent_agents": 8,
+    "running_agents": 3,
+    "shutting_down": false,
+    "message": null
+  },
+  "totals": {
+    "repos": 8,
+    "running": 3,
+    "queued": 9,
+    "retrying": 2,
+    "attention": 10,
+    "attention_bad": 3
+  },
+  "attention": [
+    {
+      "id": "retry_exhausted:mdedit/1144",
+      "reason": "retry_exhausted",
+      "level": "bad",
+      "repo_id": "mdedit",
+      "task_key": "mdedit/1144",
+      "title": "Export to PDF drops embedded images",
+      "detail": "Attempt 2 failed verification: 2 tests failing in src/export/pdf.test.ts (expected 4 embedded images, received 0). Retries exhausted after 2 attempts; symphony:failed label applied and the workspace was kept for inspection.",
+      "issue_number": 1144,
+      "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1144",
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_2",
+      "since": "2026-11-10T14:22:00.000Z"
+    },
+    {
+      "id": "protected_workspace:mdedit/_pool_3",
+      "reason": "protected_workspace",
+      "level": "bad",
+      "repo_id": "mdedit",
+      "task_key": "mdedit/1098",
+      "title": "Workspace _pool_3 is protected",
+      "detail": "Preserving protected linked workspace /Users/vivek/.symphony/workspaces/mdedit/_pool_3: 4 uncommitted files (src/sync/merge.ts, src/sync/merge.test.ts, docs/sync.md, package.json). The terminal sweep will not clean it until you commit, stash or discard.",
+      "issue_number": 1098,
+      "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1098",
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_3",
+      "since": "2026-11-10T11:50:00.000Z"
+    },
+    {
+      "id": "storage_blocked:ledger",
+      "reason": "storage_blocked",
+      "level": "bad",
+      "repo_id": "ledger",
+      "task_key": null,
+      "title": "Storage below minimum",
+      "detail": "Free space 12.4 GiB is below the 20 GiB minimum; dispatch is paused for ledger until space is freed.",
+      "issue_number": null,
+      "issue_url": null,
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": "/Users/vivek/.symphony/workspaces/ledger",
+      "since": "2026-11-10T13:25:00.000Z"
+    },
+    {
+      "id": "needs_info:pantry/311",
+      "reason": "needs_info",
+      "level": "warn",
+      "repo_id": "pantry",
+      "task_key": "pantry/311",
+      "title": "Add barcode scanning to pantry import",
+      "detail": "Agent asked: should scanned items merge into existing entries by UPC, or always create new rows? Reply on the issue and remove the needs-info label.",
+      "issue_number": 311,
+      "issue_url": "https://github.com/mangoappstudio/pantry/issues/311",
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": null,
+      "since": "2026-11-10T13:56:00.000Z"
+    },
+    {
+      "id": "ready_for_review:atlas-api/77",
+      "reason": "ready_for_review",
+      "level": "warn",
+      "repo_id": "atlas-api",
+      "task_key": "atlas-api/77",
+      "title": "Paginate /v2/projects with cursors",
+      "detail": "PR #82 is ready for review; 2 review rounds passed.",
+      "issue_number": 77,
+      "issue_url": "https://github.com/mangoappstudio/atlas-api/issues/77",
+      "pr_number": 82,
+      "pr_url": "https://github.com/mangoappstudio/atlas-api/pull/82",
+      "workspace_path": null,
+      "since": "2026-11-10T12:58:00.000Z"
+    },
+    {
+      "id": "merge_blocked:mdedit-web/412",
+      "reason": "merge_blocked",
+      "level": "warn",
+      "repo_id": "mdedit-web",
+      "task_key": "mdedit-web/405",
+      "title": "Offline banner flickers on reconnect",
+      "detail": "Required check 'e2e (chromium)' is failing; 1 unresolved review thread.",
+      "issue_number": 405,
+      "issue_url": "https://github.com/mangoappstudio/mdedit-web/issues/405",
+      "pr_number": 412,
+      "pr_url": "https://github.com/mangoappstudio/mdedit-web/pull/412",
+      "workspace_path": null,
+      "since": "2026-11-10T14:05:00.000Z"
+    },
+    {
+      "id": "waiting_human:symphony/203",
+      "reason": "waiting_human",
+      "level": "warn",
+      "repo_id": "symphony",
+      "task_key": "symphony/203",
+      "title": "Document multi-repo storage maintenance",
+      "detail": "Interactive handoff: the agent finished and is waiting for you to pick it up.",
+      "issue_number": 203,
+      "issue_url": "https://github.com/mangoappstudio/symphony/issues/203",
+      "pr_number": 209,
+      "pr_url": "https://github.com/mangoappstudio/symphony/pull/209",
+      "workspace_path": null,
+      "since": "2026-11-10T11:00:00.000Z"
+    },
+    {
+      "id": "dispatch_deferred:atlas-api",
+      "reason": "dispatch_deferred",
+      "level": "warn",
+      "repo_id": "atlas-api",
+      "task_key": null,
+      "title": "3 issues waiting for a workspace slot",
+      "detail": "Deferred #84, #85, #88: workspace pool limit reached (4 of 4 slots in use).",
+      "issue_number": null,
+      "issue_url": null,
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": null,
+      "since": "2026-11-10T14:19:00.000Z"
+    },
+    {
+      "id": "provider_backoff:pantry:codex",
+      "reason": "provider_backoff",
+      "level": "warn",
+      "repo_id": "pantry",
+      "task_key": null,
+      "title": "codex usage limit reached",
+      "detail": "Backing off until 15:40 UTC; 1 issue is waiting.",
+      "issue_number": null,
+      "issue_url": null,
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": null,
+      "since": "2026-11-10T14:48:00.000Z"
+    },
+    {
+      "id": "loop_question:docs-site/weekly-link-check",
+      "reason": "loop_question",
+      "level": "warn",
+      "repo_id": "docs-site",
+      "task_key": "docs-site/loop/weekly-link-check",
+      "title": "weekly-link-check has a question",
+      "detail": "Found 14 broken links to the retired /v1 API reference. Should I redirect them to /v2 equivalents or remove them?",
+      "issue_number": null,
+      "issue_url": null,
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": null,
+      "since": "2026-11-10T08:40:00.000Z"
+    }
+  ],
+  "running": [
+    {
+      "task_key": "mdedit/1162",
+      "kind": "issue",
+      "repo_id": "mdedit",
+      "issue_number": 1162,
+      "issue_identifier": "mangoappstudio/mdedit#1162",
+      "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1162",
+      "loop_id": null,
+      "title": "Table editor loses column alignment after paste",
+      "status": "agent-running",
+      "agent_provider": "codex",
+      "agent_mode": "autonomous",
+      "attempt": 1,
+      "session_id": "019a7c2e",
+      "started_at": "2026-11-10T14:41:56.000Z",
+      "elapsed_ms": 1084000,
+      "last_activity": "$ yarn vitest run src/table/paste.test.ts --reporter=dot",
+      "last_activity_at": "2026-11-10T14:59:39.000Z",
+      "usage": {
+        "input_tokens": 259312,
+        "cached_input_tokens": 218400,
+        "output_tokens": 1834,
+        "turns": 7
+      },
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1",
+      "artifacts": {
+        "prompt": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/prompt.md",
+        "agent_log": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/agent.jsonl",
+        "agent_stderr": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/agent.stderr.log",
+        "last_message": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/last_message.md",
+        "verification": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/verification.json",
+        "manifest": "/Users/vivek/.symphony/workspaces/mdedit/_pool_1/.symphony/runs/20261110T144200-1-019a7c2e/manifest.json"
+      }
+    },
+    {
+      "task_key": "symphony/205",
+      "kind": "issue",
+      "repo_id": "symphony",
+      "issue_number": 205,
+      "issue_identifier": "mangoappstudio/symphony#205",
+      "issue_url": "https://github.com/mangoappstudio/symphony/issues/205",
+      "loop_id": null,
+      "title": "Dashboard: show heartbeat age per repo",
+      "status": "agent-running",
+      "agent_provider": "claude",
+      "agent_mode": "autonomous",
+      "attempt": 2,
+      "session_id": "7f3b9d10",
+      "started_at": "2026-11-10T14:17:30.000Z",
+      "elapsed_ms": 2550000,
+      "last_activity": "Updated src/status/heartbeat.ts to write atomically via tmp file + rename; running the heartbeat tests next.",
+      "last_activity_at": "2026-11-10T14:58:58.000Z",
+      "usage": {
+        "input_tokens": 1204000,
+        "cached_input_tokens": 1010000,
+        "output_tokens": 22800,
+        "turns": 31
+      },
+      "pr_number": null,
+      "pr_url": null,
+      "workspace_path": "/Users/vivek/.symphony/workspaces/symphony/_pool_1",
+      "artifacts": {
+        "prompt": "/Users/vivek/.symphony/workspaces/symphony/_pool_1/.symphony/runs/20261110T141800-2-7f3b9d10/prompt.md",
+        "agent_log": "/Users/vivek/.symphony/workspaces/symphony/_pool_1/.symphony/runs/20261110T141800-2-7f3b9d10/agent.stdout.log",
+        "agent_stderr": "/Users/vivek/.symphony/workspaces/symphony/_pool_1/.symphony/runs/20261110T141800-2-7f3b9d10/agent.stderr.log",
+        "last_message": "/Users/vivek/.symphony/workspaces/symphony/_pool_1/.symphony/runs/20261110T141800-2-7f3b9d10/last_message.md",
+        "verification": "/Users/vivek/.symphony/workspaces/symphony/_pool_1/.symphony/runs/20261110T141800-2-7f3b9d10/verification.json",
+        "manifest": "/Users/vivek/.symphony/workspaces/symphony/_pool_1/.symphony/runs/20261110T141800-2-7f3b9d10/manifest.json"
+      }
+    },
+    {
+      "task_key": "atlas-api/79",
+      "kind": "pr",
+      "repo_id": "atlas-api",
+      "issue_number": 79,
+      "issue_identifier": "mangoappstudio/atlas-api#79",
+      "issue_url": "https://github.com/mangoappstudio/atlas-api/issues/79",
+      "loop_id": null,
+      "title": "Review: rate-limit middleware for /v2/search",
+      "status": "agent-running",
+      "agent_provider": "codex",
+      "agent_mode": "pr-review",
+      "attempt": 1,
+      "session_id": "019a7c41",
+      "started_at": "2026-11-10T14:50:48.000Z",
+      "elapsed_ms": 552000,
+      "last_activity": "Reading src/middleware/rateLimit.ts to check the sliding window resets per API key",
+      "last_activity_at": "2026-11-10T14:59:12.000Z",
+      "usage": {
+        "input_tokens": 88400,
+        "cached_input_tokens": 61000,
+        "output_tokens": 920,
+        "turns": 3
+      },
+      "pr_number": 81,
+      "pr_url": "https://github.com/mangoappstudio/atlas-api/pull/81",
+      "workspace_path": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4",
+      "artifacts": {
+        "prompt": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4/.symphony/runs/20261110T145100-1-019a7c41/prompt.md",
+        "agent_log": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4/.symphony/runs/20261110T145100-1-019a7c41/agent.jsonl",
+        "agent_stderr": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4/.symphony/runs/20261110T145100-1-019a7c41/agent.stderr.log",
+        "last_message": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4/.symphony/runs/20261110T145100-1-019a7c41/last_message.md",
+        "verification": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4/.symphony/runs/20261110T145100-1-019a7c41/verification.json",
+        "manifest": "/Users/vivek/.symphony/workspaces/atlas-api/_pool_4/.symphony/runs/20261110T145100-1-019a7c41/manifest.json"
+      }
+    }
+  ],
+  "repos": [
+    {
+      "repo_id": "mdedit",
+      "owner": "mangoappstudio",
+      "repo": "mdedit",
+      "workflow_path": "/Users/vivek/code/mdedit/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/mdedit",
+      "enabled": true,
+      "level": "bad",
+      "last_poll_at": "2026-11-10T14:59:46.000Z",
+      "poll_age_ms": 14000,
+      "capacity": {
+        "max_concurrent_agents": 3,
+        "running": 1,
+        "remaining": 2
+      },
+      "counts": {
+        "queued": 4,
+        "preparing": 0,
+        "running": 1,
+        "retrying": 1,
+        "needs_info": 0,
+        "waiting_human": 1,
+        "review_blocked": 0,
+        "failed": 1,
+        "epics_coordinating": 2,
+        "loops": 2
+      },
+      "pool": {
+        "slots_total": 5,
+        "slots_max": 6,
+        "slots_in_use": 2,
+        "slots_protected": 1,
+        "slots_idle": 2
+      },
+      "flags": [
+        {
+          "kind": "retry_exhausted",
+          "level": "bad",
+          "message": "#1144 exhausted 2 retry attempts (verification failed)",
+          "count": 1,
+          "since": "2026-11-10T14:22:00.000Z"
+        },
+        {
+          "kind": "protected_workspaces",
+          "level": "bad",
+          "message": "Preserving protected linked workspace _pool_3 (#1098): 4 uncommitted files",
+          "count": 1,
+          "since": "2026-11-10T11:50:00.000Z"
+        },
+        {
+          "kind": "dispatch_deferred",
+          "level": "warn",
+          "message": "Deferred #1170: workspace pool has a protected slot",
+          "count": 2,
+          "since": "2026-11-10T14:54:00.000Z"
+        },
+        {
+          "kind": "loop_failed",
+          "level": "warn",
+          "message": "Loop daily-steward failed: exit code 1",
+          "count": 1,
+          "since": "2026-11-10T10:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "repo_id": "mdedit-web",
+      "owner": "mangoappstudio",
+      "repo": "mdedit-web",
+      "workflow_path": "/Users/vivek/code/mdedit-web/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/mdedit-web",
+      "enabled": true,
+      "level": "warn",
+      "last_poll_at": "2026-11-10T14:59:38.000Z",
+      "poll_age_ms": 22000,
+      "capacity": {
+        "max_concurrent_agents": 2,
+        "running": 0,
+        "remaining": 2
+      },
+      "counts": {
+        "queued": 1,
+        "preparing": 0,
+        "running": 0,
+        "retrying": 0,
+        "needs_info": 0,
+        "waiting_human": 0,
+        "review_blocked": 1,
+        "failed": 0,
+        "epics_coordinating": 0,
+        "loops": 1
+      },
+      "pool": {
+        "slots_total": 3,
+        "slots_max": 4,
+        "slots_in_use": 0,
+        "slots_protected": 0,
+        "slots_idle": 3
+      },
+      "flags": [
+        {
+          "kind": "dispatch_deferred",
+          "level": "warn",
+          "message": "Merge blocked on PR #412: required check e2e (chromium) failing",
+          "count": 1,
+          "since": "2026-11-10T14:05:00.000Z"
+        }
+      ]
+    },
+    {
+      "repo_id": "symphony",
+      "owner": "mangoappstudio",
+      "repo": "symphony",
+      "workflow_path": "/Users/vivek/code/symphony/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/symphony",
+      "enabled": true,
+      "level": "ok",
+      "last_poll_at": "2026-11-10T14:59:51.000Z",
+      "poll_age_ms": 9000,
+      "capacity": {
+        "max_concurrent_agents": 2,
+        "running": 1,
+        "remaining": 1
+      },
+      "counts": {
+        "queued": 2,
+        "preparing": 0,
+        "running": 1,
+        "retrying": 0,
+        "needs_info": 0,
+        "waiting_human": 1,
+        "review_blocked": 0,
+        "failed": 0,
+        "epics_coordinating": 1,
+        "loops": 1
+      },
+      "pool": {
+        "slots_total": 2,
+        "slots_max": 3,
+        "slots_in_use": 1,
+        "slots_protected": 0,
+        "slots_idle": 1
+      },
+      "flags": []
+    },
+    {
+      "repo_id": "ledger",
+      "owner": "mangoappstudio",
+      "repo": "ledger",
+      "workflow_path": "/Users/vivek/code/ledger/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/ledger",
+      "enabled": true,
+      "level": "bad",
+      "last_poll_at": "2026-11-10T14:36:20.000Z",
+      "poll_age_ms": 1420000,
+      "capacity": {
+        "max_concurrent_agents": 2,
+        "running": 0,
+        "remaining": 2
+      },
+      "counts": {
+        "queued": 2,
+        "preparing": 0,
+        "running": 0,
+        "retrying": 0,
+        "needs_info": 0,
+        "waiting_human": 0,
+        "review_blocked": 0,
+        "failed": 0,
+        "epics_coordinating": 0,
+        "loops": 0
+      },
+      "pool": {
+        "slots_total": 2,
+        "slots_max": 2,
+        "slots_in_use": 0,
+        "slots_protected": 0,
+        "slots_idle": 2
+      },
+      "flags": [
+        {
+          "kind": "storage_blocked",
+          "level": "bad",
+          "message": "Free space 12.4 GiB is below the 20 GiB minimum; dispatch paused",
+          "count": null,
+          "since": "2026-11-10T13:25:00.000Z"
+        },
+        {
+          "kind": "stale_poll",
+          "level": "warn",
+          "message": "Last poll finished 23m ago (interval 30s)",
+          "count": null,
+          "since": "2026-11-10T14:37:00.000Z"
+        }
+      ]
+    },
+    {
+      "repo_id": "pantry",
+      "owner": "mangoappstudio",
+      "repo": "pantry",
+      "workflow_path": "/Users/vivek/code/pantry/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/pantry",
+      "enabled": true,
+      "level": "warn",
+      "last_poll_at": "2026-11-10T14:59:29.000Z",
+      "poll_age_ms": 31000,
+      "capacity": {
+        "max_concurrent_agents": 2,
+        "running": 0,
+        "remaining": 2
+      },
+      "counts": {
+        "queued": 0,
+        "preparing": 0,
+        "running": 0,
+        "retrying": 1,
+        "needs_info": 1,
+        "waiting_human": 0,
+        "review_blocked": 0,
+        "failed": 0,
+        "epics_coordinating": 0,
+        "loops": 0
+      },
+      "pool": {
+        "slots_total": 2,
+        "slots_max": 3,
+        "slots_in_use": 1,
+        "slots_protected": 0,
+        "slots_idle": 1
+      },
+      "flags": [
+        {
+          "kind": "provider_backoff",
+          "level": "warn",
+          "message": "codex usage limit reached; backing off until 15:40 UTC",
+          "count": null,
+          "since": "2026-11-10T14:48:00.000Z"
+        }
+      ]
+    },
+    {
+      "repo_id": "atlas-api",
+      "owner": "mangoappstudio",
+      "repo": "atlas-api",
+      "workflow_path": "/Users/vivek/code/atlas-api/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/atlas-api",
+      "enabled": true,
+      "level": "warn",
+      "last_poll_at": "2026-11-10T14:59:42.000Z",
+      "poll_age_ms": 18000,
+      "capacity": {
+        "max_concurrent_agents": 4,
+        "running": 1,
+        "remaining": 3
+      },
+      "counts": {
+        "queued": 0,
+        "preparing": 0,
+        "running": 1,
+        "retrying": 0,
+        "needs_info": 0,
+        "waiting_human": 0,
+        "review_blocked": 0,
+        "failed": 0,
+        "epics_coordinating": 1,
+        "loops": 1
+      },
+      "pool": {
+        "slots_total": 4,
+        "slots_max": 4,
+        "slots_in_use": 4,
+        "slots_protected": 0,
+        "slots_idle": 0
+      },
+      "flags": [
+        {
+          "kind": "pool_exhausted",
+          "level": "warn",
+          "message": "All 4 workspace slots in use; 3 issues deferred",
+          "count": 3,
+          "since": "2026-11-10T14:19:00.000Z"
+        },
+        {
+          "kind": "dispatch_deferred",
+          "level": "warn",
+          "message": "Deferred #84, #85, #88: workspace pool limit reached",
+          "count": 3,
+          "since": "2026-11-10T14:57:00.000Z"
+        }
+      ]
+    },
+    {
+      "repo_id": "docs-site",
+      "owner": "mangoappstudio",
+      "repo": "docs-site",
+      "workflow_path": "/Users/vivek/code/docs-site/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/docs-site",
+      "enabled": true,
+      "level": "ok",
+      "last_poll_at": "2026-11-10T14:59:49.000Z",
+      "poll_age_ms": 11000,
+      "capacity": {
+        "max_concurrent_agents": 1,
+        "running": 0,
+        "remaining": 1
+      },
+      "counts": {
+        "queued": 0,
+        "preparing": 0,
+        "running": 0,
+        "retrying": 0,
+        "needs_info": 0,
+        "waiting_human": 0,
+        "review_blocked": 0,
+        "failed": 0,
+        "epics_coordinating": 0,
+        "loops": 2
+      },
+      "pool": {
+        "slots_total": 1,
+        "slots_max": 2,
+        "slots_in_use": 0,
+        "slots_protected": 0,
+        "slots_idle": 1
+      },
+      "flags": []
+    },
+    {
+      "repo_id": "infra",
+      "owner": "mangoappstudio",
+      "repo": "infra",
+      "workflow_path": "/Users/vivek/code/infra/WORKFLOW.md",
+      "workspace_root": "/Users/vivek/.symphony/workspaces/infra",
+      "enabled": false,
+      "level": "unknown",
+      "last_poll_at": null,
+      "poll_age_ms": null,
+      "capacity": {
+        "max_concurrent_agents": 1,
+        "running": 0,
+        "remaining": null
+      },
+      "counts": {
+        "queued": 0,
+        "preparing": 0,
+        "running": 0,
+        "retrying": 0,
+        "needs_info": 0,
+        "waiting_human": 0,
+        "review_blocked": 0,
+        "failed": 0,
+        "epics_coordinating": 0,
+        "loops": 0
+      },
+      "pool": {
+        "slots_total": 0,
+        "slots_max": 1,
+        "slots_in_use": 0,
+        "slots_protected": 0,
+        "slots_idle": 0
+      },
+      "flags": [
+        {
+          "kind": "no_heartbeat",
+          "level": "unknown",
+          "message": "Repo disabled in symphony.config.yml; no heartbeat",
+          "count": null,
+          "since": null
+        }
+      ]
+    }
+  ],
+  "epics": [
+    {
+      "task_key": "mdedit/1100",
+      "repo_id": "mdedit",
+      "issue_number": 1100,
+      "issue_identifier": "mangoappstudio/mdedit#1100",
+      "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1100",
+      "title": "Collaborative editing v2",
+      "status": "coordinating",
+      "open_children": 4,
+      "terminal_children": 3,
+      "total_children": 7,
+      "updated_at": "2026-11-10T14:54:00.000Z",
+      "children": [
+        {
+          "issue_number": 1101,
+          "issue_identifier": "mangoappstudio/mdedit#1101",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1101",
+          "title": "CRDT document model",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1102,
+          "issue_identifier": "mangoappstudio/mdedit#1102",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1102",
+          "title": "Presence cursors",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1103,
+          "issue_identifier": "mangoappstudio/mdedit#1103",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1103",
+          "title": "Sync merge conflicts UI",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1098,
+          "issue_identifier": "mangoappstudio/mdedit#1098",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1098",
+          "title": "Three-way merge for offline edits",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "failed"
+        },
+        {
+          "issue_number": 1162,
+          "issue_identifier": "mangoappstudio/mdedit#1162",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1162",
+          "title": "Table editor loses column alignment after paste",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "running"
+        },
+        {
+          "issue_number": 1170,
+          "issue_identifier": "mangoappstudio/mdedit#1170",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1170",
+          "title": "Comment threads on selections",
+          "state": "open",
+          "queued": true,
+          "skipped_reason": null,
+          "lifecycle": "queued"
+        },
+        {
+          "issue_number": 1171,
+          "issue_identifier": "mangoappstudio/mdedit#1171",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1171",
+          "title": "Permissions for shared docs",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": "Blocked by #1170",
+          "lifecycle": null
+        }
+      ]
+    },
+    {
+      "task_key": "mdedit/1130",
+      "repo_id": "mdedit",
+      "issue_number": 1130,
+      "issue_identifier": "mangoappstudio/mdedit#1130",
+      "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1130",
+      "title": "Export pipeline rewrite",
+      "status": "coordinating",
+      "open_children": 1,
+      "terminal_children": 4,
+      "total_children": 5,
+      "updated_at": "2026-11-10T14:22:00.000Z",
+      "children": [
+        {
+          "issue_number": 1131,
+          "issue_identifier": "mangoappstudio/mdedit#1131",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1131",
+          "title": "Unified export AST",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1132,
+          "issue_identifier": "mangoappstudio/mdedit#1132",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1132",
+          "title": "HTML exporter",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1133,
+          "issue_identifier": "mangoappstudio/mdedit#1133",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1133",
+          "title": "DOCX exporter",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1134,
+          "issue_identifier": "mangoappstudio/mdedit#1134",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1134",
+          "title": "EPUB exporter",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 1144,
+          "issue_identifier": "mangoappstudio/mdedit#1144",
+          "issue_url": "https://github.com/mangoappstudio/mdedit/issues/1144",
+          "title": "Export to PDF drops embedded images",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "failed"
+        }
+      ]
+    },
+    {
+      "task_key": "symphony/190",
+      "repo_id": "symphony",
+      "issue_number": 190,
+      "issue_identifier": "mangoappstudio/symphony#190",
+      "issue_url": "https://github.com/mangoappstudio/symphony/issues/190",
+      "title": "Dashboard revamp",
+      "status": "coordinating",
+      "open_children": 4,
+      "terminal_children": 2,
+      "total_children": 6,
+      "updated_at": "2026-11-10T14:18:00.000Z",
+      "children": [
+        {
+          "issue_number": 191,
+          "issue_identifier": "mangoappstudio/symphony#191",
+          "issue_url": "https://github.com/mangoappstudio/symphony/issues/191",
+          "title": "Repo heartbeats",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 192,
+          "issue_identifier": "mangoappstudio/symphony#192",
+          "issue_url": "https://github.com/mangoappstudio/symphony/issues/192",
+          "title": "Read models for overview",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 205,
+          "issue_identifier": "mangoappstudio/symphony#205",
+          "issue_url": "https://github.com/mangoappstudio/symphony/issues/205",
+          "title": "Dashboard: show heartbeat age per repo",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "running"
+        },
+        {
+          "issue_number": 206,
+          "issue_identifier": "mangoappstudio/symphony#206",
+          "issue_url": "https://github.com/mangoappstudio/symphony/issues/206",
+          "title": "Agent log viewer",
+          "state": "open",
+          "queued": true,
+          "skipped_reason": null,
+          "lifecycle": "queued"
+        },
+        {
+          "issue_number": 207,
+          "issue_identifier": "mangoappstudio/symphony#207",
+          "issue_url": "https://github.com/mangoappstudio/symphony/issues/207",
+          "title": "History page",
+          "state": "open",
+          "queued": true,
+          "skipped_reason": null,
+          "lifecycle": "queued"
+        },
+        {
+          "issue_number": 203,
+          "issue_identifier": "mangoappstudio/symphony#203",
+          "issue_url": "https://github.com/mangoappstudio/symphony/issues/203",
+          "title": "Document multi-repo storage maintenance",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "waiting-human"
+        }
+      ]
+    },
+    {
+      "task_key": "atlas-api/70",
+      "repo_id": "atlas-api",
+      "issue_number": 70,
+      "issue_identifier": "mangoappstudio/atlas-api#70",
+      "issue_url": "https://github.com/mangoappstudio/atlas-api/issues/70",
+      "title": "Public API v2",
+      "status": "coordinating",
+      "open_children": 4,
+      "terminal_children": 5,
+      "total_children": 9,
+      "updated_at": "2026-11-10T14:51:00.000Z",
+      "children": [
+        {
+          "issue_number": 71,
+          "issue_identifier": "mangoappstudio/atlas-api#71",
+          "issue_url": "https://github.com/mangoappstudio/atlas-api/issues/71",
+          "title": "v2 routing",
+          "state": "closed",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "closed"
+        },
+        {
+          "issue_number": 77,
+          "issue_identifier": "mangoappstudio/atlas-api#77",
+          "issue_url": "https://github.com/mangoappstudio/atlas-api/issues/77",
+          "title": "Paginate /v2/projects with cursors",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "ready-for-review"
+        },
+        {
+          "issue_number": 79,
+          "issue_identifier": "mangoappstudio/atlas-api#79",
+          "issue_url": "https://github.com/mangoappstudio/atlas-api/issues/79",
+          "title": "Rate-limit middleware",
+          "state": "open",
+          "queued": false,
+          "skipped_reason": null,
+          "lifecycle": "running"
+        }
+      ]
+    }
+  ]
+}

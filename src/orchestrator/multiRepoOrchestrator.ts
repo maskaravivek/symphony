@@ -120,6 +120,20 @@ export class MultiRepoOrchestrator {
     }
   }
 
+  /** Read-only summary used by the process-level orchestrator heartbeat. */
+  getHeartbeatSummary(): { polling_interval_ms: number | null; max_concurrent_agents: number | null; repo_ids: string[] | null } {
+    const config = this.lastGoodConfig;
+    if (!config) return { polling_interval_ms: null, max_concurrent_agents: null, repo_ids: null };
+    const enabled = config.repos.filter((r) => r.enabled);
+    let maxConcurrent = config.agent.max_concurrent_agents;
+    if (maxConcurrent === null) {
+      // No global cap: the effective ceiling is the sum of per-repo limits.
+      maxConcurrent = enabled.reduce((sum, repo) => sum
+        + (repo.max_concurrent_agents ?? this.runtimes.get(repo.id)?.orchestrator.getHeartbeatSummary().max_concurrent_agents ?? 0), 0);
+    }
+    return { polling_interval_ms: config.polling.interval_ms, max_concurrent_agents: maxConcurrent, repo_ids: enabled.map((r) => r.id) };
+  }
+
   private getGlobalAvailableSlots(config: ServerConfig): number | null {
     const globalLimit = config.agent.max_concurrent_agents;
     if (globalLimit === null) return null;

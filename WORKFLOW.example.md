@@ -223,7 +223,7 @@ agents:
     claude:
       provider_group: claude
       provider_kind: claude
-      command: bash -lc 'set -o pipefail; claude -p < "{{ symphony.prompt_path }}" | tee .symphony/claude.log .symphony/last_message.md'
+      command: bash -lc 'set -o pipefail; claude -p --output-format stream-json --verbose < "{{ symphony.prompt_path }}" | tee .symphony/claude.log | jq -r "select(.type==\"result\") | .result // empty" > "$SYMPHONY_LAST_MESSAGE_PATH"'
       output_log: .symphony/claude.log
       turn_timeout_ms: 3600000
       max_concurrent: 1
@@ -237,7 +237,7 @@ agents:
         bash -lc 'set -o pipefail;
         CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5 CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 CLAUDE_CODE_FORK_SUBAGENT=0
         claude -p --model fable --agent symphony-fable-lead --agents "$1" --strict-mcp-config
-        < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log "$SYMPHONY_LAST_MESSAGE_PATH"' --
+        --output-format stream-json --verbose < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log | jq -r "select(.type==\"result\") | .result // empty" > "$SYMPHONY_LAST_MESSAGE_PATH"' --
         '{
           "symphony-fable-lead": {
             "description": "Plans and reviews Symphony tasks and delegates implementation.",
@@ -254,7 +254,7 @@ agents:
       handoff_command: >-
         bash -lc 'set -o pipefail;
         claude -p --model fable --permission-mode dontAsk --tools Read,Glob,Grep --allowedTools Read,Glob,Grep --setting-sources "" --strict-mcp-config
-        < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log "$SYMPHONY_LAST_MESSAGE_PATH"'
+        --output-format stream-json --verbose < "{{ symphony.prompt_path }}" | tee .symphony/claude-fable.log | jq -r "select(.type==\"result\") | .result // empty" > "$SYMPHONY_LAST_MESSAGE_PATH"'
       output_log: .symphony/claude-fable.log
       turn_timeout_ms: 3600000
       max_concurrent: 1

@@ -1,0 +1,251 @@
+{
+  "generated_at": "2026-11-10T15:00:00.000Z",
+  "window": {
+    "from": "2026-10-13T15:00:00.000Z",
+    "to": "2026-11-10T15:00:00.000Z",
+    "days": 28
+  },
+  "repos": [
+    {
+      "repo_id": "mdedit",
+      "weeks": [
+        {
+          "week_start": "2026-10-19T00:00:00.000Z",
+          "merged": 6,
+          "completed": 8,
+          "failed": 1,
+          "paused": 1,
+          "retries": 4,
+          "loops_completed": 7,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 8040000
+        },
+        {
+          "week_start": "2026-10-26T00:00:00.000Z",
+          "merged": 9,
+          "completed": 11,
+          "failed": 2,
+          "paused": 0,
+          "retries": 6,
+          "loops_completed": 7,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 7080000
+        },
+        {
+          "week_start": "2026-11-02T00:00:00.000Z",
+          "merged": 4,
+          "completed": 6,
+          "failed": 3,
+          "paused": 2,
+          "retries": 9,
+          "loops_completed": 6,
+          "loops_failed": 1,
+          "median_claim_to_merge_ms": 12300000
+        },
+        {
+          "week_start": "2026-11-09T00:00:00.000Z",
+          "merged": 7,
+          "completed": 8,
+          "failed": 1,
+          "paused": 1,
+          "retries": 3,
+          "loops_completed": 3,
+          "loops_failed": 1,
+          "median_claim_to_merge_ms": 5760000
+        }
+      ],
+      "top_retry_reasons": [
+        {
+          "reason": "verification_failed",
+          "count": 11
+        },
+        {
+          "reason": "agent_exit_nonzero",
+          "count": 7
+        },
+        {
+          "reason": "workspace_preparation_failed",
+          "count": 4
+        }
+      ],
+      "top_failure_reasons": [
+        {
+          "reason": "retries_exhausted",
+          "count": 4
+        },
+        {
+          "reason": "agent_timeout",
+          "count": 2
+        },
+        {
+          "reason": "merge_conflict",
+          "count": 1
+        }
+      ],
+      "top_merge_block_reasons": [
+        {
+          "reason": "checks_pending",
+          "count": 9
+        },
+        {
+          "reason": "review_blocking",
+          "count": 5
+        },
+        {
+          "reason": "checks_failing",
+          "count": 3
+        }
+      ]
+    },
+    {
+      "repo_id": "symphony",
+      "weeks": [
+        {
+          "week_start": "2026-10-19T00:00:00.000Z",
+          "merged": 3,
+          "completed": 3,
+          "failed": 0,
+          "paused": 0,
+          "retries": 1,
+          "loops_completed": 7,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 3720000
+        },
+        {
+          "week_start": "2026-10-26T00:00:00.000Z",
+          "merged": 5,
+          "completed": 6,
+          "failed": 0,
+          "paused": 1,
+          "retries": 2,
+          "loops_completed": 7,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 4260000
+        },
+        {
+          "week_start": "2026-11-02T00:00:00.000Z",
+          "merged": 2,
+          "completed": 3,
+          "failed": 1,
+          "paused": 0,
+          "retries": 3,
+          "loops_completed": 7,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 5280000
+        },
+        {
+          "week_start": "2026-11-09T00:00:00.000Z",
+          "merged": 4,
+          "completed": 4,
+          "failed": 0,
+          "paused": 0,
+          "retries": 0,
+          "loops_completed": 3,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 3300000
+        }
+      ],
+      "top_retry_reasons": [
+        {
+          "reason": "agent_exit_nonzero",
+          "count": 4
+        },
+        {
+          "reason": "provider_usage_limit",
+          "count": 2
+        }
+      ],
+      "top_failure_reasons": [
+        {
+          "reason": "retries_exhausted",
+          "count": 1
+        }
+      ],
+      "top_merge_block_reasons": [
+        {
+          "reason": "checks_pending",
+          "count": 6
+        }
+      ]
+    },
+    {
+      "repo_id": "atlas-api",
+      "weeks": [
+        {
+          "week_start": "2026-10-19T00:00:00.000Z",
+          "merged": 1,
+          "completed": 2,
+          "failed": 0,
+          "paused": 0,
+          "retries": 0,
+          "loops_completed": 1,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": null
+        },
+        {
+          "week_start": "2026-10-26T00:00:00.000Z",
+          "merged": 3,
+          "completed": 3,
+          "failed": 1,
+          "paused": 0,
+          "retries": 2,
+          "loops_completed": 1,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 14400000
+        },
+        {
+          "week_start": "2026-11-02T00:00:00.000Z",
+          "merged": 5,
+          "completed": 6,
+          "failed": 0,
+          "paused": 0,
+          "retries": 1,
+          "loops_completed": 1,
+          "loops_failed": 0,
+          "median_claim_to_merge_ms": 10800000
+        },
+        {
+          "week_start": "2026-11-09T00:00:00.000Z",
+          "merged": 2,
+          "completed": 3,
+          "failed": 0,
+          "paused": 1,
+          "retries": 1,
+          "loops_completed": 0,
+          "loops_failed": 1,
+          "median_claim_to_merge_ms": 9000000
+        }
+      ],
+      "top_retry_reasons": [
+        {
+          "reason": "verification_failed",
+          "count": 3
+        },
+        {
+          "reason": "workspace_pool_limit",
+          "count": 1
+        }
+      ],
+      "top_failure_reasons": [
+        {
+          "reason": "agent_timeout",
+          "count": 1
+        }
+      ],
+      "top_merge_block_reasons": [
+        {
+          "reason": "review_blocking",
+          "count": 4
+        },
+        {
+          "reason": "checks_failing",
+          "count": 2
+        },
+        {
+          "reason": "merge_conflict",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

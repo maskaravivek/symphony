@@ -22,12 +22,87 @@ import { requiredToolsForWorkflow } from './doctor/requiredTools.js';
 import { labelsForWorkflow, routingProblems } from './doctor/labels.js';
 import { runTelegramBridge, type TelegramBridgeOptions } from './telegram/runBridge.js';
 import { pairTelegram } from './telegram/pair.js';
+import { writeOrchestratorHeartbeat } from './status/heartbeat.js';
+import type { OrchestratorHeartbeat } from './status/dashboardTypes.js';
 
 const execFileAsync = promisify(execFile);
 
 async function loadConfigFromWorkflowPath(workflowPath: string) {
   const loaded = await loadWorkflowFromFile(workflowPath);
   return loaded.config;
+}
+
+const MAX_HEARTBEAT_INTERVAL_MS = 30_000;
+
+/**
+ * Process-level heartbeat for `symphony run`. Static facts come from one config read at startup;
+ * the orchestrator's last good config takes over once it has polled.
+ */
+async function createOrchestratorHeartbeat(
+  orchestrator: Orchestrator | MultiRepoOrchestrator,
+  controlPath: string,
+  mode: OrchestratorHeartbeat['mode'],
+) {
+  const controlDir = path.dirname(controlPath);
+  const startedAt = new Date().toISOString();
+  const initial: { polling_interval_ms: number; max_concurrent_agents: number; repo_ids: string[] } = {
+    polling_interval_ms: 30_000,
+    max_concurrent_agents: 0,
+    repo_ids: mode === 'config' ? [] : ['default'],
+  };
+  try {
+    if (mode === 'config') {
+      const config = await loadServerConfigFromFile(controlPath);
+      const enabled = config.repos.filter((r) => r.enabled);
+      initial.polling_interval_ms = config.polling.interval_ms;
+      initial.max_concurrent_agents = config.agent.max_concurrent_agents
+        ?? enabled.reduce((sum, repo) => sum + (repo.max_concurrent_agents ?? 0), 0);
+      initial.repo_ids = enabled.map((r) => r.id);
+    } else {
+      const config = await loadConfigFromWorkflowPath(controlPath);
+      initial.polling_interval_ms = config.polling.interval_ms;
+      initial.max_concurrent_agents = config.agent.max_concurrent_agents;
+    }
+  } catch {
+    // The orchestrator logs config load failures itself; keep defaults until it has a good config.
+  }
+  let timer: NodeJS.Timeout | null = null;
+  let shuttingDown = false;
+  const write = async (finalWrite = false): Promise<void> => {
+    if (finalWrite) shuttingDown = true;
+    const summary: { polling_interval_ms: number | null; max_concurrent_agents: number | null; repo_ids?: string[] | null } = orchestrator.getHeartbeatSummary();
+    const repoIds = summary.repo_ids ?? null;
+    const record: OrchestratorHeartbeat = {
+      version: 1,
+      pid: process.pid,
+      started_at: startedAt,
+      updated_at: new Date().toISOString(),
+      mode,
+      source_path: controlPath,
+      polling_interval_ms: summary.polling_interval_ms ?? initial.polling_interval_ms,
+      max_concurrent_agents: summary.max_concurrent_agents ?? initial.max_concurrent_agents,
+      repo_ids: repoIds ?? initial.repo_ids,
+      shutting_down: shuttingDown,
+    };
+    await writeOrchestratorHeartbeat(controlDir, record);
+  };
+  const schedule = (): void => {
+    if (shuttingDown) return;
+    const interval = Math.min(orchestrator.getHeartbeatSummary().polling_interval_ms ?? initial.polling_interval_ms, MAX_HEARTBEAT_INTERVAL_MS);
+    timer = setTimeout(() => {
+      void write().finally(schedule);
+    }, Math.max(1_000, interval));
+    timer.unref();
+  };
+  return {
+    write,
+    start: schedule,
+    stop: (): void => {
+      shuttingDown = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+  };
 }
 
 function resolveConfigPath(configPath: string): string {
@@ -233,6 +308,10 @@ async function main(): Promise<void> {
         ? new MultiRepoOrchestrator({ configPath: controlPath })
         : new Orchestrator({ workflowPath: controlPath });
 
+      const heartbeat = await createOrchestratorHeartbeat(orchestrator, controlPath, options.config ? 'config' : 'workflow');
+      await heartbeat.write();
+      if (!options.once) heartbeat.start();
+
       let shutdownStarted = false;
       let forceExitTimer: NodeJS.Timeout | null = null;
       const shutdown = async (signal: string, exitCode: number) => {
@@ -247,6 +326,8 @@ async function main(): Promise<void> {
           process.exit(exitCode);
         }, 15_000);
         forceExitTimer.unref();
+        heartbeat.stop();
+        await heartbeat.write(true);
         try {
           await orchestrator.shutdown(`signal:${signal}`);
         } catch (err) {
@@ -267,10 +348,13 @@ async function main(): Promise<void> {
         await orchestrator.tickOnce();
         await orchestrator.waitForPreparations();
         await orchestrator.shutdown('once_complete');
+        await heartbeat.write(true);
         return;
       }
 
       await orchestrator.runForever();
+      heartbeat.stop();
+      await heartbeat.write(true);
     });
 
   program
@@ -476,7 +560,7 @@ async function main(): Promise<void> {
     .option('-w, --workflow <path>', 'Path to WORKFLOW.md', 'WORKFLOW.md')
     .option('--host <host>', 'Host to bind', '127.0.0.1')
     .option('--port <port>', 'Port to bind; the next free port is used if occupied', '3766')
-    .option('--refresh-ms <ms>', 'Browser refresh interval in milliseconds', String(DEFAULT_DASHBOARD_REFRESH_MS))
+    .option('--refresh-ms <ms>', 'Refresh interval advertised by the legacy board API in milliseconds', String(DEFAULT_DASHBOARD_REFRESH_MS))
     .action(async (options: { config?: string; workflow: string; host: string; port: string; refreshMs: string }) => {
       const port = parseNonNegativeInteger(options.port, '--port');
       const refreshMs = parsePositiveInteger(options.refreshMs, '--refresh-ms');
