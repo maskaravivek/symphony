@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +10,8 @@ import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubC
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { WorkflowConfig } from '../workflow/types.js';
+import { writeRunState } from '../status/runState.js';
+import { fixtureRunState } from '../status/dashboard/testFixtures.js';
 import { Orchestrator } from './orchestrator.js';
 
 function jsonResponse(value: unknown): Response {
@@ -222,7 +225,8 @@ agents:
 Prompt.
 `, 'utf8');
   const { config } = await loadWorkflowFromFile(workflowPath);
-  const checkout = await fs.mkdtemp(path.join(root, 'implementation-'));
+  await fs.mkdir(workspaceRoot, { recursive: true });
+  const checkout = await fs.mkdtemp(path.join(workspaceRoot, 'implementation-'));
   const git = (...args: string[]) => execFileSync('git', args, { cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   git('init');
   git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'Implementation');
@@ -285,12 +289,27 @@ Prompt.
     const pr = await tracker.fetchPullRequest(42);
     assert.ok(pr);
     const shepherd = orchestrator as unknown as {
-      recordImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef, workspacePath: string, output: string): Promise<void>;
+      recordImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef, workspacePath: string, output: string): Promise<unknown>;
       reconcilePullRequestFeedback(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void>;
     };
     const output = 'SYMPHONY_VERIFICATION_EVIDENCE: {"evidence":[{"kind":"test","summary":"Targeted tests passed"}]}';
-    await shepherd.recordImplementationEvidence(config, { ...pr, head_sha: 'different-head' }, checkout, output);
-    await shepherd.recordImplementationEvidence(config, pr, checkout, output);
+    assert.equal(await shepherd.recordImplementationEvidence(config, { ...pr, head_sha: 'different-head' }, checkout, output), null);
+    assert.ok(await shepherd.recordImplementationEvidence(config, { ...pr, number: 43 }, checkout, output));
+    const artifactDir = path.join(checkout, '.symphony', 'runs', 'completed-before-upgrade');
+    await fs.mkdir(artifactDir, { recursive: true });
+    await fs.writeFile(path.join(artifactDir, 'after_run.log'), output);
+    const lens = 'staff-engineer';
+    const reviewKey = createHash('sha256').update(JSON.stringify({
+      pr: pr.number, head: pr.head_sha, base: pr.base_sha, policy: config.merge.policy_version ?? 'v1',
+      workflow: config.workflow_sha ?? null, lens,
+    })).digest('hex');
+    await writeRunState(checkout, fixtureRunState(checkout, {
+      issue_number: 17, status: 'completed', finalization_step: 'effects-applied', session_artifact_dir: artifactDir,
+      finalization_context: { mode: 'autonomous', review_pr: {
+        pr_number: pr.number, pr_url: pr.url, head_ref: pr.head_ref, head_sha: pr.head_sha,
+        base_ref: pr.base_ref, base_sha: pr.base_sha, originating_issue_number: 17, review_key: reviewKey, lens,
+      } },
+    }));
     await orchestrator.shutdown('test');
 
     const resumed = new Orchestrator({ workflowPath, repoId: 'app' }) as unknown as typeof shepherd;

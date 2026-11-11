@@ -5,6 +5,7 @@ import { GROOMING_LABEL, groomingSource, groomingInstructions, parseGroomingResu
 import { routedProviderId } from '../agents/routing.js';
 import { maintainStorage, storageAvailable } from '../storage/maintenance.js';
 import { DispatchDeferredError, storagePolicy } from '../storage/policy.js';
+import { safeStoragePath } from '../storage/paths.js';
 import type { Issue } from '../domain/issue.js';
 import { leafEpicNodes, type EpicTreeNode } from '../domain/epic.js';
 import {
@@ -3539,7 +3540,7 @@ export class Orchestrator {
         return null;
       });
       if (!reviewState || reviewState.verdict !== 'pass') continue;
-      const receipts = this.mergeVerificationReceipts(config, detailed, reviewState);
+      const receipts = await this.mergeVerificationReceipts(config, detailed, reviewState);
       const inputFingerprint = fingerprint({
         head: detailed.head_sha,
         base: detailed.base_sha,
@@ -4178,10 +4179,10 @@ ${JSON.stringify(episodeSummary, null, 2)}
     log('info',pause?'scheduled_loop_paused':'scheduled_loop_completed',{repo_id:this.repoId ?? undefined,loop_id:loop.id,attempt:prior!.attempt});
   }
 
-  private async recordImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef, workspacePath: string, output: string): Promise<void> {
-    if (!config.merge.enabled || requiredPassingReviews(config.merge) === 0 || !pr.head_sha || !pr.base_sha) return;
+  private async recordImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef, workspacePath: string, output: string): Promise<VerificationReceipt | null> {
+    if (!config.merge.enabled || requiredPassingReviews(config.merge) === 0 || !pr.head_sha || !pr.base_sha) return null;
     const evidence = parseVerificationEvidence(output).filter(entry => entry.kind !== 'review');
-    if (evidence.length === 0 || await runGit(workspacePath, ['rev-parse', 'HEAD']).catch(() => null) !== pr.head_sha) return;
+    if (evidence.length === 0 || await runGit(workspacePath, ['rev-parse', 'HEAD']).catch(() => null) !== pr.head_sha) return null;
     const receipt: VerificationReceipt = {
       receipt_id: randomUUID(),
       verifier: 'implementation-hook',
@@ -4197,12 +4198,39 @@ ${JSON.stringify(episodeSummary, null, 2)}
     this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
       pr_number: pr.number, issue_number: issueNumberFromPullRequestBody(pr.body), receipt,
     });
+    return receipt;
   }
 
-  private mergeVerificationReceipts(config: WorkflowConfig, pr: PullRequestRef, reviewState: PullRequestReviewState): VerificationReceipt[] {
+  private async recoverImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef): Promise<VerificationReceipt | null> {
+    const issueNumber = issueNumberFromPullRequestBody(pr.body);
+    const runs = await scanRunStates(config.workspace.root);
+    for (const run of runs) {
+      const review = run.finalization_context?.review_pr;
+      if ((run.issue_number !== issueNumber && run.issue_number !== pr.number) ||
+          run.status !== 'completed' || run.finalization_step !== 'effects-applied' ||
+          !review || review.followup_only || review.pr_number !== pr.number ||
+          review.head_sha !== pr.head_sha || review.base_sha !== pr.base_sha ||
+          review.review_key !== reviewExecutionKey(config, pr, review.lens) || !run.session_artifact_dir) continue;
+      const sessions = path.resolve(run.workspace_path, '.symphony', 'runs');
+      const artifactDir = path.resolve(run.session_artifact_dir);
+      if (path.dirname(artifactDir) !== sessions) continue;
+      for (const name of ['after_run-recovered.log', 'after_run.log']) {
+        const logPath = path.join(artifactDir, name);
+        if (!(await safeStoragePath(logPath))) continue;
+        const output = await fs.readFile(logPath, 'utf8').catch(() => '');
+        const receipt = await this.recordImplementationEvidence(config, pr, run.workspace_path, output);
+        if (receipt) return receipt;
+      }
+    }
+    return null;
+  }
+
+  private async mergeVerificationReceipts(config: WorkflowConfig, pr: PullRequestRef, reviewState: PullRequestReviewState): Promise<VerificationReceipt[]> {
+    if (requiredPassingReviews(config.merge) === 0) return reviewState.receipts;
     const store = new EpisodeStore(this.storePath(config));
+    let receipt: VerificationReceipt | undefined;
     try {
-      const receipt = store.list({
+      receipt = store.list({
         repo_id: this.durableRepoId(config), episode_id: `pr-${pr.number}`,
         event: 'verification.received', order: 'desc',
       }).map(event => event.payload.receipt as VerificationReceipt | undefined).find(candidate =>
@@ -4210,10 +4238,11 @@ ${JSON.stringify(episodeSummary, null, 2)}
         candidate.head_sha === pr.head_sha && candidate.base_sha === pr.base_sha &&
         candidate.policy_version === (config.merge.policy_version ?? 'v1') &&
         candidate.workflow_sha === config.workflow_sha);
-      return receipt ? [...reviewState.receipts, receipt] : reviewState.receipts;
     } finally {
       store.close();
     }
+    receipt ??= await this.recoverImplementationEvidence(config, pr) ?? undefined;
+    return receipt ? [...reviewState.receipts, receipt] : reviewState.receipts;
   }
 
   private async assessAutonomousMerge(
@@ -4221,8 +4250,9 @@ ${JSON.stringify(episodeSummary, null, 2)}
     tracker: GithubIssueTrackerClient,
     pr: PullRequestRef,
     reviewState: PullRequestReviewState,
-    receipts = this.mergeVerificationReceipts(config, pr, reviewState),
+    receipts?: VerificationReceipt[],
   ): Promise<AutonomousMergeResult> {
+    receipts ??= await this.mergeVerificationReceipts(config, pr, reviewState);
     const linkedIssueNumber = issueNumberFromPullRequestBody(pr.body) ?? reviewState.issue_number;
     const result = await assessAndMaybeMerge({
       config: config.merge,
@@ -4471,17 +4501,19 @@ ${JSON.stringify(episodeSummary, null, 2)}
               add: [LABEL_READY, `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`],
               remove: [LABEL_READY_FOR_HUMAN, LABEL_RUNNING],
             });
-            await this.updateLifecycleState(workspacePath, {
-              add: [LABEL_READY, `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`],
-              remove: [LABEL_READY_FOR_HUMAN, LABEL_RUNNING],
-              workflowState: LABEL_READY,
-            });
-            await this.upsertStatus(
-              config,
-              issue,
-              await this.mustReadRunState(workspacePath),
-              `Code review passed, but merge evidence is incomplete. Symphony queued evidence remediation ${nextIteration}/${config.review.number_of_auto_fix_iterations}: ${missingEvidence.join('; ')}`,
-            );
+            if (runState) {
+              await this.updateLifecycleState(workspacePath, {
+                add: [LABEL_READY, `${LABEL_REVIEW_AUTO_FIX_PREFIX}${nextIteration}`],
+                remove: [LABEL_READY_FOR_HUMAN, LABEL_RUNNING],
+                workflowState: LABEL_READY,
+              });
+              await this.upsertStatus(
+                config,
+                issue,
+                await this.mustReadRunState(workspacePath),
+                `Code review passed, but merge evidence is incomplete. Symphony queued evidence remediation ${nextIteration}/${config.review.number_of_auto_fix_iterations}: ${missingEvidence.join('; ')}`,
+              );
+            }
             queuedForAnotherRun = true;
           }
         }
