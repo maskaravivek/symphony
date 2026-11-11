@@ -10,6 +10,8 @@ import type { VerificationEvidence } from './mergePolicy.js';
 
 const execFileAsync = promisify(execFile);
 
+export class LocalValidationRefsChangedError extends Error {}
+
 /** Use an isolated checkout so a manual retry can also validate an archived run. */
 export async function withPullRequestCheckout<T>(
   source: string, pr: PullRequestRef, validate: (workspacePath: string) => Promise<T>,
@@ -110,7 +112,7 @@ export async function validateLocalPullRequest(options: {
       return [ref, sha];
     }));
     if (remote.get(`refs/heads/${pr.head_ref}`) !== pr.head_sha || remote.get(`refs/heads/${pr.base_ref}`) !== pr.base_sha) {
-      throw new Error('PR head or base changed; local validation must be rerun');
+      throw new LocalValidationRefsChangedError('PR head or base changed; local validation must be rerun');
     }
   };
   await requireUnchanged();

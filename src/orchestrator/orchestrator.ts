@@ -17,7 +17,7 @@ import {
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
 import { requiredPassingReviews, type VerificationReceipt } from '../merge/mergePolicy.js';
-import { PullRequestConflictError, syncPullRequestWithBase, validateLocalPullRequest, withPullRequestCheckout } from '../merge/localValidation.js';
+import { LocalValidationRefsChangedError, PullRequestConflictError, syncPullRequestWithBase, validateLocalPullRequest, withPullRequestCheckout } from '../merge/localValidation.js';
 import { resolvePromotedBase } from '../merge/stackPromotion.js';
 import { dueScheduledLoops } from '../loops/scheduledLoops.js';
 import { parseStructuredReviewResult, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
@@ -4374,15 +4374,27 @@ ${JSON.stringify(episodeSummary, null, 2)}
     try {
       const pr = await this.bringPullRequestUpToDate(config, issue, stalePr, workspacePath);
       if (!pr) throw new Error('The pull request conflicts with its base branch.');
-      state.head_sha = pr.head_sha;
-      state.base_sha = pr.base_sha;
-      const validate = () => validateLocalPullRequest({
-        workspacePath, pullRequest: pr, command, timeoutMs: config.hooks.timeout_ms, logPath, signal: this.shutdownController.signal,
-      });
-      evidence = await validate().catch(error => {
-        if (!(error instanceof HookScriptError) || this.shutdownController.signal.aborted) throw error;
+      const validate = (candidate: PullRequestRef) => {
+        state.head_sha = candidate.head_sha;
+        state.base_sha = candidate.base_sha;
+        return validateLocalPullRequest({
+          workspacePath, pullRequest: candidate, command, timeoutMs: config.hooks.timeout_ms, logPath, signal: this.shutdownController.signal,
+        });
+      };
+      evidence = await validate(pr).catch(async error => {
+        if (this.shutdownController.signal.aborted) throw error;
+        let retryPr = pr;
+        if (error instanceof LocalValidationRefsChangedError) {
+          const latest = await new GithubIssueTrackerClient(config.tracker).fetchPullRequest(pr.number);
+          if (!latest || latest.state !== 'open' || latest.is_draft || latest.head_sha !== pr.head_sha) throw error;
+          const updated = await this.bringPullRequestUpToDate(config, issue, latest, workspacePath);
+          if (!updated) throw new Error('The pull request conflicts with its updated base branch.');
+          retryPr = updated;
+        } else if (!(error instanceof HookScriptError)) {
+          throw error;
+        }
         log('warn', 'pr_local_validation_retry', { ...getIssueLogFields(config, issue, this.repoId), pr_number: pr.number, error: error.message });
-        return validate();
+        return validate(retryPr);
       });
     } catch (error) {
       state.verdict = 'error';

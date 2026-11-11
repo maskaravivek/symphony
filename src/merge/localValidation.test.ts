@@ -104,7 +104,7 @@ test('rejects a base moving during validation', async () => {
 });
 
 test('orchestrator validates without review, respects pauses, invalidates failures, and recovers interrupted finalization', async () => {
-  const { root, options } = await fixture();
+  const { root, remote, options } = await fixture();
   const workflowPath = path.join(root, 'WORKFLOW.md');
   await fs.writeFile(workflowPath, `---
 tracker:
@@ -218,6 +218,10 @@ Prompt.
     assert.ok(!issueLabels.includes('agent-running'), 'recovery must release the running label before merging');
     await internal.reconcileAutonomousMerges(config, new GithubIssueTrackerClient(config.tracker));
     assert.equal(mergeCount, 2, 'recovered validation must become eligible without a review verdict');
+    const movingBase = { ...config, merge: { ...config.merge, validation_command:
+      `git --git-dir='${remote}' update-ref refs/heads/main ${p.head_sha}` } };
+    assert.equal(await internal.recordLocalValidation(movingBase, issue, p, options.workspacePath), true);
+    assert.match(stateComment, new RegExp(`"base_sha": "${p.head_sha}"`));
   } finally {
     globalThis.fetch = originalFetch;
     await orchestrator.shutdown('test');
