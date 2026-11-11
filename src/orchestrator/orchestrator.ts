@@ -20,7 +20,7 @@ import { requiredPassingReviews, type VerificationReceipt } from '../merge/merge
 import { validateLocalPullRequest } from '../merge/localValidation.js';
 import { resolvePromotedBase } from '../merge/stackPromotion.js';
 import { dueScheduledLoops } from '../loops/scheduledLoops.js';
-import { parseStructuredReviewResult, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
+import { parseStructuredReviewResult, parseVerificationEvidence, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
 import { runAgent, assertAgentEligibleCommand } from '../runner/agentRunner.js';
 import { extractCodexThreadId } from '../runner/codexEvents.js';
 import { renderPrompt, renderTemplate } from '../templating/renderPrompt.js';
@@ -1526,6 +1526,7 @@ export class Orchestrator {
               signal: this.shutdownController.signal,
             });
             recoveredHookOutput = result.output;
+            if (reviewPr) await this.recordImplementationEvidence(config, reviewPr, state.workspace_path, result.output);
           } catch (error) {
             const parsed = reviewPr ? parseStructuredReviewResult(hookOutputFromError(error)) : null;
             if (parsed?.verdict !== 'block') throw error;
@@ -3228,6 +3229,7 @@ export class Orchestrator {
                 streamOutput: shouldStreamHookOutput(),
                 signal: this.shutdownController.signal,
               });
+              if (reviewPr) await this.recordImplementationEvidence(config, reviewPr, workspacePath, hookResult.output);
               if (reviewPr && config.review.enabled) {
                 const reviewResult = parseStructuredReviewResult(hookResult.output);
                 if (reviewResult?.verdict === 'block') {
@@ -3537,12 +3539,13 @@ export class Orchestrator {
         return null;
       });
       if (!reviewState || reviewState.verdict !== 'pass') continue;
+      const receipts = this.mergeVerificationReceipts(config, detailed, reviewState);
       const inputFingerprint = fingerprint({
         head: detailed.head_sha,
         base: detailed.base_sha,
         policy: config.merge.policy_version ?? 'v1',
         workflow: config.workflow_sha ?? null,
-        receipts: reviewState.receipts,
+        receipts,
       });
       const assessmentStore = new EpisodeStore(this.storePath(config));
       try {
@@ -3551,7 +3554,7 @@ export class Orchestrator {
       } finally {
         assessmentStore.close();
       }
-      await this.assessAutonomousMerge(config, tracker, detailed, reviewState).catch((err) => {
+      await this.assessAutonomousMerge(config, tracker, detailed, reviewState, receipts).catch((err) => {
         log('warn', 'autonomous_merge_assessment_failed', {
           repo_id: this.repoId ?? undefined,
           owner: config.tracker.owner,
@@ -3685,6 +3688,7 @@ export class Orchestrator {
 
       if (freshCodexApproval) {
         const issueNumber = issueNumberFromPullRequestBody(pr.body);
+        if ([...this.running.values()].some(session => session.issue_number === issueNumber)) continue;
         const issue = issueNumber ? await tracker.fetchIssueByNumber(issueNumber).catch(() => null) : null;
         if (!issue) {
           log('warn', 'codex_approval_issue_lookup_failed', {
@@ -4174,18 +4178,57 @@ ${JSON.stringify(episodeSummary, null, 2)}
     log('info',pause?'scheduled_loop_paused':'scheduled_loop_completed',{repo_id:this.repoId ?? undefined,loop_id:loop.id,attempt:prior!.attempt});
   }
 
+  private async recordImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef, workspacePath: string, output: string): Promise<void> {
+    if (!config.merge.enabled || requiredPassingReviews(config.merge) === 0 || !pr.head_sha || !pr.base_sha) return;
+    const evidence = parseVerificationEvidence(output).filter(entry => entry.kind !== 'review');
+    if (evidence.length === 0 || await runGit(workspacePath, ['rev-parse', 'HEAD']).catch(() => null) !== pr.head_sha) return;
+    const receipt: VerificationReceipt = {
+      receipt_id: randomUUID(),
+      verifier: 'implementation-hook',
+      verdict: 'pass',
+      head_sha: pr.head_sha,
+      base_sha: pr.base_sha,
+      evidence,
+      verified_at: new Date().toISOString(),
+      policy_version: config.merge.policy_version ?? 'v1',
+      workflow_sha: config.workflow_sha,
+      reviewer: null,
+    };
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
+      pr_number: pr.number, issue_number: issueNumberFromPullRequestBody(pr.body), receipt,
+    });
+  }
+
+  private mergeVerificationReceipts(config: WorkflowConfig, pr: PullRequestRef, reviewState: PullRequestReviewState): VerificationReceipt[] {
+    const store = new EpisodeStore(this.storePath(config));
+    try {
+      const receipt = store.list({
+        repo_id: this.durableRepoId(config), episode_id: `pr-${pr.number}`,
+        event: 'verification.received', order: 'desc',
+      }).map(event => event.payload.receipt as VerificationReceipt | undefined).find(candidate =>
+        candidate?.verifier === 'implementation-hook' &&
+        candidate.head_sha === pr.head_sha && candidate.base_sha === pr.base_sha &&
+        candidate.policy_version === (config.merge.policy_version ?? 'v1') &&
+        candidate.workflow_sha === config.workflow_sha);
+      return receipt ? [...reviewState.receipts, receipt] : reviewState.receipts;
+    } finally {
+      store.close();
+    }
+  }
+
   private async assessAutonomousMerge(
     config: WorkflowConfig,
     tracker: GithubIssueTrackerClient,
     pr: PullRequestRef,
     reviewState: PullRequestReviewState,
+    receipts = this.mergeVerificationReceipts(config, pr, reviewState),
   ): Promise<AutonomousMergeResult> {
     const linkedIssueNumber = issueNumberFromPullRequestBody(pr.body) ?? reviewState.issue_number;
     const result = await assessAndMaybeMerge({
       config: config.merge,
       pull_request: pr,
       linked_issue_number: linkedIssueNumber,
-      receipts: reviewState.receipts,
+      receipts,
       github: tracker,
     });
     const inputFingerprint = fingerprint({
@@ -4193,7 +4236,7 @@ ${JSON.stringify(episodeSummary, null, 2)}
       base: pr.base_sha,
       policy: config.merge.policy_version ?? 'v1',
       workflow: config.workflow_sha ?? null,
-      receipts: reviewState.receipts,
+      receipts,
     });
     const decisionPayload = {
       pr_number: pr.number,

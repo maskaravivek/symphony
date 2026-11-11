@@ -54,6 +54,10 @@ function normalizeEvidence(value: unknown): VerificationEvidence[] {
   }).filter((entry) => entry.kind && entry.summary);
 }
 
+export function parseVerificationEvidence(output: string): VerificationEvidence[] {
+  return normalizeEvidence(parseMarkerObject(output, EVIDENCE_MARKER)?.evidence);
+}
+
 function normalizeReviewer(value: unknown): VerificationReviewer | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
@@ -85,7 +89,6 @@ function normalizeFindings(value: unknown): ReviewFinding[] {
 
 export function parseStructuredReviewResult(output: string): StructuredReviewResult | null {
   const payload = parseMarkerObject(output, RESULT_MARKER);
-  const evidencePayload = parseMarkerObject(output, EVIDENCE_MARKER);
   const reviewerPayload = parseMarkerObject(output, REVIEWER_MARKER);
   if (!payload) return null;
 
@@ -102,7 +105,7 @@ export function parseStructuredReviewResult(output: string): StructuredReviewRes
     evidence: [
       { kind: 'review', summary, command: null, artifact: null },
       ...normalizeEvidence(payload.evidence),
-      ...normalizeEvidence(evidencePayload?.evidence),
+      ...parseVerificationEvidence(output),
     ],
     reviewer: normalizeReviewer(reviewerPayload) ?? normalizeReviewer(payload.reviewer),
     structured: true,

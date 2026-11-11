@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { GithubIssueTrackerClient } from '../github/githubClient.js';
+import { GithubIssueTrackerClient, type PullRequestRef } from '../github/githubClient.js';
+import { EpisodeStore } from '../episodes/episodeStore.js';
 import { loadWorkflowFromFile } from '../workflow/loadWorkflow.js';
 import type { WorkflowConfig } from '../workflow/types.js';
 import { Orchestrator } from './orchestrator.js';
@@ -187,7 +189,7 @@ Prompt.
   assert.match(JSON.stringify(stateUpdate?.body), /pending.*false/);
 });
 
-test('merges an elevated PR after one fresh Codex approval with Symphony review disabled', async () => {
+test('merges an elevated PR using implementation test evidence and a later Codex approval', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-pr-shepherd-codex-pass-'));
   const workspaceRoot = path.join(root, 'workspaces');
   const workflowPath = path.join(root, 'WORKFLOW.md');
@@ -206,6 +208,8 @@ merge:
   default_risk: elevated
   require_checks: false
   require_independent_reviews: true
+  required_evidence:
+    elevated: [review, test]
 review:
   enabled: false
   shepherd_pull_requests: true
@@ -218,6 +222,11 @@ agents:
 Prompt.
 `, 'utf8');
   const { config } = await loadWorkflowFromFile(workflowPath);
+  const checkout = await fs.mkdtemp(path.join(root, 'implementation-'));
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('init');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'Implementation');
+  const headSha = git('rev-parse', 'HEAD');
   const calls: Array<{ url: string; method: string; body: unknown }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
@@ -234,7 +243,7 @@ Prompt.
         draft: false,
         labels: [{ name: 'ready-for-human' }],
         html_url: 'https://github.test/example/app/pull/42',
-        head: { ref: 'symphony-17-fix', sha: 'head' },
+        head: { ref: 'symphony-17-fix', sha: headSha },
         base: { ref: 'main', sha: 'base' },
         mergeable_state: 'clean',
       };
@@ -246,7 +255,7 @@ Prompt.
       return jsonResponse([{ id: 91, content: '+1', created_at: '2026-07-17T04:19:12Z', user: { login: 'chatgpt-codex-connector[bot]' } }]);
     }
     if (url.endsWith('/pulls/42/commits?per_page=50')) {
-      return jsonResponse([{ sha: 'head', commit: { committer: { date: '2026-07-17T04:15:28Z' } } }]);
+      return jsonResponse([{ sha: headSha, commit: { committer: { date: '2026-07-17T04:15:28Z' } } }]);
     }
     if (url.endsWith('/issues/17')) {
       return jsonResponse({
@@ -261,8 +270,8 @@ Prompt.
       });
     }
     if (url.endsWith('/pulls/42/files?per_page=50')) return jsonResponse([{ filename: 'src/auth.ts' }]);
-    if (url.endsWith('/commits/head/check-runs?per_page=100')) return jsonResponse({ check_runs: [] });
-    if (url.endsWith('/commits/head/status')) return jsonResponse({ statuses: [] });
+    if (url.endsWith(`/commits/${headSha}/check-runs?per_page=100`)) return jsonResponse({ check_runs: [] });
+    if (url.endsWith(`/commits/${headSha}/status`)) return jsonResponse({ statuses: [] });
     if (url.endsWith('/pulls/42/merge') && method === 'PUT') return jsonResponse({ merged: true, sha: 'merge-sha', message: 'merged' });
     if (url.endsWith('/issues/42/comments') && method === 'POST') return jsonResponse({ id: 92, body: String(body) });
     if (url.endsWith('/issues/42/labels') && method === 'POST') return jsonResponse([]);
@@ -272,11 +281,29 @@ Prompt.
 
   try {
     const orchestrator = new Orchestrator({ workflowPath, repoId: 'app' });
+    const tracker = new GithubIssueTrackerClient(config.tracker);
+    const pr = await tracker.fetchPullRequest(42);
+    assert.ok(pr);
     const shepherd = orchestrator as unknown as {
+      recordImplementationEvidence(config: WorkflowConfig, pr: PullRequestRef, workspacePath: string, output: string): Promise<void>;
       reconcilePullRequestFeedback(config: WorkflowConfig, tracker: GithubIssueTrackerClient): Promise<void>;
     };
-    await shepherd.reconcilePullRequestFeedback(config, new GithubIssueTrackerClient(config.tracker));
+    const output = 'SYMPHONY_VERIFICATION_EVIDENCE: {"evidence":[{"kind":"test","summary":"Targeted tests passed"}]}';
+    await shepherd.recordImplementationEvidence(config, { ...pr, head_sha: 'different-head' }, checkout, output);
+    await shepherd.recordImplementationEvidence(config, pr, checkout, output);
     await orchestrator.shutdown('test');
+
+    const resumed = new Orchestrator({ workflowPath, repoId: 'app' }) as unknown as typeof shepherd;
+    await resumed.reconcilePullRequestFeedback(config, tracker);
+    const store = new EpisodeStore(path.join(workspaceRoot, '.symphony', 'episodes.sqlite'));
+    try {
+      const events = store.list({ episode_id: 'pr-42', event: 'verification.received' });
+      assert.equal(events.length, 2, 'record current-head tests and the independent review only');
+      const merged = store.list({ episode_id: 'pr-42', event: 'merge.merged' })[0];
+      assert.deepEqual(merged?.payload.observed_evidence, ['review', 'test']);
+    } finally {
+      store.close();
+    }
   } finally {
     globalThis.fetch = originalFetch;
   }
