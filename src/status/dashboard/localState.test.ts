@@ -84,3 +84,31 @@ test('only running tasks past stale_after_ms are stale', async () => {
   const local = await loadRepoLocalState(sources.repos[0]!, { now: later });
   assert.deepEqual(local.tasks.filter((task) => task.stale).map((task) => task.task_key), ['x/1']);
 });
+
+test('ready GitHub labels clear a local needs-info pause and a later start clears a dispatch warning', async () => {
+  const fixture = await createDashboardFixture();
+  const sources = await resolveDashboardSources({ config: fixture.configPath, fresh: true });
+  const workspace = path.join(fixture.workspaceRoot, '_pool_1');
+  const { writeRunState } = await import('../runState.js');
+  await writeRunState(workspace, fixtureRunState(workspace, {
+    issue_number: 8,
+    started_at: new Date(FIXTURE_NOW.getTime() - 30_000).toISOString(),
+  }));
+  const local = await loadRepoLocalState(sources.repos[0]!, {
+    now: FIXTURE_NOW,
+    github: {
+      issues: new Map([[3, {
+        number: 3, identifier: 'acme/widget#3', title: 'Answered', labels: ['ready-for-agent'],
+        state: 'open', workflow_state: 'ready-for-agent', url: null, updated_at: FIXTURE_NOW.toISOString(),
+      }]]),
+      pull_requests: [], last_refreshed_at: FIXTURE_NOW.toISOString(), last_error: null,
+      backoff_until: null, refreshing: false,
+    },
+  });
+  const task = local.tasks.find(task => task.issue_number === 3);
+  assert.equal(task?.lifecycle, 'queued');
+  assert.equal(task?.pause_reason, null);
+  assert.equal(local.slots.find(slot => slot.issue_number === 3)?.state, 'paused', 'keep the checkout available for resume');
+  assert.deepEqual(local.dispatch_deferrals, []);
+  assert.ok(!local.summary.flags.some(flag => flag.kind === 'dispatch_deferred'));
+});

@@ -271,7 +271,7 @@ function repoAttention(local: RepoLocalState, now: Date): AttentionItem[] {
     );
   }
 
-  const deferrals = heartbeat?.dispatch_deferrals ?? [];
+  const deferrals = local.dispatch_deferrals;
   if (deferrals.length > 0) {
     const reasons = [...new Set(deferrals.map((entry) => entry.reason))];
     items.push(

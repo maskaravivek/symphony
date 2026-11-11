@@ -170,10 +170,10 @@ function renderHeader() {
           {
             type: 'button',
             disabled: shell.githubRefreshing || null,
-            title: 'Refresh issue titles, labels and pull requests from GitHub',
+            title: 'Refresh dashboard state and GitHub issue and pull request details',
             on: { click: refreshGithub },
           },
-          shell.githubRefreshing ? 'Refreshing…' : 'Refresh GitHub',
+          shell.githubRefreshing ? 'Refreshing…' : 'Refresh dashboard',
         ),
       ),
     ),

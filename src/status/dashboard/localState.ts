@@ -62,6 +62,7 @@ export interface RepoLocalState {
   source: DashboardRepoSource;
   generated_at: string;
   heartbeat: RepoHeartbeat | null;
+  dispatch_deferrals: RepoHeartbeat['dispatch_deferrals'];
   /** GitHub snapshot applied to this state (null when GitHub enrichment is off). */
   github: GithubRepoSnapshot | null;
   /** Issue/PR run states (preparation lease wins over run.json, as `scanRunStates` does). */
@@ -213,6 +214,8 @@ function withGithub(state: RunState, meta: GithubIssueMeta | undefined): RunStat
     issue_state: meta.state,
     labels: meta.labels,
     workflow_state: meta.workflow_state,
+    pause_reason: state.pause_reason === 'needs-info' && meta.labels.includes('ready-for-agent') && !meta.labels.includes('needs-info')
+      ? null : state.pause_reason,
   };
 }
 
@@ -423,6 +426,7 @@ function emptyLocalState(source: DashboardRepoSource, now: Date): RepoLocalState
     source,
     generated_at: now.toISOString(),
     heartbeat: null,
+    dispatch_deferrals: [],
     github: null,
     runs: [],
     loop_runs: new Map(),
@@ -872,7 +876,10 @@ export async function loadRepoLocalState(source: DashboardRepoSource, options: L
   if (heartbeat?.workflow_load_error) {
     flags.push({ kind: 'tick_error', level: 'warn', message: `WORKFLOW.md error (running on last good config): ${heartbeat.workflow_load_error}`, count: null, since: heartbeat.tick_started_at });
   }
-  const deferrals = heartbeat?.dispatch_deferrals ?? [];
+  const deferrals = (heartbeat?.dispatch_deferrals ?? []).filter((entry) =>
+    !runs.some((run) => entry.issue_number !== null && run.issue_number === entry.issue_number &&
+      (run.status === 'agent-running' || run.status === 'finalizing' || run.status === 'completed') &&
+      Date.parse(run.started_at ?? '') >= Date.parse(entry.at)));
   if (deferrals.length > 0) {
     const reasons = [...new Set(deferrals.map((entry) => entry.reason))];
     flags.push({
@@ -958,6 +965,7 @@ export async function loadRepoLocalState(source: DashboardRepoSource, options: L
     source,
     generated_at: now.toISOString(),
     heartbeat,
+    dispatch_deferrals: deferrals,
     github,
     runs,
     loop_runs: loopRuns,

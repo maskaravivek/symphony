@@ -142,10 +142,11 @@ function installFetchMock(issueState: string, calls: { url: string; method: stri
   };
 }
 
-test('sweeps completed workspaces for closed issues when clean_on_terminal is enabled', async () => {
+test('sweeps workspaces for closed issues, including orphaned retry reservations', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-sweep-workspace-'));
   const workflowPath = await writeWorkflow(workspaceRoot);
   const workspacePath = await writeWorkspace(workspaceRoot);
+  const retryPath = await writeWorkspace(workspaceRoot, '_pool_1', { status: 'retry-wait' });
   const calls: { url: string; method: string }[] = [];
   const restoreFetch = installFetchMock('closed', calls);
 
@@ -159,10 +160,11 @@ test('sweeps completed workspaces for closed issues when clean_on_terminal is en
   }
 
   await assert.rejects(fs.access(workspacePath));
+  await assert.rejects(fs.access(retryPath));
   const entries = await fs.readdir(workspaceRoot);
   assert.deepEqual(entries.sort(), ['.symphony', '_archives']);
   const archives = await fs.readdir(path.join(workspaceRoot, '_archives'));
-  assert.equal(archives.length, 1);
+  assert.equal(archives.length, 2);
   assert.ok(calls.some((call) => call.url === 'https://api.github.test/repos/mangoappstudio/mdedit/issues/42'));
 });
 

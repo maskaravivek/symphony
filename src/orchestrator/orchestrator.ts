@@ -1585,7 +1585,7 @@ export class Orchestrator {
       if (this.running.has(state.issue_id)) continue;
       if (this.recoveringFinalizations.has(state.issue_id)) continue;
       if (state.status === 'agent-running' && isProcessAlive(state.worker_pid)) continue;
-      if (state.status === 'finalizing' || state.status === 'retry-wait') continue;
+      if (state.status === 'finalizing' || (state.status === 'retry-wait' && this.retries.has(state.issue_id))) continue;
       if (!state.issue_number) continue;
 
       let issue: Issue | null;
