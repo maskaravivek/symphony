@@ -358,6 +358,19 @@ async function main(): Promise<void> {
     });
 
   program
+    .command('validate-pr <number>')
+    .description('Retry local merge validation for an existing Symphony PR')
+    .requiredOption('-w, --workflow <path>', 'Path to WORKFLOW.md')
+    .action(async (number: string, options: { workflow: string }) => {
+      if (!/^[1-9][0-9]*$/.test(number) || !Number.isSafeInteger(Number(number))) {
+        throw new Error('Provide a valid PR number.');
+      }
+      const workflowPath = await resolveWorkflowPath(options.workflow);
+      await new Orchestrator({ workflowPath }).retryPullRequestValidation(Number(number));
+      process.stdout.write(`PR #${number} passed local merge validation.\n`);
+    });
+
+  program
     .command('status')
     .description('Show issue workspace and epic coordinator status')
     .option('-c, --config <path>', 'Path to symphony.config.yml')

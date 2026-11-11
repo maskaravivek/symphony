@@ -10,7 +10,7 @@ import type { WorkflowConfig } from '../workflow/types.js';
 import type { Issue } from '../domain/issue.js';
 import { Orchestrator } from '../orchestrator/orchestrator.js';
 import { readRunState, writeRunState } from '../status/runState.js';
-import { validateLocalPullRequest } from './localValidation.js';
+import { PullRequestConflictError, syncPullRequestWithBase, validateLocalPullRequest } from './localValidation.js';
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'symphony-local-validation-'));
@@ -54,6 +54,48 @@ test('rejects stale local or remote commits before running checks', async () => 
   await assert.rejects(validateLocalPullRequest({ ...options, pullRequest: { ...options.pullRequest, head_sha: options.pullRequest.base_sha } }), /head does not match/);
   execFileSync('git', ['--git-dir', remote, 'update-ref', 'refs/heads/main', options.pullRequest.head_sha!]);
   await assert.rejects(validateLocalPullRequest(options), /head or base changed/);
+});
+
+test('syncPullRequestWithBase merges a moved base into the branch, pushes, and validation then passes', async () => {
+  const { options, remote, git } = await fixture();
+  const workspacePath = options.workspacePath;
+  // Advance the remote base with a non-conflicting commit while the branch sits where it was.
+  const scratch = path.join(path.dirname(workspacePath), 'other');
+  execFileSync('git', ['clone', '-q', remote, scratch], { stdio: 'ignore' });
+  const other = (...args: string[]) => execFileSync('git', args, { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  other('config', 'user.name', 'Test'); other('config', 'user.email', 'test@example.com');
+  await fs.writeFile(path.join(scratch, 'other.txt'), 'main moved');
+  other('add', 'other.txt'); other('commit', '-qm', 'main moved'); other('push', '-q', 'origin', 'main');
+  const movedBase = other('rev-parse', 'HEAD');
+
+  const untouched = await syncPullRequestWithBase({ ...options, pullRequest: { ...options.pullRequest, base_sha: options.pullRequest.base_sha } });
+  assert.equal(untouched.updated, true, 'the branch was behind the moved base');
+  assert.equal(untouched.base_sha, movedBase);
+  assert.equal(git('rev-parse', 'HEAD'), untouched.head_sha);
+  assert.equal(git('status', '--porcelain'), '');
+  assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'refs/heads/symphony-1'], { encoding: 'utf8' }).trim(), untouched.head_sha, 'merge commit was pushed');
+  execFileSync('git', ['merge-base', '--is-ancestor', movedBase, 'HEAD'], { cwd: workspacePath });
+
+  const again = await syncPullRequestWithBase({ ...options, pullRequest: { ...options.pullRequest, head_sha: untouched.head_sha } });
+  assert.equal(again.updated, false, 'already up to date');
+
+  const evidence = await validateLocalPullRequest({ ...options, pullRequest: { ...options.pullRequest, head_sha: untouched.head_sha, base_sha: movedBase } });
+  assert.equal(evidence.kind, 'validation');
+});
+
+test('syncPullRequestWithBase restores the workspace and reports conflicts', async () => {
+  const { options, remote, git } = await fixture();
+  const scratch = path.join(path.dirname(options.workspacePath), 'other');
+  execFileSync('git', ['clone', '-q', remote, scratch], { stdio: 'ignore' });
+  const other = (...args: string[]) => execFileSync('git', args, { cwd: scratch, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  other('config', 'user.name', 'Test'); other('config', 'user.email', 'test@example.com');
+  await fs.writeFile(path.join(scratch, 'app.txt'), 'conflicting main change');
+  other('commit', '-qam', 'conflict'); other('push', '-q', 'origin', 'main');
+
+  await assert.rejects(syncPullRequestWithBase(options), (error: unknown) => error instanceof PullRequestConflictError && /app\.txt/.test(error.message));
+  assert.equal(git('rev-parse', 'HEAD'), options.pullRequest.head_sha, 'head untouched');
+  assert.equal(git('status', '--porcelain'), '', 'merge aborted cleanly');
+  assert.equal(execFileSync('git', ['--git-dir', remote, 'rev-parse', 'refs/heads/symphony-1'], { encoding: 'utf8' }).trim(), options.pullRequest.head_sha, 'nothing pushed');
 });
 
 test('rejects a base moving during validation', async () => {
@@ -129,7 +171,7 @@ Prompt.
   };
   const orchestrator = new Orchestrator({ workflowPath, repoId: 'app' });
   const internal = orchestrator as unknown as {
-    recordLocalValidation(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, workspace: string): Promise<void>;
+    recordLocalValidation(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, workspace: string): Promise<boolean>;
     reconcileAutonomousMerges(config: WorkflowConfig, github: GithubIssueTrackerClient): Promise<void>;
     recoverFinalizingRuns(config: WorkflowConfig, github: GithubIssueTrackerClient): Promise<void>;
   };
@@ -148,10 +190,15 @@ Prompt.
     await internal.reconcileAutonomousMerges(config, new GithubIssueTrackerClient(config.tracker));
     assert.equal(mergeCount, 1);
     const failing = { ...config, merge: { ...config.merge, validation_command: 'exit 12' } };
-    await assert.rejects(internal.recordLocalValidation(failing, issue, p, options.workspacePath), /code 12/);
-    assert.match(stateComment, /"verdict": "unavailable"/);
+    assert.equal(await internal.recordLocalValidation(failing, issue, p, options.workspacePath), false);
+    assert.match(stateComment, /"verdict": "error"/);
+    assert.match(stateComment, /code 12/);
     await internal.reconcileAutonomousMerges(config, new GithubIssueTrackerClient(config.tracker));
     assert.equal(mergeCount, 1, 'an old successful receipt must not survive a failed rerun');
+    const marker = path.join(root, 'validation-attempted');
+    const retryable = { ...config, merge: { ...config.merge, validation_command:
+      `if [ ! -f '${marker}' ]; then touch '${marker}'; exit 12; fi` } };
+    assert.equal(await internal.recordLocalValidation(retryable, issue, p, options.workspacePath), true);
     await writeRunState(options.workspacePath, {
       repo_id: 'app', owner: 'example', repo: 'app', issue_id: issue.id, issue_number: 1,
       issue_identifier: issue.identifier, issue_url: issue.url, workspace_path: options.workspacePath,

@@ -59,6 +59,8 @@ merge:
 
 Use the project's actual check commands. Symphony runs them after successful PR finalization, requires a clean workspace with matching local and remote head/base commits, and records validation evidence without inventing a review approval. A failed or interrupted rerun invalidates the previous success. Eligible PRs merge on a subsequent polling cycle; pending or failing GitHub checks still block merging even when checks are optional. Paused, blocked, closed, and actively running linked issues are excluded. Recovery revalidates interrupted runs. An agent's successful exit alone is insufficient, and repositories using the default review policy are unaffected.
 
+When the local validation command fails, Symphony gives the check one retry on the same PR. If it still fails, the PR records the failure and stays available for human review. After fixing the cause, run `symphony validate-pr <PR-number> --workflow <path-to-WORKFLOW.md>` to rerun the check in an isolated checkout. A passing retry restores eligibility for automatic merging, including for issues previously marked `symphony-failed`.
+
 ## Daily storage maintenance
 
 Symphony runs storage maintenance on the first eligible tick and every 24 hours afterward, in both single- and multi-repository mode. Each workspace root saves its completed pass in `.symphony/storage-maintenance.json`, so restarting does not reset the schedule. Maintenance holds the workflow lock and defers while the repository has active workers. It does not need GitHub to be available. No separate scheduled job is needed; Symphony must be running.

@@ -17,7 +17,7 @@ import {
 import { EpisodeStore } from '../episodes/episodeStore.js';
 import { assessAndMaybeMerge, type AutonomousMergeResult } from '../merge/autonomousMerge.js';
 import { requiredPassingReviews, type VerificationReceipt } from '../merge/mergePolicy.js';
-import { validateLocalPullRequest } from '../merge/localValidation.js';
+import { PullRequestConflictError, syncPullRequestWithBase, validateLocalPullRequest, withPullRequestCheckout } from '../merge/localValidation.js';
 import { resolvePromotedBase } from '../merge/stackPromotion.js';
 import { dueScheduledLoops } from '../loops/scheduledLoops.js';
 import { parseStructuredReviewResult, reviewNeedsHuman, type StructuredReviewResult } from '../review/reviewResult.js';
@@ -1474,7 +1474,9 @@ export class Orchestrator {
         const reviewPr = savedReview
           ? await tracker.fetchPullRequest(savedReview.pr_number).catch(() => null)
           : await this.findReviewPullRequest(config, issue, undefined);
-        if (savedReview && (!reviewPr || reviewPr.head_sha !== savedReview.head_sha || reviewPr.base_sha !== savedReview.base_sha)) {
+        const localValidationOnly = config.merge.enabled && !config.review.enabled && requiredPassingReviews(config.merge) === 0;
+        if (savedReview && (!reviewPr || (!localValidationOnly &&
+            (reviewPr.head_sha !== savedReview.head_sha || reviewPr.base_sha !== savedReview.base_sha)))) {
           throw new Error(`PR #${savedReview.pr_number} changed while finalization was interrupted`);
         }
         let reviewResult: StructuredReviewResult | null = null;
@@ -3304,9 +3306,8 @@ export class Orchestrator {
             }
           }
 
-          if (reviewPr && config.merge.enabled && requiredPassingReviews(config.merge) === 0) {
-            await this.recordLocalValidation(config, issue, reviewPr, workspacePath);
-          }
+          const localValidationPassed = reviewPr && config.merge.enabled && requiredPassingReviews(config.merge) === 0
+            ? await this.recordLocalValidation(config, issue, reviewPr, workspacePath) : null;
 
           if (!isConflictResolution && !isPullRequestReview && !continuationQueued) {
             const dirtyPr = await this.findDirtyPullRequestForIssue(config, issue);
@@ -3381,8 +3382,10 @@ export class Orchestrator {
             config,
             issue,
             await this.mustReadRunState(workspacePath),
-            config.merge.enabled && requiredPassingReviews(config.merge) === 0
-              ? 'Autonomous run completed. Local validation passed; PR is queued for automatic merging.'
+            localValidationPassed !== null
+              ? localValidationPassed
+                ? 'Autonomous run completed. Local validation passed; PR is queued for automatic merging.'
+                : 'Implementation completed. Local validation needs attention before automatic merging. See the PR for details.'
               : isPullRequestReview ? 'PR review feedback addressed. PR is ready for human review.' : 'Autonomous run completed. Issue is ready for human review.',
           );
           await updateRunState(workspacePath, (cur) => cur ? { ...cur, status: 'completed', finalization_step: 'effects-applied', workflow_outcome: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() } : null);
@@ -4284,14 +4287,81 @@ ${JSON.stringify(episodeSummary, null, 2)}
     }
   }
 
-  private async recordLocalValidation(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, workspacePath: string): Promise<void> {
+  /**
+   * A PR branch that is behind its base cannot pass validation (the base must be an ancestor
+   * of the head). Merge the base in and push, then reload the PR so validation binds to the
+   * new head. Returns null when the merge conflicts: the caller skips validation and the
+   * regular dirty-PR path queues conflict resolution.
+   */
+  private async bringPullRequestUpToDate(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, workspacePath: string): Promise<PullRequestRef | null> {
+    const fields = { ...getIssueLogFields(config, issue, this.repoId), pr_number: pr.number };
+    let sync;
+    try {
+      sync = await syncPullRequestWithBase({ workspacePath, pullRequest: pr, signal: this.shutdownController.signal });
+    } catch (error) {
+      if (!(error instanceof PullRequestConflictError)) throw error;
+      log('warn', 'pr_base_merge_conflict', { ...fields, event: 'pr_base_merge_conflict', error: error.message });
+      this.appendEpisodeEvent(config, `pr-${pr.number}`, 'pr.base_merge_conflict', { pr_number: pr.number, issue_number: issue.number, base_ref: pr.base_ref, reason: error.message });
+      return null;
+    }
+    if (!sync.updated) return { ...pr, base_sha: sync.base_sha };
+    log('info', 'pr_branch_updated_from_base', { ...fields, event: 'pr_branch_updated_from_base', base_ref: pr.base_ref, head_sha: sync.head_sha, base_sha: sync.base_sha });
+    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'pr.branch_updated', { pr_number: pr.number, issue_number: issue.number, base_ref: pr.base_ref, head_sha: sync.head_sha, base_sha: sync.base_sha });
+    const client = new GithubIssueTrackerClient(config.tracker);
+    const refreshed = await client.fetchPullRequest(pr.number).catch(() => null);
+    return refreshed?.head_sha === sync.head_sha ? refreshed : { ...pr, head_sha: sync.head_sha, base_sha: sync.base_sha };
+  }
+
+  async retryPullRequestValidation(prNumber: number): Promise<void> {
+    const { config } = await loadWorkflowFromFile(this.workflowPath);
+    if (!config.merge.enabled || requiredPassingReviews(config.merge) !== 0 || !config.workspace.checkout) {
+      throw new Error('This command requires a linked checkout and local validation for automatic merging.');
+    }
+    const tracker = new GithubIssueTrackerClient(config.tracker);
+    const pr = await tracker.fetchPullRequest(prNumber);
+    if (!pr || pr.state !== 'open' || pr.is_draft || !this.isSymphonyPullRequest(config, pr)) {
+      throw new Error(`PR #${prNumber} must be an open, non-draft Symphony PR.`);
+    }
+    const issue = await tracker.fetchIssueByNumber(issueNumberFromPullRequestBody(pr.body)!);
+    if (!issue || !config.tracker.active_states.includes(issue.state) ||
+        issue.labels.some(label => [LABEL_READY, LABEL_RUNNING, 'blocked', 'needs-info', 'interactive', 'wontfix'].includes(label))) {
+      throw new Error(`PR #${prNumber} has an active dispatch or an issue that cannot be validated.`);
+    }
+    const logPath = path.join(config.workspace.root, '.symphony', 'validation', `pr-${prNumber}-${randomUUID()}.log`);
+    const passed = await withPullRequestCheckout(config.workspace.checkout.source, pr, workspacePath =>
+      this.recordLocalValidation(config, issue, pr, workspacePath, logPath));
+    if (!passed) throw new Error(`PR #${prNumber} did not pass local validation. See ${logPath} and the PR status comment.`);
+    if (issue.labels.includes(LABEL_FAILED)) {
+      await this.applyLabels(config, issue.number!, { add: [LABEL_READY_FOR_HUMAN], remove: [LABEL_FAILED] });
+    }
+  }
+
+  private async recordLocalValidation(config: WorkflowConfig, issue: Issue, pr: PullRequestRef, workspacePath: string, logPath?: string): Promise<boolean> {
+    try {
+      const lock = await acquireWorkflowLock({
+        workspaceRoot: path.join(config.workspace.root, '.symphony', 'validation', `pr-${pr.number}`),
+        repoId: this.repoId, owner: config.tracker.owner, repo: config.tracker.repo, workflowPath: this.workflowPath,
+      });
+      if (!lock.acquired) throw new Error('Local validation is already running for this PR');
+      try {
+        return await this.runLocalValidation(config, issue, pr, workspacePath, logPath);
+      } finally {
+        await lock.lock.release();
+      }
+    } catch (error) {
+      log('error', 'pr_local_validation_failed', { ...getIssueLogFields(config, issue, this.repoId), pr_number: pr.number, error: dispatchErrorDetails(error) });
+      return false;
+    }
+  }
+
+  private async runLocalValidation(config: WorkflowConfig, issue: Issue, stalePr: PullRequestRef, workspacePath: string, retryLogPath?: string): Promise<boolean> {
     const command = config.merge.validation_command;
     if (!command) throw new Error('Review-free automatic merging requires a local validation command');
-    const previous = await this.readPullRequestReviewState(config, pr.number);
+    const previous = await this.readPullRequestReviewState(config, stalePr.number);
     const state: PullRequestReviewState = {
-      version: 1, pr_number: pr.number,
-      issue_number: issueNumberFromPullRequestBody(pr.body) ?? issue.number ?? null,
-      head_ref: pr.head_ref, head_sha: pr.head_sha, base_ref: pr.base_ref, base_sha: pr.base_sha,
+      version: 1, pr_number: stalePr.number,
+      issue_number: issueNumberFromPullRequestBody(stalePr.body) ?? issue.number ?? null,
+      head_ref: stalePr.head_ref, head_sha: stalePr.head_sha, base_ref: stalePr.base_ref, base_sha: stalePr.base_sha,
       verdict: 'unavailable', reason: 'Local validation is running.', reviewed_at: new Date().toISOString(),
       auto_fix_iterations: previous?.auto_fix_iterations ?? 0, receipts: previous?.receipts ?? [],
       last_review_comment_id: previous?.last_review_comment_id ?? null,
@@ -4299,14 +4369,32 @@ ${JSON.stringify(episodeSummary, null, 2)}
     // Invalidate an older success before a rerun; failure or interruption must not leave it mergeable.
     await this.writePullRequestReviewState(config, state);
     const run = await readRunState(workspacePath);
-    const logPath = path.join(run?.session_artifact_dir ?? path.join(workspacePath, '.symphony'), 'local-validation.log');
-    const evidence = await validateLocalPullRequest({
-      workspacePath, pullRequest: pr, command, timeoutMs: config.hooks.timeout_ms,
-      logPath, signal: this.shutdownController.signal,
-    });
+    const logPath = retryLogPath ?? path.join(run?.session_artifact_dir ?? path.join(workspacePath, '.symphony'), 'local-validation.log');
+    let evidence;
+    try {
+      const pr = await this.bringPullRequestUpToDate(config, issue, stalePr, workspacePath);
+      if (!pr) throw new Error('The pull request conflicts with its base branch.');
+      state.head_sha = pr.head_sha;
+      state.base_sha = pr.base_sha;
+      const validate = () => validateLocalPullRequest({
+        workspacePath, pullRequest: pr, command, timeoutMs: config.hooks.timeout_ms, logPath, signal: this.shutdownController.signal,
+      });
+      evidence = await validate().catch(error => {
+        if (!(error instanceof HookScriptError) || this.shutdownController.signal.aborted) throw error;
+        log('warn', 'pr_local_validation_retry', { ...getIssueLogFields(config, issue, this.repoId), pr_number: pr.number, error: error.message });
+        return validate();
+      });
+    } catch (error) {
+      state.verdict = 'error';
+      state.reason = `Local validation failed: ${dispatchErrorDetails(error)}`;
+      state.reviewed_at = new Date().toISOString();
+      await this.writePullRequestReviewState(config, state);
+      log('warn', 'pr_local_validation_failed', { ...getIssueLogFields(config, issue, this.repoId), pr_number: state.pr_number, error: state.reason });
+      return false;
+    }
     const receipt: VerificationReceipt = {
       receipt_id: randomUUID(), verifier: 'local-validation', verdict: 'pass',
-      head_sha: pr.head_sha!, base_sha: pr.base_sha!, evidence: [evidence],
+      head_sha: state.head_sha!, base_sha: state.base_sha!, evidence: [evidence],
       verified_at: new Date().toISOString(), policy_version: config.merge.policy_version ?? 'v1',
       workflow_sha: config.workflow_sha, reviewer: null,
       author_execution_id: run?.agent_thread_id ?? run?.session_id ?? null,
@@ -4316,9 +4404,10 @@ ${JSON.stringify(episodeSummary, null, 2)}
     state.reviewed_at = receipt.verified_at;
     state.receipts = upsertVerificationReceipt(state.receipts, receipt);
     await this.writePullRequestReviewState(config, state);
-    this.appendEpisodeEvent(config, `pr-${pr.number}`, 'verification.received', {
-      pr_number: pr.number, issue_number: state.issue_number, receipt,
+    this.appendEpisodeEvent(config, `pr-${state.pr_number}`, 'verification.received', {
+      pr_number: state.pr_number, issue_number: state.issue_number, receipt,
     });
+    return true;
   }
 
   private async createVerificationReceipt(
